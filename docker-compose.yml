@@ -1,0 +1,52 @@
+services:
+  # === Backend API ===
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./src:/app/src
+    env_file:
+      - .env
+    depends_on:
+      - chromadb
+    restart: unless-stopped
+    networks:
+      - ast-network
+
+  # === Frontend ===
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - ast-network
+
+  # === ChromaDB ===
+  chromadb:
+    image: chromadb/chroma:latest
+    ports:
+      - "8100:8000"
+    volumes:
+      - chroma-data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+    restart: unless-stopped
+    networks:
+      - ast-network
+
+volumes:
+  chroma-data:
+
+networks:
+  ast-network:
+    driver: bridge
