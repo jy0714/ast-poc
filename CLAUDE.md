@@ -156,20 +156,20 @@ docker compose up --build
 2. ~~PST 파서 구현 (pypff + libratom + Mock)~~ ✅
 3. ~~v5 아키텍처 확정~~ ✅
 
-### Phase 2 — 인덱싱 파이프라인 (Phase A)
-4. 문서 파서 구현 (PDF, DOCX, PPTX, XLSX)
-5. 스마트 청킹 엔진 (문서/채팅/이메일스레드/첨부)
-6. 메타데이터 부착 + 토픽 태깅
-7. Ollama 임베딩 연동
-8. ChromaDB 벡터 저장 + BM25 인덱스
-9. 케이스 관리 API (CRUD + 라이프사이클)
-10. 인덱싱 파이프라인 오케스트레이터
+### Phase 2 — 인덱싱 파이프라인 (Phase A) ✅
+4. ~~문서 파서 구현 (PDF, DOCX, PPTX, XLSX, EML, MSG)~~ ✅
+5. ~~스마트 청킹 엔진 (문서/채팅/이메일스레드/첨부)~~ ✅
+6. ~~메타데이터 부착 + 토픽 태깅~~ ✅
+7. ~~Ollama 임베딩 연동~~ ✅
+8. ~~ChromaDB 벡터 저장 + BM25 인덱스~~ ✅
+9. ~~케이스 관리 API (CRUD + 라이프사이클)~~ ✅
+10. ~~인덱싱 파이프라인 오케스트레이터~~ ✅
 
-### Phase 3 — RAG 질의 (Phase B)
-11. 질의 파서 (의도 분석 + 필터 추출)
-12. 하이브리드 검색 (벡터 + BM25 + Rank Fusion)
-13. LLM 라우터 (보안 모드 분기)
-14. 스트리밍 응답 + 출처 표시
+### Phase 3 — RAG 질의 (Phase B) ✅
+11. ~~질의 파서 (의도 분석 + 필터 추출)~~ ✅ — 규칙 기반, 향후 LLM 기반으로 튜닝 예정
+12. ~~하이브리드 검색 (벡터 + BM25 + Rank Fusion)~~ ✅
+13. ~~LLM 라우터 (보안 모드 분기)~~ ✅
+14. ~~스트리밍 응답 + 출처 표시~~ ✅
 
 ### Phase 4 — 프론트엔드
 15. Admin UI (케이스 관리, 데이터 소스 설정, 인덱싱 모니터)
@@ -179,3 +179,27 @@ docker compose up --build
 17. Docker 컨테이너화
 18. 통합 테스트
 19. 성능 튜닝 (1TB 데이터 기준)
+
+## 현재 상태 (2026-03-22 기준)
+
+- **커밋**: `db49a44` — Phase 2 + Phase 3 구현 완료
+- **테스트**: 273 passed, 4 skipped (Ollama 미설치 환경에서 skip)
+- **다음 작업**: Phase 4 (프론트엔드) 시작 예정
+
+### 주요 구현 파일 요약
+
+| 모듈 | 핵심 파일 | 설명 |
+|---|---|---|
+| 문서 파서 | `src/parsers/document_parser.py` | PDF/DOCX/PPTX/XLSX/EML/MSG 지원 |
+| PST 파서 | `src/parsers/pst_parser.py` | PST 이메일/채팅/첨부 파싱 |
+| 청킹 | `src/chunkers/chunker.py` | 문서/채팅/이메일/첨부 4종 청커 |
+| 메타데이터 | `src/chunkers/metadata_enricher.py` | 토픽 추출 + case_id 부착 |
+| 임베딩 | `src/embeddings/embedding_service.py` | Ollama nomic-embed-text |
+| 벡터 저장소 | `src/vectorstore/vector_store.py` | ChromaDB + BM25 + RRF 하이브리드 |
+| 케이스 관리 | `src/cases/case_store.py` | JSON 파일 기반 CRUD + 라이프사이클 |
+| 인덱싱 | `src/indexing/pipeline.py` | 파이프라인 오케스트레이터 (백그라운드 실행) |
+| 질의 파서 | `src/rag/query_parser.py` | 규칙 기반 (소스타입/날짜/참여자/의도) |
+| RAG 엔진 | `src/rag/engine.py` | 검색→컨텍스트→LLM 응답 생성 |
+| LLM 라우터 | `src/llm/router.py` | 보안 ON=Ollama, OFF=OpenAI |
+| Admin API | `src/api/routes/cases.py`, `indexing.py` | 케이스 CRUD + 인덱싱 관리 |
+| Analyst API | `src/api/routes/chat.py` | RAG 질의 (동기+스트리밍+케이스목록) |
