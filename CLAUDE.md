@@ -182,9 +182,31 @@ docker compose up --build
 
 ## 현재 상태 (2026-03-22 기준)
 
-- **커밋**: `db49a44` — Phase 2 + Phase 3 구현 완료
-- **테스트**: 273 passed, 4 skipped (Ollama 미설치 환경에서 skip)
+- **최신 커밋**: `139db6f` (main)
+- **테스트**: 291 passed (단위 277 + 통합 14), 0 skipped
+- **환경**: Python 3.14.2, Windows 11, VS 2026 Community (C++ 빌드 도구 설치됨)
+- **chroma-hnswlib**: 0.7.6 (C++ 빌드 완료 — 한글 Windows에서 DISTUTILS_USE_SDK=1 필요)
 - **다음 작업**: Phase 4 (프론트엔드) 시작 예정
+
+### 환경 이슈 (chroma-hnswlib 빌드)
+
+한글 Windows + VS 2026(v18)에서 `pip install chroma-hnswlib`가 실패함.
+- 원인: `setuptools`의 `_get_vc_env()`가 `cmd /u` (UTF-16LE)로 vcvarsall.bat 출력을 파싱할 때 한글 인코딩 깨짐 → MSVC 못 찾음
+- 해결: vcvars64.bat 환경 로드 후 `DISTUTILS_USE_SDK=1` 설정하여 빌드
+```python
+# 빌드 스크립트 (scripts/ 참고)
+result = subprocess.run(
+    ['cmd', '/c', vcvars64_path, '&&', 'set'],
+    capture_output=True, text=True
+)
+env = {**os.environ}
+for line in result.stdout.splitlines():
+    if '=' in line:
+        key, _, val = line.partition('=')
+        env[key] = val
+env['DISTUTILS_USE_SDK'] = '1'
+subprocess.run(['pip', 'install', 'chroma-hnswlib', '--no-build-isolation'], env=env)
+```
 
 ### 주요 구현 파일 요약
 
@@ -203,3 +225,43 @@ docker compose up --build
 | LLM 라우터 | `src/llm/router.py` | 보안 ON=Ollama, OFF=OpenAI |
 | Admin API | `src/api/routes/cases.py`, `indexing.py` | 케이스 CRUD + 인덱싱 관리 |
 | Analyst API | `src/api/routes/chat.py` | RAG 질의 (동기+스트리밍+케이스목록) |
+
+### API 엔드포인트 목록
+
+| 구분 | 경로 | 메서드 | 설명 |
+|---|---|---|---|
+| Admin | `/api/admin/cases/` | POST | 케이스 생성 (201) |
+| Admin | `/api/admin/cases/` | GET | 케이스 목록 (?status= 필터) |
+| Admin | `/api/admin/cases/{id}` | GET | 케이스 상세 조회 |
+| Admin | `/api/admin/cases/{id}` | PATCH | 데이터 소스 추가 |
+| Admin | `/api/admin/cases/{id}` | DELETE | 케이스 삭제 (벡터DB 포함) |
+| Admin | `/api/admin/cases/{id}/archive` | POST | 케이스 보관 |
+| Admin | `/api/admin/indexing/start` | POST | 인덱싱 시작 (백그라운드) |
+| Admin | `/api/admin/indexing/stop/{id}` | POST | 인덱싱 중단 |
+| Admin | `/api/admin/indexing/progress/{id}` | GET | 진행률 조회 |
+| Admin | `/api/admin/indexing/increment/{id}` | POST | 증분 인덱싱 |
+| Analyst | `/api/analyst/chat/` | POST | RAG 동기 질의 |
+| Analyst | `/api/analyst/chat/stream` | POST | SSE 스트리밍 질의 |
+| Analyst | `/api/analyst/chat/cases` | GET | 분석 가능 케이스 목록 |
+| 공통 | `/health` | GET | 헬스체크 |
+
+### 테스트 구조
+
+| 경로 | 테스트 수 | 설명 |
+|---|---|---|
+| `tests/unit/test_pst_parser.py` | 15 | PST 파서 |
+| `tests/unit/test_document_parser.py` | 30 | 문서 파서 (PDF/DOCX/PPTX/XLSX/EML/MSG) |
+| `tests/unit/test_chunker.py` | 21 | 4종 청커 |
+| `tests/unit/test_metadata_enricher.py` | 16 | 메타데이터 + 토픽 추출 |
+| `tests/unit/test_embedding_service.py` | 9 | Ollama 임베딩 |
+| `tests/unit/test_vector_store.py` | 12 | ChromaDB + BM25 + RRF |
+| `tests/unit/test_config.py` | 3 | 설정 |
+| `tests/unit/test_case_store.py` | 30 | 케이스 CRUD + 라이프사이클 |
+| `tests/unit/test_cases_api.py` | 16 | 케이스 API |
+| `tests/unit/test_indexing_pipeline.py` | 25 | 인덱싱 파이프라인 |
+| `tests/unit/test_indexing_api.py` | 9 | 인덱싱 API |
+| `tests/unit/test_query_parser.py` | 30 | 질의 파서 |
+| `tests/unit/test_llm_router.py` | 8 | LLM 라우터 |
+| `tests/unit/test_rag_engine.py` | 11 | RAG 엔진 |
+| `tests/unit/test_chat_api.py` | 11 | 채팅 API |
+| `tests/integration/test_e2e_pipeline.py` | 14 | E2E 통합 (생성→인덱싱→질의→보관→삭제) |
