@@ -1,20 +1,26 @@
-FROM python:3.11-slim
+FROM python:3.11-slim AS base
 
 WORKDIR /app
 
-# System dependencies for PST parsing
+# System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    libpff-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Python dependencies
+# Python dependencies (install first for layer caching)
 COPY pyproject.toml .
-RUN pip install --no-cache-dir -e "."
+RUN pip install --no-cache-dir . && \
+    pip install --no-cache-dir httpx
 
 # Application code
 COPY src/ src/
 
+# Data directories
+RUN mkdir -p data/input/pst data/input/documents data/processed data/vectordb data/cases data/bm25_index
+
 EXPOSE 8000
 
-CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+
+CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

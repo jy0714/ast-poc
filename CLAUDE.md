@@ -114,6 +114,11 @@ ast-poc/
 ├── docs/
 ├── scripts/
 ├── docker/
+│   ├── Dockerfile.backend      # Python 3.11 + uvicorn
+│   ├── Dockerfile.frontend     # Node build → nginx 서빙
+│   └── nginx.conf              # SPA + API 프록시
+├── docker-compose.yml          # backend + frontend + chromadb + ollama
+├── .dockerignore
 └── data/                       # gitignore됨
     ├── input/{pst,documents}/
     ├── processed/
@@ -145,8 +150,15 @@ ruff format src/
 # 테스트
 pytest tests/ -v
 
-# Docker
+# Docker (전체 스택)
 docker compose up --build
+
+# Docker 초기 설정 (모델 다운로드 포함)
+bash scripts/docker-init.sh
+
+# Docker 개별 서비스
+docker compose up backend       # 백엔드만
+docker compose logs -f backend  # 로그 확인
 ```
 
 ## 구현 우선순위 (TODO)
@@ -171,22 +183,22 @@ docker compose up --build
 13. ~~LLM 라우터 (보안 모드 분기)~~ ✅
 14. ~~스트리밍 응답 + 출처 표시~~ ✅
 
-### Phase 4 — 프론트엔드
-15. Admin UI (케이스 관리, 데이터 소스 설정, 인덱싱 모니터)
-16. Analyst UI (채팅 인터페이스, 보안 토글, 검색 결과)
+### Phase 4 — 프론트엔드 ✅
+15. ~~Admin UI (케이스 관리, 데이터 소스 설정, 인덱싱 모니터)~~ ✅
+16. ~~Analyst UI (채팅 인터페이스, 보안 토글, 검색 결과)~~ ✅
 
-### Phase 5 — 통합 & 배포
-17. Docker 컨테이너화
-18. 통합 테스트
-19. 성능 튜닝 (1TB 데이터 기준)
+### Phase 5 — 통합 & 배포 ✅
+17. ~~Docker 컨테이너화~~ ✅
+18. ~~통합 테스트~~ ✅
+19. 성능 튜닝 (1TB 데이터 기준) — PoC 이후 실데이터 투입 시 진행
 
-## 현재 상태 (2026-03-22 기준)
+## 현재 상태 (2026-03-24 기준)
 
-- **최신 커밋**: `139db6f` (main)
+- **최신 커밋**: `e588717` (main) — Phase 4 프론트엔드 + E2E 통합 테스트
 - **테스트**: 291 passed (단위 277 + 통합 14), 0 skipped
 - **환경**: Python 3.14.2, Windows 11, VS 2026 Community (C++ 빌드 도구 설치됨)
 - **chroma-hnswlib**: 0.7.6 (C++ 빌드 완료 — 한글 Windows에서 DISTUTILS_USE_SDK=1 필요)
-- **다음 작업**: Phase 4 (프론트엔드) 시작 예정
+- **Phase 5 Docker**: 완료 (backend + frontend/nginx + ChromaDB + Ollama GPU)
 
 ### 환경 이슈 (chroma-hnswlib 빌드)
 
@@ -225,6 +237,11 @@ subprocess.run(['pip', 'install', 'chroma-hnswlib', '--no-build-isolation'], env
 | LLM 라우터 | `src/llm/router.py` | 보안 ON=Ollama, OFF=OpenAI |
 | Admin API | `src/api/routes/cases.py`, `indexing.py` | 케이스 CRUD + 인덱싱 관리 |
 | Analyst API | `src/api/routes/chat.py` | RAG 질의 (동기+스트리밍+케이스목록) |
+| Docker | `docker/Dockerfile.backend` | Python 3.11 + uvicorn |
+| Docker | `docker/Dockerfile.frontend` | Node build → nginx SPA 서빙 |
+| Docker | `docker/nginx.conf` | API 프록시 + SSE 스트리밍 + SPA fallback |
+| Docker | `docker-compose.yml` | 4-서비스 스택 (backend/frontend/chromadb/ollama) |
+| Docker | `scripts/docker-init.sh` | 초기 설정 (디렉토리 + 모델 다운로드) |
 
 ### API 엔드포인트 목록
 

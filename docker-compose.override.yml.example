@@ -1,0 +1,11 @@
+# GPU 없는 환경에서 사용 시:
+# cp docker-compose.override.yml.example docker-compose.override.yml
+#
+# Ollama가 CPU 모드로 실행됩니다 (느림).
+
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices: []

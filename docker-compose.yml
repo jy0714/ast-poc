@@ -8,22 +8,28 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
-      - ./src:/app/src
     env_file:
       - .env
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - CHROMA_PERSIST_DIR=/app/data/vectordb
+      - BM25_INDEX_DIR=/app/data/bm25_index
     depends_on:
-      - chromadb
+      chromadb:
+        condition: service_started
+      ollama:
+        condition: service_started
     restart: unless-stopped
     networks:
       - ast-network
 
-  # === Frontend ===
+  # === Frontend (nginx) ===
   frontend:
     build:
       context: .
       dockerfile: docker/Dockerfile.frontend
     ports:
-      - "3000:3000"
+      - "80:80"
     depends_on:
       - backend
     restart: unless-stopped
@@ -44,8 +50,27 @@ services:
     networks:
       - ast-network
 
+  # === Ollama (GPU) ===
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    networks:
+      - ast-network
+
 volumes:
   chroma-data:
+  ollama-models:
 
 networks:
   ast-network:
