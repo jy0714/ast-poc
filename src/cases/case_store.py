@@ -1,27 +1,23 @@
-"""케이스 저장소 — JSON 파일 기반 케이스 CRUD + 라이프사이클 관리
+"""케이스 저장소 — SQLite 기반 케이스 CRUD + 라이프사이클 관리
 
 케이스 라이프사이클:
     created → indexing → ready → archived
                 ↑          |
                 └── (추가 자료 유입)
 
-저장 구조:
-    data/cases/{case_id}/meta.json   — 케이스 메타데이터
-    data/cases/{case_id}/            — 케이스별 디렉토리 (향후 인덱싱 산출물 저장)
+저장소:
+    data/ast.db (cases 테이블) — SQLAlchemy ORM
 """
 
 from __future__ import annotations
 
 import json
-import shutil
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
 from typing import Any
 
-from src.utils.config import settings
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -109,8 +105,26 @@ class InvalidStatusTransitionError(Exception):
     """허용되지 않는 상태 전이 시 발생"""
 
 
+def _model_to_metadata(row: Any) -> CaseMetadata:
+    """CaseModel → CaseMetadata 변환"""
+    return CaseMetadata(
+        case_id=row.case_id,
+        name=row.name,
+        description=row.description,
+        status=CaseStatus(row.status),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        pst_paths=json.loads(row.pst_paths) if row.pst_paths else [],
+        doc_paths=json.loads(row.doc_paths) if row.doc_paths else [],
+        total_documents=row.total_documents,
+        total_chunks=row.total_chunks,
+        indexed_at=row.indexed_at,
+        error_message=row.error_message,
+    )
+
+
 class CaseStore:
-    """JSON 파일 기반 케이스 저장소
+    """SQLite 기반 케이스 저장소
 
     사용법:
         store = CaseStore()
@@ -120,44 +134,20 @@ class CaseStore:
         store.delete(case.case_id)
     """
 
-    META_FILENAME = "meta.json"
-
-    def __init__(self, base_dir: str | Path | None = None) -> None:
+    def __init__(self, db_url: str | None = None) -> None:
         """CaseStore 초기화
 
         Args:
-            base_dir: 케이스 저장 루트 디렉토리 (기본: data/cases)
+            db_url: 커스텀 DB URL (테스트용). None이면 기본 data/ast.db 사용.
         """
-        if base_dir:
-            self.base_dir = Path(base_dir)
-        else:
-            self.base_dir = settings.project_root / "data" / "cases"
-        self.base_dir.mkdir(parents=True, exist_ok=True)
+        from src.db.database import init_db, get_session_factory
 
-    def _case_dir(self, case_id: str) -> Path:
-        """케이스 디렉토리 경로"""
-        return self.base_dir / case_id
+        self._engine = init_db(db_url)
+        self._session_factory = get_session_factory(self._engine)
 
-    def _meta_path(self, case_id: str) -> Path:
-        """케이스 메타데이터 파일 경로"""
-        return self._case_dir(case_id) / self.META_FILENAME
-
-    def _save(self, meta: CaseMetadata) -> None:
-        """메타데이터를 JSON 파일로 저장"""
-        path = self._meta_path(meta.case_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(meta.to_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
-    def _load(self, case_id: str) -> CaseMetadata:
-        """JSON 파일에서 메타데이터 로드"""
-        path = self._meta_path(case_id)
-        if not path.exists():
-            raise CaseNotFoundError(f"케이스를 찾을 수 없습니다: {case_id}")
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return CaseMetadata.from_dict(data)
+    def _get_session(self):  # noqa: ANN202
+        """새 DB 세션 반환"""
+        return self._session_factory()
 
     def create(
         self,
@@ -177,21 +167,28 @@ class CaseStore:
         Returns:
             생성된 CaseMetadata
         """
+        from src.db.models import CaseModel
+
         case_id = uuid.uuid4().hex[:12]
         now = datetime.now()
 
-        meta = CaseMetadata(
+        row = CaseModel(
             case_id=case_id,
             name=name,
             description=description,
-            status=CaseStatus.CREATED,
+            status=CaseStatus.CREATED.value,
             created_at=now,
             updated_at=now,
-            pst_paths=pst_paths or [],
-            doc_paths=doc_paths or [],
+            pst_paths=json.dumps(pst_paths or [], ensure_ascii=False),
+            doc_paths=json.dumps(doc_paths or [], ensure_ascii=False),
         )
 
-        self._save(meta)
+        with self._get_session() as session:
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            meta = _model_to_metadata(row)
+
         logger.info(f"케이스 생성: {case_id} ({name})")
         return meta
 
@@ -207,28 +204,21 @@ class CaseStore:
         Raises:
             CaseNotFoundError: 케이스가 존재하지 않음
         """
-        return self._load(case_id)
+        from src.db.models import CaseModel
+
+        with self._get_session() as session:
+            row = session.get(CaseModel, case_id)
+            if row is None:
+                raise CaseNotFoundError(f"케이스를 찾을 수 없습니다: {case_id}")
+            return _model_to_metadata(row)
 
     def list_all(self) -> list[CaseMetadata]:
         """전체 케이스 목록 조회 (생성일 내림차순)"""
-        cases: list[CaseMetadata] = []
+        from src.db.models import CaseModel
 
-        if not self.base_dir.exists():
-            return cases
-
-        for case_dir in self.base_dir.iterdir():
-            if not case_dir.is_dir():
-                continue
-            meta_path = case_dir / self.META_FILENAME
-            if meta_path.exists():
-                try:
-                    cases.append(self._load(case_dir.name))
-                except (json.JSONDecodeError, KeyError) as e:
-                    logger.warning(f"케이스 메타데이터 로드 실패: {case_dir.name} ({e})")
-
-        # 생성일 내림차순 정렬
-        cases.sort(key=lambda c: c.created_at, reverse=True)
-        return cases
+        with self._get_session() as session:
+            rows = session.query(CaseModel).order_by(CaseModel.created_at.desc()).all()
+            return [_model_to_metadata(r) for r in rows]
 
     def update_status(self, case_id: str, new_status: CaseStatus) -> CaseMetadata:
         """케이스 상태 변경 (라이프사이클 전이 규칙 검증)
@@ -244,22 +234,31 @@ class CaseStore:
             CaseNotFoundError: 케이스가 존재하지 않음
             InvalidStatusTransitionError: 허용되지 않는 상태 전이
         """
-        meta = self._load(case_id)
+        from src.db.models import CaseModel
 
-        allowed = _VALID_TRANSITIONS.get(meta.status, set())
-        if new_status not in allowed:
-            raise InvalidStatusTransitionError(
-                f"상태 전이 불가: {meta.status.value} → {new_status.value} "
-                f"(허용: {', '.join(s.value for s in allowed) or '없음'})"
-            )
+        with self._get_session() as session:
+            row = session.get(CaseModel, case_id)
+            if row is None:
+                raise CaseNotFoundError(f"케이스를 찾을 수 없습니다: {case_id}")
 
-        meta.status = new_status
-        meta.updated_at = datetime.now()
+            current = CaseStatus(row.status)
+            allowed = _VALID_TRANSITIONS.get(current, set())
+            if new_status not in allowed:
+                raise InvalidStatusTransitionError(
+                    f"상태 전이 불가: {current.value} → {new_status.value} "
+                    f"(허용: {', '.join(s.value for s in allowed) or '없음'})"
+                )
 
-        if new_status == CaseStatus.READY:
-            meta.indexed_at = datetime.now()
+            row.status = new_status.value
+            row.updated_at = datetime.now()
 
-        self._save(meta)
+            if new_status == CaseStatus.READY:
+                row.indexed_at = datetime.now()
+
+            session.commit()
+            session.refresh(row)
+            meta = _model_to_metadata(row)
+
         logger.info(f"케이스 상태 변경: {case_id} → {new_status.value}")
         return meta
 
@@ -279,23 +278,37 @@ class CaseStore:
         Returns:
             업데이트된 CaseMetadata
         """
-        meta = self._load(case_id)
+        from src.db.models import CaseModel
 
-        if meta.status == CaseStatus.ARCHIVED:
-            raise InvalidStatusTransitionError("보관된 케이스는 수정할 수 없습니다")
+        with self._get_session() as session:
+            row = session.get(CaseModel, case_id)
+            if row is None:
+                raise CaseNotFoundError(f"케이스를 찾을 수 없습니다: {case_id}")
 
-        if pst_paths:
-            for p in pst_paths:
-                if p not in meta.pst_paths:
-                    meta.pst_paths.append(p)
+            if CaseStatus(row.status) == CaseStatus.ARCHIVED:
+                raise InvalidStatusTransitionError("보관된 케이스는 수정할 수 없습니다")
 
-        if doc_paths:
-            for p in doc_paths:
-                if p not in meta.doc_paths:
-                    meta.doc_paths.append(p)
+            current_pst = json.loads(row.pst_paths) if row.pst_paths else []
+            current_doc = json.loads(row.doc_paths) if row.doc_paths else []
 
-        meta.updated_at = datetime.now()
-        self._save(meta)
+            if pst_paths:
+                for p in pst_paths:
+                    if p not in current_pst:
+                        current_pst.append(p)
+
+            if doc_paths:
+                for p in doc_paths:
+                    if p not in current_doc:
+                        current_doc.append(p)
+
+            row.pst_paths = json.dumps(current_pst, ensure_ascii=False)
+            row.doc_paths = json.dumps(current_doc, ensure_ascii=False)
+            row.updated_at = datetime.now()
+
+            session.commit()
+            session.refresh(row)
+            meta = _model_to_metadata(row)
+
         logger.info(f"데이터 소스 업데이트: {case_id}")
         return meta
 
@@ -312,16 +325,22 @@ class CaseStore:
             total_documents: 총 문서 수
             total_chunks: 총 청크 수
         """
-        meta = self._load(case_id)
+        from src.db.models import CaseModel
 
-        if total_documents is not None:
-            meta.total_documents = total_documents
-        if total_chunks is not None:
-            meta.total_chunks = total_chunks
+        with self._get_session() as session:
+            row = session.get(CaseModel, case_id)
+            if row is None:
+                raise CaseNotFoundError(f"케이스를 찾을 수 없습니다: {case_id}")
 
-        meta.updated_at = datetime.now()
-        self._save(meta)
-        return meta
+            if total_documents is not None:
+                row.total_documents = total_documents
+            if total_chunks is not None:
+                row.total_chunks = total_chunks
+
+            row.updated_at = datetime.now()
+            session.commit()
+            session.refresh(row)
+            return _model_to_metadata(row)
 
     def set_error(self, case_id: str, error_message: str) -> CaseMetadata:
         """케이스를 에러 상태로 전환
@@ -330,16 +349,26 @@ class CaseStore:
             case_id: 케이스 ID
             error_message: 에러 메시지
         """
-        meta = self._load(case_id)
-        meta.status = CaseStatus.ERROR
-        meta.error_message = error_message
-        meta.updated_at = datetime.now()
-        self._save(meta)
+        from src.db.models import CaseModel
+
+        with self._get_session() as session:
+            row = session.get(CaseModel, case_id)
+            if row is None:
+                raise CaseNotFoundError(f"케이스를 찾을 수 없습니다: {case_id}")
+
+            row.status = CaseStatus.ERROR.value
+            row.error_message = error_message
+            row.updated_at = datetime.now()
+
+            session.commit()
+            session.refresh(row)
+            meta = _model_to_metadata(row)
+
         logger.error(f"케이스 에러: {case_id} — {error_message}")
         return meta
 
     def delete(self, case_id: str) -> None:
-        """케이스 삭제 (디렉토리 전체 삭제)
+        """케이스 삭제
 
         Args:
             case_id: 케이스 ID
@@ -347,13 +376,21 @@ class CaseStore:
         Raises:
             CaseNotFoundError: 케이스가 존재하지 않음
         """
-        case_dir = self._case_dir(case_id)
-        if not case_dir.exists():
-            raise CaseNotFoundError(f"케이스를 찾을 수 없습니다: {case_id}")
+        from src.db.models import CaseModel
 
-        shutil.rmtree(case_dir)
+        with self._get_session() as session:
+            row = session.get(CaseModel, case_id)
+            if row is None:
+                raise CaseNotFoundError(f"케이스를 찾을 수 없습니다: {case_id}")
+
+            session.delete(row)
+            session.commit()
+
         logger.info(f"케이스 삭제 완료: {case_id}")
 
     def exists(self, case_id: str) -> bool:
         """케이스 존재 여부 확인"""
-        return self._meta_path(case_id).exists()
+        from src.db.models import CaseModel
+
+        with self._get_session() as session:
+            return session.get(CaseModel, case_id) is not None

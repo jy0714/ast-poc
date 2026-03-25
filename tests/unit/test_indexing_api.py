@@ -22,8 +22,14 @@ def tmpdir():
 
 @pytest.fixture
 def setup(tmpdir):
-    """테스트용 CaseStore + Pipeline 교체"""
-    store = CaseStore(base_dir=tmpdir / "cases")
+    """테스트용 CaseStore + Pipeline 교체 (SQLite)"""
+    db_path = tmpdir / "test.db"
+    db_url = f"sqlite:///{db_path}"
+
+    from src.db.database import reset_globals
+    reset_globals()
+
+    store = CaseStore(db_url=db_url)
 
     def mock_vs_factory(case_id):
         vs = MagicMock()
@@ -45,6 +51,7 @@ def setup(tmpdir):
 
     indexing_module._case_store = orig_store
     indexing_module._pipeline = orig_pipeline
+    reset_globals()
 
 
 @pytest.fixture

@@ -20,12 +20,19 @@ def tmpdir():
 
 @pytest.fixture
 def store(tmpdir):
-    """테스트용 CaseStore 교체"""
-    temp_store = CaseStore(base_dir=tmpdir / "cases")
+    """테스트용 CaseStore 교체 (SQLite)"""
+    db_path = tmpdir / "test.db"
+    db_url = f"sqlite:///{db_path}"
+
+    from src.db.database import reset_globals
+    reset_globals()
+
+    temp_store = CaseStore(db_url=db_url)
     original = chat_module._case_store
     chat_module._case_store = temp_store
     yield temp_store
     chat_module._case_store = original
+    reset_globals()
 
 
 @pytest.fixture

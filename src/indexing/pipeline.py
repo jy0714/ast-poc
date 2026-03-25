@@ -267,7 +267,9 @@ class IndexingPipeline:
             for file_path in files:
                 if cancel_flag and cancel_flag.is_set():
                     progress.phase = IndexingPhase.CANCELLED
+                    progress.completed_at = datetime.now()
                     self.case_store.update_status(case_id, CaseStatus.CREATED)
+                    _save_indexing_log(progress, "cancelled")
                     logger.info(f"인덱싱 취소됨: {case_id}")
                     return progress
 
@@ -319,6 +321,9 @@ class IndexingPipeline:
                 f"파일 {progress.processed_files}개, 청크 {stored_count}개, "
                 f"에러 {len(progress.errors)}개"
             )
+
+            # 인덱싱 이력 저장
+            _save_indexing_log(progress, "completed")
             return progress
 
         except Exception as e:
@@ -329,6 +334,9 @@ class IndexingPipeline:
                 self.case_store.set_error(case_id, str(e))
             except Exception:
                 pass  # 케이스 자체가 없을 수 있음
+
+            # 에러 이력 저장
+            _save_indexing_log(progress, "error")
             logger.error(f"인덱싱 파이프라인 에러: {case_id} — {e}")
             return progress
 
@@ -462,3 +470,36 @@ class IndexingPipeline:
 
         logger.info(f"문서 처리 완료: {doc_path.name} → {len(all_chunks)}개 청크")
         return all_chunks
+
+
+def _save_indexing_log(progress: IndexingProgress, status: str) -> None:
+    """인덱싱 이력을 DB에 저장"""
+    try:
+        import json
+
+        from src.db.database import get_session
+        from src.db.models import IndexingLogModel
+
+        elapsed = 0
+        if progress.started_at:
+            end = progress.completed_at or datetime.now()
+            elapsed = int((end - progress.started_at).total_seconds())
+
+        log = IndexingLogModel(
+            case_id=progress.case_id,
+            started_at=progress.started_at or datetime.now(),
+            completed_at=progress.completed_at,
+            status=status,
+            total_files=progress.total_files,
+            processed_files=progress.processed_files,
+            total_chunks=progress.total_chunks,
+            errors=json.dumps(progress.errors, ensure_ascii=False),
+            elapsed_seconds=elapsed,
+        )
+
+        with get_session() as session:
+            session.add(log)
+            session.commit()
+
+    except Exception as e:
+        logger.warning(f"인덱싱 이력 저장 실패 (무시): {e}")

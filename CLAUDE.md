@@ -46,6 +46,30 @@ PST 파일 / 내부 문서
 - **ON**: 임베딩 + 벡터DB + LLM 전체 로컬. 데이터 외부 전송 차단
 - **OFF**: 임베딩/벡터DB는 로컬 유지. LLM만 외부 API로 라우팅 (ChatGPT 5.4 / Gemini / Opus 4.6 등 미정). 검색된 청크만 외부 전송
 
+## 영구 저장소 구조
+
+### SQLite (`data/ast.db`)
+- ORM: SQLAlchemy (향후 PostgreSQL 전환 대비)
+- 테이블:
+  - `cases` — 케이스 메타데이터 (이름, 상태, 생성일, 데이터소스 경로 등)
+  - `indexing_logs` — 인덱싱 실행 이력 (시작/종료 시간, 처리 건수, 에러)
+  - `chat_history` — 질의/응답 대화 이력 (케이스별, 사용자 질문 + LLM 응답)
+  - `chat_sources` — 응답에 사용된 출처 청크 (chat_history FK, 문서명, 관련도 점수)
+
+### ChromaDB (`data/vectordb/`)
+- `persist_directory`로 디스크 영구 저장
+- 케이스별 독립 컬렉션 (`case_{id}`)
+- 벡터 유사도 검색용
+
+### BM25 (`data/bm25/`)
+- pickle 직렬화로 키워드 인덱스 저장
+- 케이스별 독립 인덱스 파일
+- 하이브리드 검색의 키워드 매칭 담당
+
+### Processed (`data/processed/`)
+- 파싱/청킹 결과 JSONL 캐시
+- 증분 인덱싱 시 재파싱 방지 (파일 해시 기반 중복 체크)
+
 ## 프론트엔드 구조
 
 ### Admin UI (케이스 관리 + 인덱싱 = Phase A)
@@ -120,13 +144,15 @@ ast-poc/
 ├── docker-compose.yml          # backend + frontend + chromadb + ollama
 ├── .dockerignore
 └── data/                       # gitignore됨
+    ├── ast.db                  # SQLite (케이스/인덱싱로그/채팅이력)
     ├── input/{pst,documents}/
-    ├── processed/
-    └── vectordb/
+    ├── processed/              # 파싱/청킹 JSONL 캐시
+    ├── bm25/                   # BM25 키워드 인덱스 (pickle)
+    └── vectordb/               # ChromaDB 영구 저장
 ```
 
 ### 주요 의존성
-- **백엔드**: Python 3.11+, FastAPI, LangChain, ChromaDB, Ollama
+- **백엔드**: Python 3.11+, FastAPI, LangChain, ChromaDB, Ollama, SQLAlchemy + SQLite
 - **프론트엔드**: React + TypeScript
 - **검색**: ChromaDB (벡터) + BM25 (키워드) + Rank Fusion
 - **LLM 로컬**: Ollama gpt-oss:20b

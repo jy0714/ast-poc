@@ -26,11 +26,14 @@ from src.indexing.pipeline import IndexingPipeline
 @pytest.fixture()
 def env(tmp_path):
     """통합 테스트 환경: 격리된 CaseStore + IndexingPipeline + TestClient"""
-    # 격리된 데이터 디렉토리
-    data_dir = tmp_path / "data" / "cases"
-    data_dir.mkdir(parents=True)
+    # 격리된 SQLite DB
+    db_path = tmp_path / "test.db"
+    db_url = f"sqlite:///{db_path}"
 
-    store = CaseStore(base_dir=str(data_dir))
+    from src.db.database import reset_globals
+    reset_globals()
+
+    store = CaseStore(db_url=db_url)
     pipeline = IndexingPipeline(case_store=store)
 
     # 모듈 싱글톤 교체
@@ -106,6 +109,7 @@ def env(tmp_path):
     indexing_mod._case_store = orig_idx_store
     indexing_mod._pipeline = orig_idx_pipeline
     chat_mod._case_store = orig_chat_store
+    reset_globals()
 
 
 # =====================================================================

@@ -15,6 +15,10 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """애플리케이션 시작/종료 시 실행"""
+    # DB 초기화 (테이블 자동 생성)
+    from src.db.database import init_db
+    init_db()
+
     logger.info("[bold green]AST PoC 서버 시작[/]")
     logger.info(f"보안 모드: {'ON (로컬 전용)' if settings.is_secure_mode else 'OFF (외부 API 허용)'}")
     logger.info(f"Ollama LLM: {settings.ollama_llm_model}")

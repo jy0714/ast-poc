@@ -1,4 +1,4 @@
-"""CaseStore 유닛 테스트 — 케이스 CRUD + 라이프사이클"""
+"""CaseStore 유닛 테스트 — 케이스 CRUD + 라이프사이클 (SQLite)"""
 
 import tempfile
 from pathlib import Path
@@ -16,9 +16,17 @@ from src.cases.case_store import (
 
 @pytest.fixture
 def store():
-    """임시 디렉토리 기반 CaseStore"""
+    """임시 SQLite DB 기반 CaseStore"""
     with tempfile.TemporaryDirectory() as tmpdir:
-        yield CaseStore(base_dir=tmpdir)
+        db_path = Path(tmpdir) / "test.db"
+        db_url = f"sqlite:///{db_path}"
+
+        from src.db.database import reset_globals
+        reset_globals()
+
+        yield CaseStore(db_url=db_url)
+
+        reset_globals()
 
 
 # === 생성 테스트 ===
@@ -46,11 +54,11 @@ class TestCreate:
         assert len(meta.pst_paths) == 2
         assert "/data/docs/reports" in meta.doc_paths
 
-    def test_create_persists_to_file(self, store: CaseStore):
-        """생성된 케이스가 파일로 저장되는지 확인"""
+    def test_create_persists_to_db(self, store: CaseStore):
+        """생성된 케이스가 DB에 저장되는지 확인"""
         meta = store.create("저장 테스트")
-        meta_path = store._meta_path(meta.case_id)
-        assert meta_path.exists()
+        loaded = store.get(meta.case_id)
+        assert loaded.case_id == meta.case_id
 
     def test_create_multiple_unique_ids(self, store: CaseStore):
         """여러 케이스 생성 시 ID가 고유한지 확인"""
@@ -248,13 +256,12 @@ class TestDelete:
         with pytest.raises(CaseNotFoundError):
             store.delete("nonexistent_id")
 
-    def test_delete_removes_directory(self, store: CaseStore):
-        """삭제 시 디렉토리 전체 제거 확인"""
-        meta = store.create("디렉토리 삭제")
-        case_dir = store._case_dir(meta.case_id)
-        assert case_dir.exists()
+    def test_delete_removes_from_db(self, store: CaseStore):
+        """삭제 시 DB에서 제거 확인"""
+        meta = store.create("DB 삭제")
         store.delete(meta.case_id)
-        assert not case_dir.exists()
+        with pytest.raises(CaseNotFoundError):
+            store.get(meta.case_id)
 
 
 # === 직렬화 라운드트립 ===

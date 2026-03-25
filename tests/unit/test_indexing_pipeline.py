@@ -32,7 +32,15 @@ def tmpdir():
 
 @pytest.fixture
 def case_store(tmpdir):
-    return CaseStore(base_dir=tmpdir / "cases")
+    db_path = tmpdir / "test.db"
+    db_url = f"sqlite:///{db_path}"
+
+    from src.db.database import reset_globals
+    reset_globals()
+
+    store = CaseStore(db_url=db_url)
+    yield store
+    reset_globals()
 
 
 @pytest.fixture
@@ -298,12 +306,10 @@ class TestCancel:
             result = pipeline.cancel(meta.case_id)
             assert result is True
 
-            # 취소 반영 대기
-            for _ in range(20):
-                progress = pipeline.get_progress(meta.case_id)
-                if not progress.is_running:
-                    break
-                time.sleep(0.1)
+            # 스레드 완료 대기 (DB 커넥션 해제)
+            thread = pipeline._threads.get(meta.case_id)
+            if thread is not None:
+                thread.join(timeout=10)
 
 
 # === 비동기 실행 테스트 ===
@@ -317,12 +323,10 @@ class TestRunAsync:
 
         pipeline.run_async(meta.case_id)
 
-        # 완료 대기 (비동기이므로 충분히 대기)
-        for _ in range(100):
-            p = pipeline.get_progress(meta.case_id)
-            if p.phase in (IndexingPhase.COMPLETED, IndexingPhase.ERROR):
-                break
-            time.sleep(0.1)
+        # 스레드 완료 대기
+        thread = pipeline._threads.get(meta.case_id)
+        if thread is not None:
+            thread.join(timeout=10)
 
         final = pipeline.get_progress(meta.case_id)
         assert final.phase == IndexingPhase.COMPLETED
@@ -342,11 +346,10 @@ class TestRunAsync:
         p2 = pipeline.run_async(meta.case_id)
         assert p2.case_id == meta.case_id
 
-        # 정리 대기
-        for _ in range(50):
-            if not pipeline.is_running(meta.case_id):
-                break
-            time.sleep(0.1)
+        # 스레드 완료 대기 (DB 커넥션 해제를 위해 join)
+        thread = pipeline._threads.get(meta.case_id)
+        if thread is not None:
+            thread.join(timeout=10)
 
 
 # === get_progress 테스트 ===

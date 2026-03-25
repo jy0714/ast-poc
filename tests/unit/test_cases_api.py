@@ -1,6 +1,7 @@
 """케이스 관리 API 엔드포인트 테스트"""
 
 import tempfile
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,13 +13,20 @@ from src.cases.case_store import CaseStatus, CaseStore
 
 @pytest.fixture
 def store():
-    """임시 CaseStore로 교체"""
+    """임시 SQLite DB 기반 CaseStore로 교체"""
     with tempfile.TemporaryDirectory() as tmpdir:
-        temp_store = CaseStore(base_dir=tmpdir)
+        db_path = Path(tmpdir) / "test.db"
+        db_url = f"sqlite:///{db_path}"
+
+        from src.db.database import reset_globals
+        reset_globals()
+
+        temp_store = CaseStore(db_url=db_url)
         original = cases_module._store
         cases_module._store = temp_store
         yield temp_store
         cases_module._store = original
+        reset_globals()
 
 
 @pytest.fixture
