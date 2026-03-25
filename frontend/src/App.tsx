@@ -7,7 +7,10 @@ function App() {
     <BrowserRouter>
       <div className="min-h-screen bg-gray-50 flex flex-col">
         <nav className="bg-gray-900 text-white px-6 py-3 flex items-center gap-6">
-          <h1 className="text-lg font-bold tracking-tight">AST PoC</h1>
+          <h1 className="text-lg font-bold tracking-tight flex items-center gap-2">
+            <img src="/favicon.png" alt="Bobcat" className="w-7 h-7" />
+            AST PoC
+          </h1>
           <div className="flex gap-1">
             <NavLink
               to="/admin"
