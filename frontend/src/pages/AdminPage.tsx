@@ -66,8 +66,8 @@ export default function AdminPage() {
       await casesApi.create(
         newName.trim(),
         newDesc.trim(),
-        newPstPaths.split('\n').map(s => s.trim()).filter(Boolean),
-        newDocPaths.split('\n').map(s => s.trim()).filter(Boolean),
+        newPstPaths.split('\n').map(s => s.trim().replace(/^["']+|["']+$/g, '').trim()).filter(Boolean),
+        newDocPaths.split('\n').map(s => s.trim().replace(/^["']+|["']+$/g, '').trim()).filter(Boolean),
       );
       setNewName(''); setNewDesc(''); setNewDocPaths(''); setNewPstPaths('');
       await loadCases();

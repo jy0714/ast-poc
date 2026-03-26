@@ -163,6 +163,40 @@ class TestCollectFiles:
         assert "root.txt" in names
         assert "nested.txt" in names
 
+    def test_collect_quoted_path(self, pipeline, case_store, tmpdir):
+        """따옴표로 감싼 경로 정규화"""
+        doc_dir = _create_test_files(tmpdir, {"q.txt": "따옴표 경로"})
+        quoted = f'"{doc_dir}"'
+        meta = case_store.create("따옴표", doc_paths=[quoted])
+        files = pipeline._collect_files(meta)
+        assert len(files) == 1
+        assert files[0].name == "q.txt"
+
+    def test_collect_pst_folder(self, pipeline, case_store, tmpdir):
+        """PST 경로에 폴더를 넣으면 내부 .pst 파일 재귀 스캔"""
+        pst_dir = tmpdir / "pst_data"
+        pst_dir.mkdir()
+        pst_file = pst_dir / "test.pst"
+        pst_file.write_bytes(b"fake pst content")
+
+        meta = case_store.create("PST 폴더", pst_paths=[str(pst_dir)])
+        files = pipeline._collect_files(meta)
+        assert len(files) == 1
+        assert files[0].name == "test.pst"
+
+    def test_collect_doc_folder_includes_pst(self, pipeline, case_store, tmpdir):
+        """문서 폴더에 PST가 있으면 함께 수집"""
+        mixed_dir = tmpdir / "mixed"
+        mixed_dir.mkdir()
+        (mixed_dir / "doc.txt").write_text("문서", encoding="utf-8")
+        (mixed_dir / "mail.pst").write_bytes(b"fake pst")
+
+        meta = case_store.create("혼합", doc_paths=[str(mixed_dir)])
+        files = pipeline._collect_files(meta)
+        names = {f.name for f in files}
+        assert "doc.txt" in names
+        assert "mail.pst" in names
+
 
 # === 문서 처리 테스트 ===
 

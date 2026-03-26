@@ -340,30 +340,63 @@ class IndexingPipeline:
             logger.error(f"인덱싱 파이프라인 에러: {case_id} — {e}")
             return progress
 
+    @staticmethod
+    def _normalize_path(raw: str) -> Path:
+        """윈도우 경로 문자열 정규화
+
+        따옴표 제거, 양쪽 공백 제거, 경로 resolve.
+        """
+        cleaned = raw.strip().strip('"').strip("'").strip()
+        return Path(cleaned)
+
     def _collect_files(self, case_meta: CaseMetadata) -> list[Path]:
         """케이스 데이터 소스에서 처리 대상 파일 수집
 
-        PST 파일은 직접 추가, 문서 경로는 재귀 스캔.
+        PST 경로: 파일이면 직접 추가, 폴더면 .pst/.ost 재귀 스캔
+        문서 경로: 파일이면 직접 추가, 폴더면 지원 확장자 + .pst/.ost 재귀 스캔
         """
         files: list[Path] = []
+        pst_extensions = {".pst", ".ost"}
+        all_extensions = _DOCUMENT_EXTENSIONS | pst_extensions
 
-        # PST 파일
+        # PST 경로 처리
         for pst_path_str in case_meta.pst_paths:
-            pst_path = Path(pst_path_str)
-            if pst_path.is_file() and pst_path.suffix.lower() in (".pst", ".ost"):
-                files.append(pst_path)
-            elif not pst_path.exists():
-                logger.warning(f"PST 파일 없음: {pst_path}")
+            pst_path = self._normalize_path(pst_path_str)
+            logger.debug(f"PST 경로 확인: '{pst_path_str}' → {pst_path} (exists={pst_path.exists()})")
 
-        # 문서 폴더 재귀 스캔
+            if pst_path.is_file():
+                if pst_path.suffix.lower() in pst_extensions:
+                    files.append(pst_path)
+                    logger.info(f"PST 파일 추가: {pst_path.name}")
+                else:
+                    logger.warning(f"PST 확장자 아님 (무시): {pst_path}")
+            elif pst_path.is_dir():
+                # 폴더 안의 PST 파일 재귀 스캔
+                found = []
+                for ext in pst_extensions:
+                    found.extend(pst_path.rglob(f"*{ext}"))
+                logger.info(f"PST 폴더 스캔: {pst_path} → {len(found)}개 발견")
+                files.extend(found)
+            else:
+                logger.warning(f"PST 경로 없음: {pst_path}")
+
+        # 문서 경로 처리
         for doc_path_str in case_meta.doc_paths:
-            doc_path = Path(doc_path_str)
+            doc_path = self._normalize_path(doc_path_str)
+            logger.debug(f"문서 경로 확인: '{doc_path_str}' → {doc_path} (exists={doc_path.exists()})")
+
             if doc_path.is_file():
-                if doc_path.suffix.lower() in _DOCUMENT_EXTENSIONS:
+                if doc_path.suffix.lower() in all_extensions:
                     files.append(doc_path)
+                    logger.info(f"문서 파일 추가: {doc_path.name}")
+                else:
+                    logger.warning(f"지원하지 않는 확장자 (무시): {doc_path}")
             elif doc_path.is_dir():
-                for ext in _DOCUMENT_EXTENSIONS:
-                    files.extend(doc_path.rglob(f"*{ext}"))
+                found = []
+                for ext in all_extensions:
+                    found.extend(doc_path.rglob(f"*{ext}"))
+                logger.info(f"문서 폴더 스캔: {doc_path} → {len(found)}개 발견")
+                files.extend(found)
             else:
                 logger.warning(f"문서 경로 없음: {doc_path}")
 
@@ -376,6 +409,10 @@ class IndexingPipeline:
                 seen.add(resolved)
                 unique_files.append(f)
 
+        logger.info(
+            f"파일 수집 결과: 총 {len(unique_files)}개 "
+            f"(PST 경로 {len(case_meta.pst_paths)}개, 문서 경로 {len(case_meta.doc_paths)}개)"
+        )
         return unique_files
 
     def _process_file(
