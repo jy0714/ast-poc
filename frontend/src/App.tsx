@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate, NavLink } from 'react-router-dom';
 import AdminPage from './pages/AdminPage';
 import AnalystPage from './pages/AnalystPage';
+import DashboardPage from './pages/DashboardPage';
 
 function App() {
   return (
@@ -28,6 +29,14 @@ function App() {
             >
               Analyst
             </NavLink>
+            <NavLink
+              to="/dashboard"
+              className={({ isActive }) =>
+                `px-3 py-1.5 rounded text-sm ${isActive ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-white'}`
+              }
+            >
+              Dashboard
+            </NavLink>
           </div>
         </nav>
 
@@ -35,6 +44,7 @@ function App() {
           <Routes>
             <Route path="/admin" element={<AdminPage />} />
             <Route path="/analyst" element={<AnalystPage />} />
+            <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="*" element={<Navigate to="/analyst" replace />} />
           </Routes>
         </main>

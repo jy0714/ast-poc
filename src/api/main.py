@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.api.routes import cases, chat, documents, health, indexing, settings as settings_routes
+from src.api.routes import cases, chat, dashboard, documents, health, indexing, settings as settings_routes
 from src.utils.config import settings
 from src.utils.logger import get_logger
 
@@ -52,3 +52,4 @@ app.include_router(settings_routes.router, prefix="/api/admin/settings", tags=["
 
 # === Analyst API ===
 app.include_router(chat.router, prefix="/api/analyst/chat", tags=["Analyst - Chat"])
+app.include_router(dashboard.router, prefix="/api/analyst/dashboard", tags=["Analyst - Dashboard"])

@@ -125,7 +125,7 @@ export const chatApi = {
 
   cases: () => request<CaseInfo[]>('/api/analyst/chat/cases'),
 
-  /** SSE 스트리밍 — EventSource 대신 fetch 사용 (POST 필요) */
+  /** SSE 스트리밍 - EventSource 대신 fetch 사용 (POST 필요) */
   stream: async function* (caseId: string, message: string, securityMode: boolean) {
     const res = await fetch(`${BASE}/api/analyst/chat/stream`, {
       method: 'POST',
@@ -160,4 +160,48 @@ export const chatApi = {
       }
     }
   },
+};
+
+// === Analyst: Dashboard ===
+
+export interface ParticipantNode {
+  id: string;
+  message_count: number;
+  source_types: string[];
+}
+
+export interface ParticipantEdge {
+  source: string;
+  target: string;
+  weight: number;
+}
+
+export interface TimelinePoint {
+  month: string;
+  email_count: number;
+  teams_chat_count: number;
+  document_count: number;
+}
+
+export interface TopicItem {
+  topic: string;
+  count: number;
+}
+
+export interface DashboardData {
+  case_id: string;
+  case_name: string;
+  total_chunks: number;
+  source_type_counts: Record<string, number>;
+  top_participants: ParticipantNode[];
+  participant_network: {
+    nodes: ParticipantNode[];
+    edges: ParticipantEdge[];
+  };
+  timeline: TimelinePoint[];
+  top_topics: TopicItem[];
+}
+
+export const dashboardApi = {
+  get: (caseId: string) => request<DashboardData>(`/api/analyst/dashboard/${caseId}`),
 };
