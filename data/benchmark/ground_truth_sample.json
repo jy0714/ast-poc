@@ -1,0 +1,212 @@
+{
+  "metadata": {
+    "description": "AST PoC Benchmark Ground Truth - Sample",
+    "version": "2.0",
+    "created_at": "2026-03-31",
+    "format": "v2 — query_type T1~T5, relevant_chunk_ids, relevance_grades",
+    "query_types": {
+      "T1": "단순 사실 조회 (factual lookup)",
+      "T2": "참여자/발신자 필터링 (participant filtering)",
+      "T3": "날짜/기간 필터링 (temporal filtering)",
+      "T4": "멀티소스 종합 (cross-source synthesis)",
+      "T5": "요약/비교/타임라인 (summarization & comparison)"
+    },
+    "relevance_grades": {
+      "3": "highly relevant — directly answers the query",
+      "2": "partially relevant — contains useful context",
+      "1": "marginally relevant — tangentially related"
+    }
+  },
+  "questions": [
+    {
+      "query_id": "q001",
+      "query_text": "2025년 1월 감사 보고서에서 비용 관련 지적사항은?",
+      "query_type": "T1",
+      "relevant_chunk_ids": [
+        "audit_report_202501_chunk_0",
+        "audit_report_202501_chunk_1",
+        "expense_review_chunk_0"
+      ],
+      "relevance_grades": {
+        "audit_report_202501_chunk_0": 3,
+        "audit_report_202501_chunk_1": 2,
+        "expense_review_chunk_0": 2
+      },
+      "relevant_docs": [
+        {"filename": "audit_report_202501.pdf", "source_type": "document"},
+        {"filename": "expense_review.docx", "source_type": "document"}
+      ],
+      "relevant_keywords": ["감사", "비용", "지적사항"]
+    },
+    {
+      "query_id": "q002",
+      "query_text": "김철수가 보낸 이메일 중 계약 관련 내용을 찾아줘",
+      "query_type": "T2",
+      "relevant_chunk_ids": [
+        "email_kimcs_contract_review_chunk_0",
+        "email_kimcs_contract_change_chunk_0"
+      ],
+      "relevance_grades": {
+        "email_kimcs_contract_review_chunk_0": 3,
+        "email_kimcs_contract_change_chunk_0": 3
+      },
+      "relevant_docs": [
+        {"filename": "outlook.pst", "source_type": "email", "participant": "김철수", "subject": "계약서 검토 요청"},
+        {"filename": "outlook.pst", "source_type": "email", "participant": "김철수", "subject": "Re: 계약 조건 변경"}
+      ],
+      "relevant_keywords": ["김철수", "계약"]
+    },
+    {
+      "query_id": "q003",
+      "query_text": "Teams에서 프로젝트 일정에 대해 논의한 내용 요약",
+      "query_type": "T5",
+      "relevant_chunk_ids": [
+        "teams_conv001_chunk_0",
+        "teams_conv002_chunk_0"
+      ],
+      "relevance_grades": {
+        "teams_conv001_chunk_0": 3,
+        "teams_conv002_chunk_0": 2
+      },
+      "relevant_docs": [
+        {"filename": "teams_export.pst", "source_type": "teams_chat", "conversation_id": "conv_001"},
+        {"filename": "teams_export.pst", "source_type": "teams_chat", "conversation_id": "conv_002"}
+      ],
+      "relevant_keywords": ["프로젝트", "일정"]
+    },
+    {
+      "query_id": "q004",
+      "query_text": "2025년 2월 이후 발송된 내부 감사 관련 이메일",
+      "query_type": "T3",
+      "relevant_chunk_ids": [
+        "email_audit_result_chunk_0",
+        "email_audit_followup_chunk_0"
+      ],
+      "relevance_grades": {
+        "email_audit_result_chunk_0": 3,
+        "email_audit_followup_chunk_0": 3
+      },
+      "relevant_docs": [
+        {"filename": "outlook.pst", "source_type": "email", "subject": "내부 감사 결과 공유"},
+        {"filename": "outlook.pst", "source_type": "email", "subject": "감사 후속 조치 안내"}
+      ],
+      "relevant_keywords": ["감사", "내부"]
+    },
+    {
+      "query_id": "q005",
+      "query_text": "첨부파일 중 매출 데이터가 포함된 엑셀 파일 내용",
+      "query_type": "T1",
+      "relevant_chunk_ids": [
+        "attachment_sales_q1_chunk_0",
+        "attachment_revenue_summary_chunk_0"
+      ],
+      "relevance_grades": {
+        "attachment_sales_q1_chunk_0": 3,
+        "attachment_revenue_summary_chunk_0": 2
+      },
+      "relevant_docs": [
+        {"filename": "sales_data_q1.xlsx", "source_type": "attachment"},
+        {"filename": "revenue_summary.xlsx", "source_type": "attachment"}
+      ],
+      "relevant_keywords": ["매출", "데이터", "엑셀"]
+    },
+    {
+      "query_id": "q006",
+      "query_text": "홍길동과 이영희가 주고받은 커뮤니케이션 내용",
+      "query_type": "T4",
+      "relevant_chunk_ids": [
+        "email_hong_chunk_0",
+        "teams_lee_chunk_0",
+        "email_hong_chunk_1"
+      ],
+      "relevance_grades": {
+        "email_hong_chunk_0": 3,
+        "teams_lee_chunk_0": 3,
+        "email_hong_chunk_1": 1
+      },
+      "relevant_docs": [
+        {"filename": "outlook.pst", "source_type": "email", "participant": "홍길동"},
+        {"filename": "teams_export.pst", "source_type": "teams_chat", "participant": "이영희"}
+      ],
+      "relevant_keywords": ["홍길동", "이영희"]
+    },
+    {
+      "query_id": "q007",
+      "query_text": "비용 승인 프로세스에 대한 내부 정책 문서",
+      "query_type": "T1",
+      "relevant_chunk_ids": [
+        "expense_policy_v3_chunk_0",
+        "expense_policy_v3_chunk_1",
+        "approval_process_chunk_0"
+      ],
+      "relevance_grades": {
+        "expense_policy_v3_chunk_0": 3,
+        "expense_policy_v3_chunk_1": 2,
+        "approval_process_chunk_0": 3
+      },
+      "relevant_docs": [
+        {"filename": "expense_policy_v3.pdf", "source_type": "document"},
+        {"filename": "approval_process.docx", "source_type": "document"}
+      ],
+      "relevant_keywords": ["비용", "승인", "정책"]
+    },
+    {
+      "query_id": "q008",
+      "query_text": "2025년 1분기 계약 체결 건수와 주요 거래처 비교",
+      "query_type": "T5",
+      "relevant_chunk_ids": [
+        "contract_summary_q1_chunk_0",
+        "vendor_list_2025_chunk_0"
+      ],
+      "relevance_grades": {
+        "contract_summary_q1_chunk_0": 3,
+        "vendor_list_2025_chunk_0": 2
+      },
+      "relevant_docs": [
+        {"filename": "contract_summary_q1.xlsx", "source_type": "document"},
+        {"filename": "vendor_list_2025.docx", "source_type": "document"}
+      ],
+      "relevant_keywords": ["계약", "거래처", "1분기"]
+    },
+    {
+      "query_id": "q009",
+      "query_text": "지난달 보안 점검 결과 보고서에서 발견된 취약점",
+      "query_type": "T3",
+      "relevant_chunk_ids": [
+        "security_audit_feb2025_chunk_0",
+        "security_audit_feb2025_chunk_1"
+      ],
+      "relevance_grades": {
+        "security_audit_feb2025_chunk_0": 3,
+        "security_audit_feb2025_chunk_1": 2
+      },
+      "relevant_docs": [
+        {"filename": "security_audit_feb2025.pdf", "source_type": "document"}
+      ],
+      "relevant_keywords": ["보안", "점검", "취약점"]
+    },
+    {
+      "query_id": "q010",
+      "query_text": "프로젝트 Alpha 관련 타임라인 정리",
+      "query_type": "T4",
+      "relevant_chunk_ids": [
+        "email_alpha_kickoff_chunk_0",
+        "teams_conv_alpha_chunk_0",
+        "project_alpha_plan_chunk_0",
+        "project_alpha_plan_chunk_1"
+      ],
+      "relevance_grades": {
+        "email_alpha_kickoff_chunk_0": 3,
+        "teams_conv_alpha_chunk_0": 2,
+        "project_alpha_plan_chunk_0": 3,
+        "project_alpha_plan_chunk_1": 1
+      },
+      "relevant_docs": [
+        {"filename": "outlook.pst", "source_type": "email", "subject": "Project Alpha 킥오프"},
+        {"filename": "teams_export.pst", "source_type": "teams_chat", "conversation_id": "conv_alpha"},
+        {"filename": "project_alpha_plan.pptx", "source_type": "document"}
+      ],
+      "relevant_keywords": ["Alpha", "프로젝트", "타임라인"]
+    }
+  ]
+}

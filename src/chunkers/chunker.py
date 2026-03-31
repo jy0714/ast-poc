@@ -1,10 +1,11 @@
 """스마트 청킹 엔진 — 소스 타입별 최적 분할
 
-4종 청커:
+5종 청커:
 - DocumentChunker: 문서(PDF/DOCX/PPTX/XLSX/TXT/EML/MSG) — RecursiveCharacterTextSplitter 기반
 - ChatChunker: Teams 채팅 — 시간 윈도우 기반, 대화 맥락 보존
 - EmailChunker: 이메일 — 스레드 기반 그룹핑, 긴 스레드 분할
 - AttachmentChunker: 첨부파일 — DocumentParser로 텍스트 추출 후 DocumentChunker 위임
+- FixedSizeChunker: 벤치마크 baseline — 소스 타입 무시, 고정 크기 분할
 
 각 청커는 source_type과 메타데이터를 청크에 부착하여
 검색 시 소스 타입별 필터링과 출처 추적이 가능하도록 함.
@@ -475,3 +476,89 @@ class AttachmentChunker:
 
         logger.info(f"첨부파일 청킹 완료: {len(attachments)}개 → {len(all_chunks)}개 청크")
         return all_chunks
+
+
+# === FixedSizeChunker (Benchmark Baseline) ===
+
+
+class FixedSizeChunker:
+    """고정 크기 baseline 청커 — 벤치마크용
+
+    원본 source_type과 메타데이터(sender, date 등)를 보존한 채
+    텍스트만 고정 크기(토큰 기반)로 일괄 분할.
+    청킹 전략만 다르고 나머지는 동일한 공정 비교를 위한 설계.
+    """
+
+    def __init__(
+        self,
+        chunk_size: int = 512,
+        chunk_overlap: int = 128,
+    ) -> None:
+        """FixedSizeChunker 초기화
+
+        Args:
+            chunk_size: 청크당 최대 토큰 수 (기본 512)
+            chunk_overlap: 오버랩 토큰 수 (기본 128)
+        """
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+
+    def chunk(
+        self,
+        text: str,
+        metadata: dict[str, Any] | None = None,
+        source_type: str = "document",
+    ) -> list[Chunk]:
+        """텍스트를 고정 토큰 크기로 분할
+
+        공백 기반 토큰화 후 chunk_size 단위로 분할.
+        source_type은 호출자가 원본 타입을 전달하여 보존.
+
+        Args:
+            text: 분할할 텍스트
+            metadata: 모든 청크에 부착할 공통 메타데이터
+            source_type: 원본 소스 타입 (email, teams_chat, document, attachment)
+
+        Returns:
+            Chunk 리스트
+        """
+        if not text or not text.strip():
+            return []
+
+        tokens = text.split()
+        if not tokens:
+            return []
+
+        base_meta = metadata or {}
+        chunks: list[Chunk] = []
+        step = max(1, self.chunk_size - self.chunk_overlap)
+
+        starts = list(range(0, len(tokens), step))
+        total = len(starts)
+
+        for i, start in enumerate(starts):
+            end = min(start + self.chunk_size, len(tokens))
+            chunk_text = " ".join(tokens[start:end])
+
+            if not chunk_text.strip():
+                continue
+
+            chunk_meta = {
+                **base_meta,
+                "chunk_index": i,
+                "total_chunks": total,
+                "chunking_method": "fixed",
+            }
+            chunks.append(
+                Chunk(
+                    content=chunk_text,
+                    metadata=chunk_meta,
+                    source_type=source_type,
+                )
+            )
+
+        logger.info(
+            f"고정 크기 청킹 완료: {len(tokens)}개 토큰 → {len(chunks)}개 청크 "
+            f"(크기={self.chunk_size}, 오버랩={self.chunk_overlap}, type={source_type})"
+        )
+        return chunks

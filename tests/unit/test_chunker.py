@@ -1,6 +1,6 @@
 """스마트 청킹 엔진 유닛 테스트
 
-4종 청커(Document, Chat, Email, Attachment) 로직과 메타데이터 전파를 검증.
+5종 청커(Document, Chat, Email, Attachment, FixedSize) 로직과 메타데이터 전파를 검증.
 """
 
 from datetime import datetime, timedelta
@@ -13,6 +13,7 @@ from src.chunkers.chunker import (
     Chunk,
     DocumentChunker,
     EmailChunker,
+    FixedSizeChunker,
 )
 from src.parsers.pst_parser import Attachment, ChatMessage, EmailMessage
 
@@ -361,3 +362,81 @@ class TestAttachmentChunker:
         """빈 첨부파일 리스트"""
         chunker = AttachmentChunker()
         assert chunker.chunk([]) == []
+
+
+# === FixedSizeChunker ===
+
+
+class TestFixedSizeChunker:
+    def test_basic_chunking(self):
+        """기본 고정 크기 분할"""
+        chunker = FixedSizeChunker(chunk_size=5, chunk_overlap=2)
+        text = " ".join(f"word{i}" for i in range(12))
+        chunks = chunker.chunk(text)
+        assert len(chunks) >= 2
+        for c in chunks:
+            assert c.source_type == "document"
+            assert c.metadata["chunking_method"] == "fixed"
+
+    def test_overlap(self):
+        """오버랩 토큰이 다음 청크 시작에 포함"""
+        chunker = FixedSizeChunker(chunk_size=4, chunk_overlap=2)
+        text = "a b c d e f g h"
+        chunks = chunker.chunk(text)
+        # chunk_size=4, step=2: [a,b,c,d], [c,d,e,f], [e,f,g,h], [g,h]
+        assert len(chunks) >= 3
+        # 두 번째 청크에 첫 번째 청크의 마지막 토큰 포함
+        second_tokens = chunks[1].content.split()
+        first_tokens = chunks[0].content.split()
+        # 오버랩 확인: 두 번째 청크의 처음 토큰이 첫 번째 청크에 존재
+        assert second_tokens[0] in first_tokens
+
+    def test_empty_text(self):
+        """빈 텍스트"""
+        chunker = FixedSizeChunker()
+        assert chunker.chunk("") == []
+        assert chunker.chunk("   ") == []
+
+    def test_short_text_single_chunk(self):
+        """짧은 텍스트는 단일 청크"""
+        chunker = FixedSizeChunker(chunk_size=512, chunk_overlap=128)
+        chunks = chunker.chunk("짧은 텍스트")
+        assert len(chunks) == 1
+
+    def test_metadata_propagation(self):
+        """메타데이터 전파"""
+        chunker = FixedSizeChunker(chunk_size=5, chunk_overlap=0)
+        text = " ".join(f"w{i}" for i in range(10))
+        chunks = chunker.chunk(text, metadata={"filename": "test.pdf"})
+        for c in chunks:
+            assert c.metadata["filename"] == "test.pdf"
+            assert "chunk_index" in c.metadata
+
+    def test_default_source_type_document(self):
+        """기본 source_type은 document"""
+        chunker = FixedSizeChunker(chunk_size=3, chunk_overlap=0)
+        chunks = chunker.chunk("a b c d e f")
+        for c in chunks:
+            assert c.source_type == "document"
+
+    def test_custom_source_type_email(self):
+        """source_type='email' 전달 시 보존"""
+        chunker = FixedSizeChunker(chunk_size=5, chunk_overlap=0)
+        chunks = chunker.chunk("word " * 10, source_type="email")
+        assert len(chunks) >= 1
+        for c in chunks:
+            assert c.source_type == "email"
+
+    def test_custom_source_type_teams_chat(self):
+        """source_type='teams_chat' 전달 시 보존"""
+        chunker = FixedSizeChunker(chunk_size=5, chunk_overlap=0)
+        chunks = chunker.chunk("msg " * 10, source_type="teams_chat")
+        for c in chunks:
+            assert c.source_type == "teams_chat"
+
+    def test_custom_source_type_attachment(self):
+        """source_type='attachment' 전달 시 보존"""
+        chunker = FixedSizeChunker(chunk_size=5, chunk_overlap=0)
+        chunks = chunker.chunk("data " * 10, source_type="attachment")
+        for c in chunks:
+            assert c.source_type == "attachment"
