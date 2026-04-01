@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     # === Ollama ===
     ollama_base_url: str = "http://localhost:11434"
     ollama_llm_model: str = "gpt-oss:20b"
-    ollama_embed_model: str = "nomic-embed-text"
+    ollama_embed_model: str = "bge-m3"
 
     # === External LLM ===
     openai_api_key: str = ""
@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     # === Search ===
     search_top_k: int = 20  # 하이브리드 검색 초기 후보 수
     rrf_k: int = 60  # Reciprocal Rank Fusion 파라미터
+    rrf_min_score: float = 0.0141  # RRF 최소 스코어 임계값 (한쪽만 10위 이하 필터링)
 
     # === API ===
     api_host: str = "0.0.0.0"

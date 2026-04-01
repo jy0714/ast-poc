@@ -110,6 +110,98 @@ class TestDocumentChunker:
             assert c.metadata["case_id"] == "C001"
 
 
+# === DocumentChunker 섹션 기반 청킹 테스트 ===
+
+
+class TestDocumentChunkerSections:
+    def test_section_chunking_splits_by_section(self):
+        """sections 메타데이터가 있으면 섹션 단위로 분할"""
+        chunker = DocumentChunker(chunk_size=500, chunk_overlap=50)
+        text = "서론 내용입니다.\n\n제1장 감사 범위\n감사 범위 내용이 여기에 있습니다.\n\n제2장 발견 사항\n발견 사항 내용입니다."
+        sections = [
+            {"title": "제1장 감사 범위", "offset": 11, "page": 0, "font_size": 16.0},
+            {"title": "제2장 발견 사항", "offset": 42, "page": 1, "font_size": 16.0},
+        ]
+        chunks = chunker.chunk(text, metadata={"filename": "report.pdf", "sections": sections})
+        assert len(chunks) >= 2
+        # 프리앰블 + 섹션들
+        titles = [c.metadata.get("section_title", "") for c in chunks]
+        assert "(서문)" in titles
+        assert "제1장 감사 범위" in titles or "제2장 발견 사항" in titles
+
+    def test_section_title_in_metadata(self):
+        """각 청크에 section_title이 포함"""
+        chunker = DocumentChunker(chunk_size=500, chunk_overlap=0)
+        text = "Section A 내용입니다.\n\nSection B 내용입니다."
+        sections = [
+            {"title": "Section A", "offset": 0, "page": 0, "font_size": 14.0},
+            {"title": "Section B", "offset": 22, "page": 1, "font_size": 14.0},
+        ]
+        chunks = chunker.chunk(text, metadata={"sections": sections})
+        for c in chunks:
+            assert "section_title" in c.metadata
+
+    def test_no_sections_falls_back_to_flat(self):
+        """sections가 없으면 기존 방식으로 청킹"""
+        chunker = DocumentChunker(chunk_size=50, chunk_overlap=10)
+        text = "가나다라마바사. " * 20
+        chunks = chunker.chunk(text, metadata={"filename": "doc.pdf"})
+        assert len(chunks) > 1
+        # section_title이 없어야 함
+        assert "section_title" not in chunks[0].metadata
+
+    def test_single_section_falls_back_to_flat(self):
+        """섹션이 1개뿐이면 기존 방식 사용"""
+        chunker = DocumentChunker(chunk_size=50, chunk_overlap=10)
+        text = "내용. " * 30
+        sections = [{"title": "유일한 섹션", "offset": 0, "page": 0, "font_size": 14.0}]
+        chunks = chunker.chunk(text, metadata={"sections": sections})
+        assert len(chunks) > 1
+        assert "section_title" not in chunks[0].metadata
+
+    def test_pptx_slide_chunking(self):
+        """PPTX 슬라이드 단위 섹션 청킹 — slide_num 메타데이터"""
+        chunker = DocumentChunker(chunk_size=500, chunk_overlap=0)
+        text = "[슬라이드 1]\n프로젝트 개요 내용\n\n[슬라이드 2]\n일정 계획 내용\n\n[슬라이드 3]\n예산 현황"
+        sections = [
+            {"title": "프로젝트 개요", "slide_num": 1, "offset": 0},
+            {"title": "일정 계획", "slide_num": 2, "offset": 22},
+            {"title": "예산 현황", "slide_num": 3, "offset": 40},
+        ]
+        chunks = chunker.chunk(text, metadata={"filename": "deck.pptx", "sections": sections})
+        assert len(chunks) >= 3
+        slide_nums = [c.metadata.get("slide_num") for c in chunks if "slide_num" in c.metadata]
+        assert 1 in slide_nums
+        assert 2 in slide_nums
+
+    def test_sections_not_propagated_to_chunk_meta(self):
+        """sections 리스트 자체는 개별 청크 메타데이터에 포함되지 않음"""
+        chunker = DocumentChunker(chunk_size=500, chunk_overlap=0)
+        text = "A 내용\n\nB 내용"
+        sections = [
+            {"title": "A", "offset": 0, "page": 0, "font_size": 14.0},
+            {"title": "B", "offset": 7, "page": 0, "font_size": 14.0},
+        ]
+        chunks = chunker.chunk(text, metadata={"filename": "test.pdf", "sections": sections})
+        for c in chunks:
+            assert "sections" not in c.metadata
+
+    def test_large_section_gets_split(self):
+        """chunk_size를 초과하는 섹션은 2차 분할"""
+        chunker = DocumentChunker(chunk_size=50, chunk_overlap=10)
+        sec1 = "짧은 섹션. "
+        sec2 = "긴 섹션 내용입니다. " * 20  # ~200자
+        text = sec1 + sec2
+        sections = [
+            {"title": "짧은 섹션", "offset": 0, "page": 0, "font_size": 14.0},
+            {"title": "긴 섹션", "offset": len(sec1), "page": 1, "font_size": 14.0},
+        ]
+        chunks = chunker.chunk(text, metadata={"sections": sections})
+        # 긴 섹션이 여러 청크로 분할되어야 함
+        long_chunks = [c for c in chunks if c.metadata.get("section_title") == "긴 섹션"]
+        assert len(long_chunks) > 1
+
+
 # === ChatChunker 테스트 ===
 
 

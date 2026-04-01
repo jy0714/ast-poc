@@ -194,12 +194,16 @@ class DocumentParser:
         """PDF 문서 객체에서 텍스트 및 메타데이터 추출
 
         텍스트 레이어가 없거나 빈약한 페이지는 Tesseract OCR로 폴백.
+        폰트 크기 분석으로 헤딩(섹션 경계)을 감지하여 sections 메타데이터에 포함.
         """
         import fitz
 
         pages_text: list[str] = []
         ocr_used = False
         ocr_threshold = 50  # 페이지당 최소 문자 수 — 이하이면 OCR 시도
+
+        # 섹션 감지를 위한 블록 수집
+        all_blocks: list[dict[str, Any]] = []
 
         for page_num in range(len(doc)):
             page = doc[page_num]
@@ -215,7 +219,15 @@ class DocumentParser:
             if text:
                 pages_text.append(text)
 
+            # 폰트 크기 기반 섹션 감지 (OCR 페이지 제외)
+            if len(page.get_text("text").strip()) >= ocr_threshold:
+                blocks = self._extract_text_blocks_with_font(page, page_num)
+                all_blocks.extend(blocks)
+
         full_text = "\n\n".join(pages_text)
+
+        # 섹션 경계 감지
+        sections = self._detect_sections(all_blocks)
 
         # PDF 메타데이터 추출
         pdf_meta = doc.metadata or {}
@@ -225,6 +237,9 @@ class DocumentParser:
             "page_count": len(doc),
             "is_ocr": ocr_used,
         }
+
+        if sections:
+            metadata["sections"] = sections
 
         created_date = pdf_meta.get("creationDate", "")
         if created_date:
@@ -237,6 +252,84 @@ class DocumentParser:
             page_count=len(doc),
             metadata=metadata,
         )
+
+    @staticmethod
+    def _extract_text_blocks_with_font(page: Any, page_num: int) -> list[dict[str, Any]]:
+        """페이지에서 텍스트 블록과 폰트 크기를 추출"""
+        blocks: list[dict[str, Any]] = []
+        page_dict = page.get_text("dict", flags=11)  # TEXT + IMAGES flags
+
+        for block in page_dict.get("blocks", []):
+            if block.get("type") != 0:  # 텍스트 블록만
+                continue
+            for line in block.get("lines", []):
+                line_text = ""
+                max_font_size = 0.0
+                is_bold = False
+                for span in line.get("spans", []):
+                    span_text = span.get("text", "").strip()
+                    if span_text:
+                        line_text += span_text + " "
+                        font_size = span.get("size", 0.0)
+                        if font_size > max_font_size:
+                            max_font_size = font_size
+                        font_name = span.get("font", "").lower()
+                        if "bold" in font_name or (span.get("flags", 0) & 2 ** 4):
+                            is_bold = True
+
+                line_text = line_text.strip()
+                if line_text:
+                    blocks.append({
+                        "text": line_text,
+                        "font_size": max_font_size,
+                        "is_bold": is_bold,
+                        "page": page_num,
+                    })
+
+        return blocks
+
+    @staticmethod
+    def _detect_sections(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """폰트 크기 분석으로 헤딩(섹션 경계)을 감지
+
+        본문의 중앙값 폰트 크기보다 1.2배 이상 큰 텍스트를 헤딩으로 판단.
+        반환: [{"title": str, "page": int, "font_size": float, "offset": int}, ...]
+        offset은 full_text 내에서의 대략적 문자 위치.
+        """
+        if not blocks:
+            return []
+
+        # 폰트 크기 중앙값 계산
+        font_sizes = sorted(b["font_size"] for b in blocks if b["font_size"] > 0)
+        if not font_sizes:
+            return []
+
+        median_size = font_sizes[len(font_sizes) // 2]
+        heading_threshold = median_size * 1.2
+
+        # 헤딩 감지
+        sections: list[dict[str, Any]] = []
+        char_offset = 0
+
+        for block in blocks:
+            text = block["text"]
+            is_heading = (
+                block["font_size"] >= heading_threshold
+                and len(text) < 200  # 헤딩은 보통 짧음
+                and (block["is_bold"] or block["font_size"] >= median_size * 1.4)
+            )
+
+            if is_heading:
+                sections.append({
+                    "title": text,
+                    "page": block["page"],
+                    "font_size": round(block["font_size"], 1),
+                    "offset": char_offset,
+                })
+
+            char_offset += len(text) + 1  # +1 for newline
+
+        return sections
 
     def _ocr_page(self, page: Any) -> str:
         """PyMuPDF 페이지를 이미지로 렌더링 후 Tesseract OCR 수행"""
@@ -355,17 +448,27 @@ class DocumentParser:
         """PPTX 프레젠테이션에서 텍스트 및 메타데이터 추출
 
         슬라이드별 텍스트 프레임만 추출, 발표자 노트 제외.
+        sections 메타데이터에 슬라이드 단위 경계 정보를 포함.
         """
         slides_text: list[str] = []
+        sections: list[dict[str, Any]] = []
+        char_offset = 0
 
         for slide_num, slide in enumerate(prs.slides, 1):
             texts: list[str] = []
+            slide_title = ""
+
             for shape in slide.shapes:
                 if shape.has_text_frame:
                     for paragraph in shape.text_frame.paragraphs:
                         text = paragraph.text.strip()
                         if text:
                             texts.append(text)
+                    # 슬라이드 제목 추출 (첫 번째 텍스트 또는 title placeholder)
+                    if not slide_title and hasattr(shape, "placeholder_format"):
+                        ph = shape.placeholder_format
+                        if ph and ph.idx == 0:  # title placeholder
+                            slide_title = shape.text_frame.text.strip()
 
                 # 테이블 내 텍스트 추출
                 if shape.has_table:
@@ -375,8 +478,20 @@ class DocumentParser:
                             texts.append(row_text)
 
             if texts:
+                if not slide_title:
+                    slide_title = texts[0][:100]  # fallback: 첫 번째 텍스트
+
                 slide_header = f"[슬라이드 {slide_num}]"
-                slides_text.append(f"{slide_header}\n" + "\n".join(texts))
+                slide_content = f"{slide_header}\n" + "\n".join(texts)
+
+                sections.append({
+                    "title": slide_title,
+                    "slide_num": slide_num,
+                    "offset": char_offset,
+                })
+
+                slides_text.append(slide_content)
+                char_offset += len(slide_content) + 2  # +2 for \n\n separator
 
         full_text = "\n\n".join(slides_text)
 
@@ -387,6 +502,9 @@ class DocumentParser:
             "title": props.title or "",
             "slide_count": len(prs.slides),
         }
+
+        if sections:
+            metadata["sections"] = sections
 
         return ParsedDocument(
             filename=filename,

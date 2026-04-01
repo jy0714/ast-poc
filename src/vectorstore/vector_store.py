@@ -21,11 +21,64 @@ from src.chunkers.metadata_enricher import (
     deserialize_metadata_from_chroma,
     serialize_metadata_for_chroma,
 )
-from src.embeddings.embedding_service import EmbeddingService
+from src.embeddings.embedding_service import EmbeddingDimensionError, EmbeddingService
 from src.utils.config import settings
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# --- BM25 토크나이저 (kiwipiepy 우선, 정규식 fallback) ---
+
+_USE_KIWI = False
+_kiwi_instance = None
+
+try:
+    from kiwipiepy import Kiwi as _Kiwi
+
+    _kiwi_instance = _Kiwi()
+    _USE_KIWI = True
+    logger.info("kiwipiepy 형태소 분석기 로드 완료, BM25 토크나이저로 사용")
+except ImportError:
+    logger.info("kiwipiepy 미설치, 정규식 기반 BM25 토크나이저 사용")
+
+# 추출할 품사 태그 (명사/동사/형용사/부사 계열)
+_KIWI_POS_TAGS = frozenset({
+    "NNG",  # 일반명사
+    "NNP",  # 고유명사
+    "NNB",  # 의존명사
+    "VV",   # 동사
+    "VA",   # 형용사
+    "MAG",  # 일반부사
+    "SL",   # 외국어 (영어 등)
+    "SH",   # 한자
+    "SN",   # 숫자
+})
+
+
+def _kiwi_tokenize(text: str) -> list[str]:
+    """kiwipiepy 또는 정규식 fallback으로 토큰 추출"""
+    if _USE_KIWI and _kiwi_instance is not None:
+        tokens: list[str] = []
+        for token in _kiwi_instance.tokenize(text):
+            if token.tag not in _KIWI_POS_TAGS:
+                continue
+            form = token.form
+            # 외국어(SL)는 3글자 이상, 그 외는 2글자 이상
+            min_len = 3 if token.tag == "SL" else 2
+            if len(form) < min_len:
+                continue
+            if token.tag == "SL":
+                form = form.lower()
+            tokens.append(form)
+        return tokens
+
+    # fallback: 정규식 기반
+    import re
+
+    tokens = []
+    tokens.extend(re.findall(r"[가-힣]{2,}", text))
+    tokens.extend(w.lower() for w in re.findall(r"[a-zA-Z]{3,}", text))
+    return tokens
 
 
 class VectorStoreService:
@@ -101,6 +154,10 @@ class VectorStoreService:
             return 0
 
         collection = self._get_collection()
+
+        # 기존 컬렉션에 데이터가 있으면 벡터 차원 호환성 검증
+        if collection.count() > 0:
+            self._validate_embedding_dimension(collection)
 
         # 기존 ID 확인 → 중복 제거
         chunk_ids = [c.chunk_id for c in chunks]
@@ -266,6 +323,13 @@ class VectorStoreService:
             if cid not in result_map:
                 result_map[cid] = result
 
+        # RRF 최소 스코어 임계값 필터링
+        min_score = settings.rrf_min_score
+        if min_score > 0:
+            rrf_scores = {
+                cid: score for cid, score in rrf_scores.items() if score >= min_score
+            }
+
         # RRF 스코어 기준 정렬
         sorted_ids = sorted(rrf_scores, key=lambda x: rrf_scores[x], reverse=True)
 
@@ -276,11 +340,63 @@ class VectorStoreService:
             entry["search_method"] = "hybrid"
             results.append(entry)
 
+        filtered_count = len(result_map) - len(rrf_scores) if min_score > 0 else 0
         logger.info(
             f"하이브리드 검색: 벡터={len(vector_results)}건, "
             f"BM25={len(bm25_results)}건 → RRF={len(results)}건"
+            + (f" (임계값 {min_score} 이하 {filtered_count}건 필터링)" if filtered_count else "")
         )
         return results
+
+    def get_collection_dimension(self) -> int | None:
+        """기존 컬렉션의 벡터 차원을 조회
+
+        Returns:
+            벡터 차원 수, 비어 있으면 None
+        """
+        collection = self._get_collection()
+        if collection.count() == 0:
+            return None
+
+        sample = collection.peek(limit=1)
+        if sample is None:
+            return None
+
+        embeddings = sample.get("embeddings")
+        if embeddings is None:
+            return None
+
+        try:
+            if len(embeddings) == 0 or len(embeddings[0]) == 0:
+                return None
+        except (TypeError, IndexError):
+            return None
+
+        return len(embeddings[0])
+
+    def _validate_embedding_dimension(self, collection: chromadb.Collection) -> None:
+        """현재 임베딩 모델과 기존 컬렉션의 벡터 차원이 일치하는지 검증
+
+        Raises:
+            EmbeddingDimensionError: 차원 불일치 시
+        """
+        sample = collection.peek(limit=1)
+        if sample is None:
+            return
+
+        embeddings = sample.get("embeddings")
+        if embeddings is None:
+            return
+
+        # ChromaDB peek()은 numpy array를 반환할 수 있음
+        try:
+            if len(embeddings) == 0 or len(embeddings[0]) == 0:
+                return
+        except (TypeError, IndexError):
+            return
+
+        existing_dim = len(embeddings[0])
+        self._embedding_service.validate_dimension(existing_dim)
 
     def delete_collection(self) -> None:
         """현재 컬렉션 삭제"""
@@ -383,19 +499,12 @@ class VectorStoreService:
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
-        """텍스트를 토큰으로 분할 (BM25용 간이 토크나이저)
+        """텍스트를 토큰으로 분할 (BM25용)
 
-        한국어: 공백 + 2글자 이상 한글
-        영어: 공백 분리 + 소문자
+        kiwipiepy 형태소 분석기를 사용하여 명사/동사/형용사 등
+        의미 있는 형태소를 추출. kiwipiepy가 없으면 정규식 fallback.
         """
-        import re
-
-        tokens: list[str] = []
-        # 한국어 단어
-        tokens.extend(re.findall(r"[가-힣]{2,}", text))
-        # 영어 단어 (소문자)
-        tokens.extend(w.lower() for w in re.findall(r"[a-zA-Z]{3,}", text))
-        return tokens
+        return _kiwi_tokenize(text)
 
     @staticmethod
     def _build_chroma_filter(filters: dict[str, Any]) -> dict[str, Any]:

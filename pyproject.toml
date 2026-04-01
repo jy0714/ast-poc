@@ -39,6 +39,9 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     "aiosqlite>=0.20.0",
 
+    # === Korean NLP ===
+    "kiwipiepy>=0.18.0",
+
     # === Utilities ===
     "pydantic>=2.8.0",
     "pydantic-settings>=2.4.0",

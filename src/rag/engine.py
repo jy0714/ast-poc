@@ -164,6 +164,9 @@ class RAGEngine:
         # 2. 컨텍스트 조합
         context_texts = [self._format_source_context(s) for s in sources]
 
+        # 검색 결과 (LLM에 전달되는 context) 로깅
+        self._log_sources(question, sources, parsed.intent)
+
         # 3. LLM 응답 생성
         try:
             answer = await self.llm_router.generate(
@@ -178,10 +181,12 @@ class RAGEngine:
                 "아래 검색 결과를 직접 확인해 주세요."
             )
 
+        # 최종 답변 로깅 (context와 비교 가능하도록)
         logger.info(
             f"RAG 질의 완료: case={self.case_id}, "
             f"검색={len(sources)}건, 보안={is_secure}, 의도={parsed.intent}"
         )
+        logger.debug(f"[답변] case={self.case_id}\n{answer}")
 
         return QueryResult(
             answer=answer,
@@ -212,6 +217,9 @@ class RAGEngine:
         # 1. 하이브리드 검색
         sources = self.search(query=search_query, filters=merged_filters, n_results=n_results)
 
+        # 검색 결과 (LLM에 전달되는 context) 로깅
+        self._log_sources(question, sources, parsed.intent)
+
         # 2. 컨텍스트 조합
         context_texts = [self._format_source_context(s) for s in sources]
 
@@ -223,6 +231,25 @@ class RAGEngine:
         )
 
         return token_stream, sources
+
+    def _log_sources(
+        self,
+        question: str,
+        sources: list[SourceReference],
+        intent: str = "",
+    ) -> None:
+        """검색된 청크(sources)를 로깅 — LLM에 전달되는 context 추적용"""
+        logger.info(
+            f"[검색 context] case={self.case_id}, "
+            f"질의='{question[:80]}', 의도={intent}, 출처={len(sources)}건"
+        )
+        for i, s in enumerate(sources):
+            logger.debug(
+                f"  [출처 {i + 1}] type={s.source_type}, file={s.filename}, "
+                f"score={s.score:.4f}, method={s.search_method}, "
+                f"subject={s.subject or '-'}, date={s.date or '-'}\n"
+                f"    content: {s.content[:200]}{'...' if len(s.content) > 200 else ''}"
+            )
 
     @staticmethod
     def _format_source_context(source: SourceReference) -> str:

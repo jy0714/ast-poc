@@ -9,7 +9,7 @@ def test_default_settings():
         _env_file=None,  # .env 파일 무시
     )
     assert s.ollama_llm_model == "gpt-oss:20b"
-    assert s.ollama_embed_model == "nomic-embed-text"
+    assert s.ollama_embed_model == "bge-m3"
     assert s.security_mode == "on"
     assert s.is_secure_mode is True
 

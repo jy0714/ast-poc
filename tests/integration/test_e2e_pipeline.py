@@ -1,11 +1,12 @@
 """통합 테스트 — 케이스 생성 → 인덱싱 → RAG 질의 전체 파이프라인
 
 FastAPI TestClient를 통해 API 레벨에서 전체 흐름을 검증한다.
-Ollama 없이 동작하도록 LLM/임베딩은 mock 처리한다.
+Ollama에 현재 설정된 임베딩 모델이 설치되어 있어야 통과한다.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import time
@@ -21,6 +22,28 @@ from src.api.routes import chat as chat_mod
 from src.api.routes import indexing as indexing_mod
 from src.cases.case_store import CaseStore
 from src.indexing.pipeline import IndexingPipeline
+
+
+def _embed_model_available() -> bool:
+    """Ollama 서버 + 현재 임베딩 모델 설치 여부 확인"""
+    try:
+        import urllib.request
+
+        from src.utils.config import settings
+
+        req = urllib.request.Request("http://localhost:11434/api/tags", method="GET")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read())
+            model_names = [m.get("name", "").split(":")[0] for m in data.get("models", [])]
+            return settings.ollama_embed_model in model_names
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _embed_model_available(),
+    reason="Ollama 서버가 실행되지 않거나 임베딩 모델이 설치되지 않았습니다",
+)
 
 
 @pytest.fixture()

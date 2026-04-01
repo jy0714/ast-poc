@@ -51,6 +51,7 @@ def store(mock_embedding):
             mock_settings.embed_batch_size = 50
             mock_settings.search_top_k = 10
             mock_settings.rrf_k = 60
+            mock_settings.rrf_min_score = 0.0141
 
             svc = VectorStoreService(
                 collection_name=collection_name,
@@ -196,6 +197,39 @@ class TestHybridSearch:
         results = store.search("감사 보고서", n_results=4)
         scores = [r["score"] for r in results]
         assert scores == sorted(scores, reverse=True)
+
+    def test_hybrid_rrf_min_score_filters_low(self, store):
+        """RRF 최소 스코어 임계값 이하 결과 필터링"""
+        chunks = _make_chunks([
+            "감사 보고서 비용 분석 상세 내용",
+            "감사 결과 보고 요약",
+            "완전히 무관한 문서 내용입니다 날씨 맑음",
+        ])
+        store.add_chunks(chunks)
+
+        # 임계값 없이 검색 → 전체 결과 수 확인
+        results_no_filter = store.search("감사 보고서", n_results=3)
+
+        # 매우 높은 임계값 설정 → 결과가 줄어야 함
+        from unittest.mock import patch as _patch
+
+        with _patch("src.vectorstore.vector_store.settings") as mock_cfg:
+            mock_cfg.search_top_k = 10
+            mock_cfg.rrf_k = 60
+            mock_cfg.rrf_min_score = 99.0  # 불가능한 높은 임계값
+            results_high = store.search("감사 보고서", n_results=3)
+
+        assert len(results_high) == 0
+        assert len(results_no_filter) > 0
+
+    def test_hybrid_rrf_min_score_zero_no_filter(self, store):
+        """rrf_min_score=0 이면 필터링 없음"""
+        chunks = _make_chunks(["감사 보고서", "비용 분석"])
+        store.add_chunks(chunks)
+
+        results = store.search("감사", n_results=2)
+        assert len(results) > 0
+        assert all(r["score"] > 0 for r in results)
 
 
 # === 컬렉션 관리 테스트 ===

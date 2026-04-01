@@ -214,6 +214,54 @@ class TestPdfParser:
         assert isinstance(result, ParsedDocument)
         assert result.page_count == 1
 
+    def test_pdf_section_detection(self, parser: DocumentParser):
+        """PDF 헤딩(큰 폰트) 감지 → sections 메타데이터"""
+        try:
+            import fitz
+        except ImportError:
+            pytest.skip("PyMuPDF가 설치되지 않았습니다")
+
+        path = TEST_DIR / "test_sections.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        # 헤딩 (큰 폰트 + 볼드)
+        page.insert_text((72, 72), "Chapter 1: Introduction", fontsize=18, fontname="helv")
+        # 본문 (작은 폰트)
+        page.insert_text((72, 120), "This is the body text of chapter one.", fontsize=11)
+        page.insert_text((72, 140), "More body content here.", fontsize=11)
+        # 두 번째 헤딩
+        page.insert_text((72, 200), "Chapter 2: Findings", fontsize=18, fontname="helv")
+        page.insert_text((72, 240), "Finding details here.", fontsize=11)
+        doc.save(str(path))
+        doc.close()
+
+        result = parser.parse(path)
+        sections = result.metadata.get("sections", [])
+        # 큰 폰트 텍스트가 섹션으로 감지되어야 함
+        assert len(sections) >= 1
+        section_titles = [s["title"] for s in sections]
+        assert any("Chapter" in t for t in section_titles)
+
+    def test_pdf_no_sections_when_uniform_font(self, parser: DocumentParser):
+        """동일 폰트 크기 → 섹션 없음"""
+        try:
+            import fitz
+        except ImportError:
+            pytest.skip("PyMuPDF가 설치되지 않았습니다")
+
+        path = TEST_DIR / "test_uniform.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Line one of text.", fontsize=12)
+        page.insert_text((72, 100), "Line two of text.", fontsize=12)
+        page.insert_text((72, 128), "Line three of text.", fontsize=12)
+        doc.save(str(path))
+        doc.close()
+
+        result = parser.parse(path)
+        sections = result.metadata.get("sections", [])
+        assert len(sections) == 0
+
 
 # === DOCX 파서 테스트 ===
 
@@ -342,6 +390,33 @@ class TestPptxParser:
 
         result = parser.parse_bytes(raw, "test.pptx")
         assert "바이트 테스트" in result.content
+
+    def test_parse_pptx_sections_metadata(self, parser: DocumentParser):
+        """PPTX 파싱 시 슬라이드별 sections 메타데이터 생성"""
+        try:
+            from pptx import Presentation
+        except ImportError:
+            pytest.skip("python-pptx가 설치되지 않았습니다")
+
+        path = TEST_DIR / "test_sections.pptx"
+        prs = Presentation()
+        # 슬라이드 1
+        slide1 = prs.slides.add_slide(prs.slide_layouts[1])
+        slide1.shapes.title.text = "프로젝트 개요"
+        slide1.placeholders[1].text = "개요 내용"
+        # 슬라이드 2
+        slide2 = prs.slides.add_slide(prs.slide_layouts[1])
+        slide2.shapes.title.text = "예산 현황"
+        slide2.placeholders[1].text = "예산 내용"
+        prs.save(str(path))
+
+        result = parser.parse(path)
+        sections = result.metadata.get("sections", [])
+        assert len(sections) == 2
+        assert sections[0]["title"] == "프로젝트 개요"
+        assert sections[0]["slide_num"] == 1
+        assert sections[1]["title"] == "예산 현황"
+        assert sections[1]["slide_num"] == 2
 
 
 # === XLSX 파서 테스트 ===

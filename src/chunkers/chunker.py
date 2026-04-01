@@ -59,10 +59,11 @@ class Chunk:
 
 
 class DocumentChunker:
-    """문서용 청커 — LangChain RecursiveCharacterTextSplitter 기반
+    """문서용 청커 — 섹션 인식 + RecursiveCharacterTextSplitter 기반
 
-    문서 텍스트를 의미 단위(단락, 문장, 단어)를 존중하면서
-    설정된 크기로 분할. 오버랩으로 맥락 연속성 보장.
+    sections 메타데이터가 있으면 섹션 단위로 먼저 분할한 뒤,
+    각 섹션을 chunk_size 이내로 2차 분할. 섹션이 없으면 기존 방식 사용.
+    PPTX는 슬라이드 단위, PDF는 헤딩 기반 섹션 단위로 청킹.
     """
 
     def __init__(
@@ -76,6 +77,8 @@ class DocumentChunker:
     def chunk(self, text: str, metadata: dict[str, Any] | None = None) -> list[Chunk]:
         """문서 텍스트를 청크로 분할
 
+        metadata에 sections가 있으면 섹션 단위 청킹 수행.
+
         Args:
             text: 분할할 텍스트
             metadata: 모든 청크에 부착할 공통 메타데이터
@@ -86,6 +89,16 @@ class DocumentChunker:
         if not text or not text.strip():
             return []
 
+        base_meta = metadata or {}
+        sections = base_meta.get("sections")
+
+        if sections and len(sections) >= 2:
+            return self._chunk_by_sections(text, sections, base_meta)
+
+        return self._chunk_flat(text, base_meta)
+
+    def _chunk_flat(self, text: str, base_meta: dict[str, Any]) -> list[Chunk]:
+        """기존 방식: RecursiveCharacterTextSplitter로 일괄 분할"""
         from langchain_text_splitters import RecursiveCharacterTextSplitter
 
         splitter = RecursiveCharacterTextSplitter(
@@ -96,12 +109,14 @@ class DocumentChunker:
         )
 
         splits = splitter.split_text(text)
-        base_meta = metadata or {}
+
+        # sections는 청크 메타데이터에 포함하지 않음 (크기 절약)
+        clean_meta = {k: v for k, v in base_meta.items() if k != "sections"}
 
         chunks: list[Chunk] = []
         for i, split_text in enumerate(splits):
             chunk_meta = {
-                **base_meta,
+                **clean_meta,
                 "chunk_index": i,
                 "total_chunks": len(splits),
             }
@@ -119,12 +134,90 @@ class DocumentChunker:
         )
         return chunks
 
+    def _chunk_by_sections(
+        self, text: str, sections: list[dict[str, Any]], base_meta: dict[str, Any]
+    ) -> list[Chunk]:
+        """섹션 단위로 분할 후 각 섹션 내에서 2차 분할
+
+        섹션 경계에서 텍스트를 나눈 뒤, chunk_size를 초과하는
+        섹션은 RecursiveCharacterTextSplitter로 재분할.
+        """
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=self.chunk_size,
+            chunk_overlap=self.chunk_overlap,
+            separators=["\n\n", "\n", ". ", "? ", "! ", " ", ""],
+            length_function=len,
+        )
+
+        # sections는 청크 메타데이터에 포함하지 않음
+        clean_meta = {k: v for k, v in base_meta.items() if k != "sections"}
+
+        # 섹션별 텍스트 슬라이싱
+        section_texts: list[tuple[str, dict[str, Any]]] = []
+        for i, sec in enumerate(sections):
+            start = sec["offset"]
+            end = sections[i + 1]["offset"] if i + 1 < len(sections) else len(text)
+            sec_text = text[start:end].strip()
+            if sec_text:
+                section_texts.append((sec_text, sec))
+
+        # 섹션 이전 텍스트 (프리앰블)
+        if sections and sections[0]["offset"] > 0:
+            preamble = text[: sections[0]["offset"]].strip()
+            if preamble:
+                section_texts.insert(0, (preamble, {"title": "(서문)"}))
+
+        all_chunks: list[Chunk] = []
+        global_idx = 0
+
+        for sec_text, sec_info in section_texts:
+            sec_title = sec_info.get("title", "")
+
+            if len(sec_text) <= self.chunk_size:
+                splits = [sec_text]
+            else:
+                splits = splitter.split_text(sec_text)
+
+            for split_text in splits:
+                chunk_meta = {
+                    **clean_meta,
+                    "chunk_index": global_idx,
+                    "section_title": sec_title,
+                }
+                # PPTX 슬라이드 번호
+                if "slide_num" in sec_info:
+                    chunk_meta["slide_num"] = sec_info["slide_num"]
+                # PDF 페이지 번호
+                if "page" in sec_info:
+                    chunk_meta["section_page"] = sec_info["page"]
+
+                all_chunks.append(
+                    Chunk(
+                        content=split_text,
+                        metadata=chunk_meta,
+                        source_type="document",
+                    )
+                )
+                global_idx += 1
+
+        # total_chunks 업데이트
+        for c in all_chunks:
+            c.metadata["total_chunks"] = len(all_chunks)
+
+        logger.info(
+            f"섹션 기반 청킹 완료: {len(text)}자, {len(section_texts)}개 섹션 "
+            f"→ {len(all_chunks)}개 청크 (크기={self.chunk_size})"
+        )
+        return all_chunks
+
     def chunk_parsed_document(
         self, parsed_doc: Any, extra_metadata: dict[str, Any] | None = None
     ) -> list[Chunk]:
         """ParsedDocument 객체를 직접 청킹
 
-        ParsedDocument의 메타데이터를 각 청크에 전파.
+        ParsedDocument의 메타데이터(sections 포함)를 각 청크에 전파.
 
         Args:
             parsed_doc: DocumentParser가 반환한 ParsedDocument
