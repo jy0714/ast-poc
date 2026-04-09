@@ -91,8 +91,29 @@ cd frontend && npm install && cd ..
 
 # Ollama 모델 준비
 ollama pull gpt-oss:20b
-ollama pull nomic-embed-text
+ollama pull bge-m3
 ```
+
+### 환경 설정
+
+환경별 `.env` 예시 파일을 제공합니다. 대상 환경에 맞는 파일을 `.env`로 복사하세요.
+
+```bash
+# 개발 환경 (RTX 3060 12GB)
+cp .env.dev.example .env
+
+# 운영 환경 (A5000 24GB)
+cp .env.prod.example .env
+```
+
+| 설정 | 개발 (3060 12GB) | 운영 (A5000 24GB) |
+|------|-----------------|-------------------|
+| `EMBED_BATCH_SIZE` | 256 | 512 |
+| `INDEXING_STORE_BATCH_SIZE` | 2000 | 5000 |
+| `RERANK_ENABLED` | false | true |
+| `OLLAMA_BASE_URL` | localhost:11434 | ollama:11434 (Docker) |
+
+필요에 따라 `.env` 값을 직접 수정하거나, 환경 변수로 개별 오버라이드할 수 있습니다.
 
 ### 실행
 

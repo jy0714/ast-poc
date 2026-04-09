@@ -4,7 +4,7 @@
 
 **AST (Audit Support Tool) PoC**
 내부 이메일(PST), Teams 채팅(PST), 문서(PDF/DOCX/PPTX/XLSX)를 통합 검색하는 로컬 RAG 시스템.
-1TB PoC 규모 · NVIDIA A5000 24GB · 케이스 기반 운영
+1TB PoC 규모 · 테스트: NVIDIA RTX 3060 12GB · 운영: NVIDIA A5000 24GB · 케이스 기반 운영
 
 ## 아키텍처 v5 요약
 
@@ -15,7 +15,7 @@
                   └── 추가 자료 유입 ──┘
 ```
 
-### GPU 자원 분배 (A5000 24GB — 순차 전용)
+### GPU 자원 분배 (테스트: 3060 12GB / 운영: A5000 24GB — 순차 전용)
 - Phase A: 임베딩 모델이 VRAM 24GB 전체 사용 (LLM 언로드)
 - Phase B: LLM이 VRAM 24GB 전체 사용 (임베딩 언로드)
 - 동시 사용 없음 — 각 Phase에서 GPU 100% 활용

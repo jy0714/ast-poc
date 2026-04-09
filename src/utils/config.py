@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     # === Ollama ===
     ollama_base_url: str = "http://localhost:11434"
-    ollama_llm_model: str = "gpt-oss:20b"
+    ollama_llm_model: str = "gemma4:e4b"
     ollama_embed_model: str = "bge-m3"
 
     # === External LLM ===
