@@ -39,12 +39,22 @@ class Settings(BaseSettings):
     bm25_index_dir: str = "./data/bm25_index"
 
     # === Embedding ===
-    embed_batch_size: int = 100
+    embed_batch_size: int = 256  # VRAM에 따라 조정 (3060 12GB: 256, A5000 24GB: 512+)
+
+    # === Indexing Performance ===
+    indexing_workers: int = 0  # 파싱/청킹 병렬 워커 수 (0=CPU 코어 수 자동)
+    indexing_store_batch_size: int = 2000  # 벡터 저장 배치 크기 (3060 12GB 기준)
 
     # === Search ===
     search_top_k: int = 20  # 하이브리드 검색 초기 후보 수
     rrf_k: int = 60  # Reciprocal Rank Fusion 파라미터
     rrf_min_score: float = 0.0141  # RRF 최소 스코어 임계값 (한쪽만 10위 이하 필터링)
+
+    # === Reranker ===
+    rerank_enabled: bool = False  # 기본 OFF, API 요청별 또는 전역 토글 가능
+    rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    rerank_top_k_candidates: int = 50  # reranker에 넘길 초기 후보 수
+    rerank_top_n: int = 5  # reranker가 최종 선별할 결과 수
 
     # === API ===
     api_host: str = "0.0.0.0"

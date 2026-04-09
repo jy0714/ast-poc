@@ -137,15 +137,16 @@ class VectorStoreService:
             )
         return self._collection
 
-    def add_chunks(self, chunks: list[Chunk]) -> int:
+    def add_chunks(self, chunks: list[Chunk], rebuild_bm25: bool = True) -> int:
         """청크를 벡터 저장소에 추가
 
         1. EmbeddingService로 임베딩 생성
         2. ChromaDB에 벡터 + 메타데이터 저장
-        3. BM25 인덱스 갱신
+        3. BM25 인덱스 갱신 (rebuild_bm25=True일 때만)
 
         Args:
             chunks: 저장할 청크 리스트
+            rebuild_bm25: BM25 인덱스 재구축 여부 (대량 배치 시 False로 두고 마지막에 1회 호출)
 
         Returns:
             추가된 청크 수
@@ -193,13 +194,19 @@ class VectorStoreService:
         )
 
         # BM25 인덱스 갱신
-        self._rebuild_bm25_index()
+        if rebuild_bm25:
+            self._rebuild_bm25_index()
 
         logger.info(
             f"벡터 저장 완료: {len(new_chunks)}개 청크 추가 "
             f"(중복 {len(existing)}개 스킵), 컬렉션={self.collection_name}"
         )
         return len(new_chunks)
+
+    def rebuild_bm25(self) -> None:
+        """BM25 인덱스를 수동으로 재구축 (대량 인덱싱 후 1회 호출용)"""
+        self._rebuild_bm25_index()
+        self._save_bm25_index()
 
     def search(
         self,

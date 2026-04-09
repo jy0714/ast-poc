@@ -38,6 +38,7 @@ class ChatRequest(BaseModel):
     message: str
     security_mode: bool = True
     filters: dict | None = None
+    rerank: bool | None = None  # None이면 전역 설정(settings.rerank_enabled) 사용
 
 
 class SourceReference(BaseModel):
@@ -156,7 +157,10 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=400, detail="질문을 입력해 주세요")
 
     # RAG 질의
-    engine = RAGEngine(case_id=request.case_id)
+    engine = RAGEngine(
+        case_id=request.case_id,
+        rerank_enabled=request.rerank,
+    )
     result = await engine.query(
         question=request.message.strip(),
         filters=request.filters,
@@ -214,7 +218,10 @@ async def chat_stream(request: ChatRequest):
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="질문을 입력해 주세요")
 
-    engine = RAGEngine(case_id=request.case_id)
+    engine = RAGEngine(
+        case_id=request.case_id,
+        rerank_enabled=request.rerank,
+    )
 
     async def event_generator():
         collected_answer = ""

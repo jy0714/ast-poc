@@ -21,6 +21,10 @@ class EmbedModelRequest(BaseModel):
     model: str  # e.g. "bge-m3", "nomic-embed-text"
 
 
+class RerankModeRequest(BaseModel):
+    enabled: bool
+
+
 class SettingsResponse(BaseModel):
     security_mode: str
     ollama_llm_model: str
@@ -28,6 +32,7 @@ class SettingsResponse(BaseModel):
     openai_model: str
     chunk_size_docs: int
     chat_window_minutes: int
+    rerank_enabled: bool
 
 
 class EmbedModelResponse(BaseModel):
@@ -47,6 +52,7 @@ async def get_settings():
         openai_model=settings.openai_model,
         chunk_size_docs=settings.chunk_size_docs,
         chat_window_minutes=settings.chat_window_minutes,
+        rerank_enabled=settings.rerank_enabled,
     )
 
 
@@ -57,6 +63,19 @@ async def set_security_mode(request: SecurityModeRequest):
     return {
         "security_mode": settings.security_mode,
         "message": f"보안 모드가 {'ON (로컬 전용)' if settings.is_secure_mode else 'OFF (외부 API 허용)'}으로 변경되었습니다.",
+    }
+
+
+@router.put("/rerank-mode")
+async def set_rerank_mode(request: RerankModeRequest):
+    """Reranker ON/OFF 전역 토글"""
+    settings.rerank_enabled = request.enabled
+    status = "ON" if settings.rerank_enabled else "OFF"
+    logger.info(f"Reranker 모드 변경: {status}")
+    return {
+        "rerank_enabled": settings.rerank_enabled,
+        "rerank_model": settings.rerank_model,
+        "message": f"Reranker가 {status}으로 변경되었습니다.",
     }
 
 

@@ -48,7 +48,7 @@ def mock_vector_store():
     """add_chunks를 모킹한 VectorStore 팩토리"""
     def factory(case_id: str):
         store = MagicMock()
-        store.add_chunks.side_effect = lambda chunks: len(chunks)
+        store.add_chunks.side_effect = lambda chunks, rebuild_bm25=True: len(chunks)
         return store
     return factory
 

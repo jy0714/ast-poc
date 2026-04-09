@@ -42,6 +42,9 @@ dependencies = [
     # === Korean NLP ===
     "kiwipiepy>=0.18.0",
 
+    # === Reranker ===
+    "FlagEmbedding>=1.2.0",
+
     # === Utilities ===
     "pydantic>=2.8.0",
     "pydantic-settings>=2.4.0",

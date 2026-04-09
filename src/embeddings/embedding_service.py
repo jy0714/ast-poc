@@ -14,6 +14,8 @@ validate_dimension()으로 호환성을 검증해야 함.
 
 from __future__ import annotations
 
+import httpx
+
 from src.utils.config import settings
 from src.utils.logger import get_logger
 
@@ -129,7 +131,11 @@ class EmbeddingService:
             ) from e
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """배치 텍스트 임베딩
+        """배치 텍스트 임베딩 — Ollama /api/embed 네이티브 배치 API 사용
+
+        LangChain OllamaEmbeddings.embed_documents()는 내부적으로 텍스트를
+        하나씩 순차 호출하므로 GPU 활용률이 낮음. Ollama의 /api/embed 엔드포인트는
+        input 배열을 한 번에 받아 GPU에서 진짜 배치 처리를 수행.
 
         Args:
             texts: 임베딩할 텍스트 리스트
@@ -143,15 +149,32 @@ class EmbeddingService:
         if not texts:
             return []
 
-        embeddings = self.get_langchain_embeddings()
         batch_size = settings.embed_batch_size
         all_vectors: list[list[float]] = []
+        url = f"{self.base_url}/api/embed"
 
         for i in range(0, len(texts), batch_size):
             batch = texts[i : i + batch_size]
             try:
-                vectors = embeddings.embed_documents(batch)
-                all_vectors.extend(vectors)
+                resp = httpx.post(
+                    url,
+                    json={"model": self.model, "input": batch},
+                    timeout=300.0,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                all_vectors.extend(data["embeddings"])
+            except httpx.HTTPStatusError as e:
+                raise ConnectionError(
+                    f"Ollama 배치 임베딩 실패 (batch {i // batch_size + 1}, "
+                    f"HTTP {e.response.status_code}, {self.base_url}, "
+                    f"모델: {self.model}): {e}"
+                ) from e
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
+                raise ConnectionError(
+                    f"Ollama 서버 연결 실패 ({self.base_url}, "
+                    f"모델: {self.model}): {e}"
+                ) from e
             except Exception as e:
                 raise ConnectionError(
                     f"Ollama 배치 임베딩 실패 (batch {i // batch_size + 1}, "

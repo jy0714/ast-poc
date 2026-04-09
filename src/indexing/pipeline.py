@@ -5,18 +5,25 @@
 
 파이프라인 단계:
     1. 파일 수집 (PST + 문서 경로 스캔)
-    2. 파싱 (PST → 이메일/채팅/첨부, 문서 → 텍스트)
-    3. 청킹 (소스 타입별 최적 분할)
-    4. 메타데이터 보강 (case_id, topics)
-    5. 벡터 저장 (ChromaDB + BM25)
+    2. 파싱 (PST → 이메일/채팅/첨부, 문서 → 텍스트)  [멀티프로세싱]
+    3. 청킹 (소스 타입별 최적 분할)                     [멀티프로세싱]
+    4. 메타데이터 보강 (case_id, topics)                [멀티프로세싱]
+    5. 벡터 저장 (ChromaDB + BM25)                     [GPU 배치]
+
+대용량(수백만 파일) 처리 시 CPU 코어를 모두 활용하여
+파싱+청킹을 병렬 처리하고, GPU는 임베딩에 집중합니다.
 
 진행률은 IndexingProgress 객체로 실시간 추적 가능.
 """
 
 from __future__ import annotations
 
+import multiprocessing as mp
+import os
+import queue
 import threading
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -37,6 +44,88 @@ from src.utils.config import settings
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _get_worker_count() -> int:
+    """파싱/청킹 워커 수 결정"""
+    if settings.indexing_workers > 0:
+        return settings.indexing_workers
+    return max(1, os.cpu_count() or 4)
+
+
+def _process_file_worker(args: tuple[str, str]) -> list[dict[str, Any]]:
+    """멀티프로세싱 워커: 단일 파일 → 파싱 → 청킹 → 메타데이터 보강 → 직렬화된 청크 반환
+
+    별도 프로세스에서 실행되므로 Chunk 객체를 dict로 직렬화하여 반환.
+    """
+    file_path_str, case_id = args
+    file_path = Path(file_path_str)
+
+    try:
+        suffix = file_path.suffix.lower()
+        doc_parser = DocumentParser()
+
+        if suffix in (".pst", ".ost"):
+            chunks = _process_pst_standalone(file_path, case_id, doc_parser)
+        else:
+            chunks = _process_document_standalone(file_path, case_id, doc_parser)
+
+        if chunks:
+            enrich_chunks(chunks, case_id=case_id)
+
+        return [
+            {
+                "content": c.content,
+                "metadata": c.metadata,
+                "chunk_id": c.chunk_id,
+                "source_type": c.source_type,
+            }
+            for c in chunks
+        ]
+    except Exception as e:
+        return [{"__error__": f"파일 처리 실패 ({file_path.name}): {e}"}]
+
+
+def _process_pst_standalone(
+    pst_path: Path, case_id: str, doc_parser: DocumentParser
+) -> list[Chunk]:
+    """독립 프로세스용 PST 처리"""
+    from src.parsers.pst_parser import PSTParser
+
+    parser = PSTParser(pst_path)
+    result = parser.parse()
+
+    all_chunks: list[Chunk] = []
+    pst_meta = {"pst_file": pst_path.name}
+
+    if result.emails:
+        email_chunker = EmailChunker()
+        all_chunks.extend(email_chunker.chunk(result.emails, metadata=pst_meta))
+
+    if result.chats:
+        chat_chunker = ChatChunker()
+        all_chunks.extend(chat_chunker.chunk_chat_messages(result.chats, extra_metadata=pst_meta))
+
+    if result.attachments:
+        att_chunker = AttachmentChunker()
+        all_chunks.extend(att_chunker.chunk(result.attachments, source_metadata=pst_meta))
+
+    return all_chunks
+
+
+def _process_document_standalone(
+    doc_path: Path, case_id: str, doc_parser: DocumentParser
+) -> list[Chunk]:
+    """독립 프로세스용 문서 처리"""
+    parsed = doc_parser.parse(doc_path)
+    docs = parsed if isinstance(parsed, list) else [parsed]
+
+    doc_chunker = DocumentChunker()
+    all_chunks: list[Chunk] = []
+    for doc in docs:
+        all_chunks.extend(doc_chunker.chunk_parsed_document(doc))
+
+    return all_chunks
 
 # 문서 파서가 지원하는 확장자
 _DOCUMENT_EXTENSIONS = DocumentParser.SUPPORTED_TYPES
@@ -226,9 +315,12 @@ class IndexingPipeline:
         case_id: str,
         cancel_flag: threading.Event | None = None,
     ) -> IndexingProgress:
-        """동기 인덱싱 실행
+        """동기 인덱싱 실행 (CPU/GPU 동시 스트리밍 파이프라인)
 
-        전체 파이프라인: 파일 수집 → 파싱 → 청킹 → 메타데이터 → 벡터 저장
+        CPU와 GPU를 동시에 활용하는 Producer-Consumer 구조:
+            [CPU 워커들: 파싱+청킹] ──큐──→ [GPU 스레드: 임베딩+저장]
+
+        파일 수가 적을 때는 오버헤드 없이 순차 처리로 fallback.
 
         Args:
             case_id: 인덱싱할 케이스 ID
@@ -261,48 +353,40 @@ class IndexingPipeline:
                 self.case_store.update_stats(case_id, total_documents=0, total_chunks=0)
                 return progress
 
-            # 2~4. 파싱 → 청킹 → 메타데이터 보강
-            all_chunks: list[Chunk] = []
+            # 2~5. 스트리밍 파이프라인 (CPU 파싱 + GPU 임베딩 동시 실행)
+            num_workers = _get_worker_count()
+            use_streaming = len(files) > num_workers * 2 and num_workers > 1
 
-            for file_path in files:
+            if use_streaming:
+                progress.phase = IndexingPhase.PARSING
+                stored_count = self._run_streaming_pipeline(
+                    files, case_id, progress, cancel_flag,
+                )
+            else:
+                # 파일 수가 적으면 순차 처리
+                progress.phase = IndexingPhase.PARSING
+                all_chunks = self._sequential_process_files(
+                    files, case_id, progress, cancel_flag,
+                )
                 if cancel_flag and cancel_flag.is_set():
                     progress.phase = IndexingPhase.CANCELLED
                     progress.completed_at = datetime.now()
                     self.case_store.update_status(case_id, CaseStatus.CREATED)
                     _save_indexing_log(progress, "cancelled")
-                    logger.info(f"인덱싱 취소됨: {case_id}")
                     return progress
 
-                try:
-                    chunks = self._process_file(file_path, case_id, progress)
-                    all_chunks.extend(chunks)
-                except Exception as e:
-                    error_msg = f"파일 처리 실패 ({file_path.name}): {e}"
-                    progress.errors.append(error_msg)
-                    logger.warning(error_msg)
-                finally:
-                    progress.processed_files += 1
+                progress.phase = IndexingPhase.STORING
+                stored_count = self._store_chunks_batch(
+                    all_chunks, case_id, cancel_flag,
+                )
 
-            # 5. 벡터 저장
-            progress.phase = IndexingPhase.STORING
-            stored_count = 0
-            if all_chunks:
-                vector_store = self._create_vector_store(case_id)
-                # 배치 단위로 저장
-                batch_size = 100
-                for i in range(0, len(all_chunks), batch_size):
-                    if cancel_flag and cancel_flag.is_set():
-                        progress.phase = IndexingPhase.CANCELLED
-                        self.case_store.update_status(case_id, CaseStatus.CREATED)
-                        return progress
-
-                    batch = all_chunks[i : i + batch_size]
-                    try:
-                        stored_count += vector_store.add_chunks(batch)
-                    except Exception as e:
-                        error_msg = f"벡터 저장 실패 (batch {i // batch_size}): {e}"
-                        progress.errors.append(error_msg)
-                        logger.warning(error_msg)
+            if cancel_flag and cancel_flag.is_set():
+                progress.phase = IndexingPhase.CANCELLED
+                progress.completed_at = datetime.now()
+                self.case_store.update_status(case_id, CaseStatus.CREATED)
+                _save_indexing_log(progress, "cancelled")
+                logger.info(f"인덱싱 취소됨: {case_id}")
+                return progress
 
             progress.total_chunks = stored_count
             progress.phase = IndexingPhase.COMPLETED
@@ -339,6 +423,218 @@ class IndexingPipeline:
             _save_indexing_log(progress, "error")
             logger.error(f"인덱싱 파이프라인 에러: {case_id} — {e}")
             return progress
+
+    # ------------------------------------------------------------------
+    # 스트리밍 파이프라인: CPU 파싱 → 큐 → GPU 임베딩+저장 동시 실행
+    # ------------------------------------------------------------------
+
+    def _run_streaming_pipeline(
+        self,
+        files: list[Path],
+        case_id: str,
+        progress: IndexingProgress,
+        cancel_flag: threading.Event | None = None,
+    ) -> int:
+        """CPU 파싱과 GPU 임베딩을 동시에 실행하는 스트리밍 파이프라인
+
+        구조:
+            [ProcessPoolExecutor 워커들] ──chunk_queue──→ [GPU 컨슈머 스레드]
+            CPU 코어 전체로 파싱+청킹         큐에 쌓이는 청크를 배치로 모아
+                                              GPU 임베딩 + ChromaDB 저장
+
+        Returns:
+            저장된 총 청크 수
+        """
+        num_workers = _get_worker_count()
+        batch_size = settings.indexing_store_batch_size
+        _SENTINEL = None  # 큐 종료 신호
+
+        # 청크 전달 큐 (메모리 제한: 배치 3개분 버퍼)
+        chunk_queue: queue.Queue[list[dict[str, Any]] | None] = queue.Queue(
+            maxsize=max(3, num_workers)
+        )
+
+        # GPU 컨슈머 결과
+        consumer_result = {"stored": 0, "errors": []}
+
+        def gpu_consumer() -> None:
+            """큐에서 청크를 꺼내 배치로 모아 GPU 임베딩 + 저장"""
+            vector_store = self._create_vector_store(case_id)
+            buffer: list[Chunk] = []
+            batch_num = 0
+
+            while True:
+                if cancel_flag and cancel_flag.is_set():
+                    break
+
+                try:
+                    item = chunk_queue.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+
+                if item is _SENTINEL:
+                    # 프로듀서 종료 — 남은 버퍼 플러시
+                    if buffer:
+                        batch_num += 1
+                        _flush_buffer(vector_store, buffer, batch_num, consumer_result)
+                        buffer.clear()
+                    break
+
+                # dict → Chunk 복원
+                for d in item:
+                    if "__error__" in d:
+                        consumer_result["errors"].append(d["__error__"])
+                    else:
+                        buffer.append(
+                            Chunk(
+                                content=d["content"],
+                                metadata=d["metadata"],
+                                chunk_id=d["chunk_id"],
+                                source_type=d["source_type"],
+                            )
+                        )
+
+                # 버퍼가 배치 크기에 도달하면 GPU로 플러시
+                while len(buffer) >= batch_size:
+                    batch_num += 1
+                    batch = buffer[:batch_size]
+                    buffer = buffer[batch_size:]
+                    _flush_buffer(vector_store, batch, batch_num, consumer_result)
+
+            # BM25 인덱스 최종 1회 구축
+            if consumer_result["stored"] > 0:
+                logger.info("BM25 인덱스 구축 시작...")
+                vector_store.rebuild_bm25()
+                logger.info("BM25 인덱스 구축 완료")
+
+        def _flush_buffer(
+            vector_store: Any,
+            batch: list[Chunk],
+            batch_num: int,
+            result: dict[str, Any],
+        ) -> None:
+            """배치를 GPU 임베딩 + ChromaDB에 저장"""
+            try:
+                count = vector_store.add_chunks(batch, rebuild_bm25=False)
+                result["stored"] += count
+                logger.info(
+                    f"[GPU] 배치 {batch_num} 저장 완료: {count}개 청크 "
+                    f"(누적 {result['stored']}개)"
+                )
+            except Exception as e:
+                error_msg = f"벡터 저장 실패 (batch {batch_num}): {e}"
+                result["errors"].append(error_msg)
+                logger.warning(error_msg)
+
+        # GPU 컨슈머 스레드 시작
+        consumer_thread = threading.Thread(
+            target=gpu_consumer, daemon=True, name=f"gpu-consumer-{case_id}"
+        )
+        consumer_thread.start()
+
+        # CPU 프로듀서: 멀티프로세싱으로 파싱+청킹
+        logger.info(
+            f"스트리밍 파이프라인 시작: {len(files)}개 파일, "
+            f"CPU 워커 {num_workers}개 + GPU 컨슈머 1개"
+        )
+
+        args = [(str(f), case_id) for f in files]
+
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(_process_file_worker, arg): arg for arg in args}
+
+            for future in as_completed(futures):
+                if cancel_flag and cancel_flag.is_set():
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    chunk_queue.put(_SENTINEL)
+                    consumer_thread.join(timeout=10)
+                    return consumer_result["stored"]
+
+                progress.processed_files += 1
+                try:
+                    result_dicts = future.result()
+                    # 청크를 큐에 넣어 GPU 컨슈머로 전달
+                    chunk_queue.put(result_dicts)
+                except Exception as e:
+                    file_str = futures[future][0]
+                    error_msg = f"워커 실패 ({Path(file_str).name}): {e}"
+                    progress.errors.append(error_msg)
+                    logger.warning(error_msg)
+
+                # 진행률 로그 (10% 단위)
+                if progress.total_files > 0:
+                    step = max(1, progress.total_files // 10)
+                    if progress.processed_files % step == 0:
+                        logger.info(
+                            f"[CPU] 파싱 진행: {progress.processed_files}/{progress.total_files} "
+                            f"({progress.progress_percent:.0f}%)"
+                        )
+
+        # 프로듀서 완료 — 종료 신호
+        chunk_queue.put(_SENTINEL)
+        consumer_thread.join()
+
+        # 컨슈머 에러를 progress에 병합
+        progress.errors.extend(consumer_result["errors"])
+
+        logger.info(
+            f"스트리밍 파이프라인 완료: 파일 {progress.processed_files}개, "
+            f"저장 {consumer_result['stored']}개 청크"
+        )
+        return consumer_result["stored"]
+
+    def _store_chunks_batch(
+        self,
+        chunks: list[Chunk],
+        case_id: str,
+        cancel_flag: threading.Event | None = None,
+    ) -> int:
+        """순차 모드용 벡터 저장 (파일 수가 적을 때)"""
+        if not chunks:
+            return 0
+
+        vector_store = self._create_vector_store(case_id)
+        batch_size = settings.indexing_store_batch_size
+        stored_count = 0
+
+        for i in range(0, len(chunks), batch_size):
+            if cancel_flag and cancel_flag.is_set():
+                return stored_count
+
+            batch = chunks[i : i + batch_size]
+            try:
+                stored_count += vector_store.add_chunks(batch, rebuild_bm25=False)
+            except Exception as e:
+                logger.warning(f"벡터 저장 실패: {e}")
+
+        vector_store.rebuild_bm25()
+        return stored_count
+
+    def _sequential_process_files(
+        self,
+        files: list[Path],
+        case_id: str,
+        progress: IndexingProgress,
+        cancel_flag: threading.Event | None = None,
+    ) -> list[Chunk]:
+        """순차 파싱 (파일 수가 적을 때 또는 fallback)"""
+        all_chunks: list[Chunk] = []
+
+        for file_path in files:
+            if cancel_flag and cancel_flag.is_set():
+                return all_chunks
+
+            try:
+                chunks = self._process_file(file_path, case_id, progress)
+                all_chunks.extend(chunks)
+            except Exception as e:
+                error_msg = f"파일 처리 실패 ({file_path.name}): {e}"
+                progress.errors.append(error_msg)
+                logger.warning(error_msg)
+            finally:
+                progress.processed_files += 1
+
+        return all_chunks
 
     @staticmethod
     def _normalize_path(raw: str) -> Path:

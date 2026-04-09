@@ -169,3 +169,100 @@ class TestFormatContext:
         source = SourceReference(content="내용만", source_type="")
         text = RAGEngine._format_source_context(source)
         assert "내용만" in text
+
+
+# === Reranker 통합 테스트 ===
+
+
+class TestRerankIntegration:
+    def test_rerank_disabled_by_default(self, mock_vector_store, mock_llm_router):
+        """rerank_enabled 기본값은 settings 기반 (기본 False)"""
+        engine = RAGEngine(
+            case_id="test",
+            vector_store=mock_vector_store,
+            llm_router=mock_llm_router,
+        )
+        assert engine.rerank_enabled is False
+
+    def test_rerank_disabled_uses_normal_search(self, mock_vector_store, mock_llm_router):
+        """rerank OFF → 기존 검색 그대로"""
+        engine = RAGEngine(
+            case_id="test",
+            vector_store=mock_vector_store,
+            llm_router=mock_llm_router,
+            rerank_enabled=False,
+        )
+        sources = engine.search("질의")
+        mock_vector_store.search.assert_called_once()
+        assert len(sources) == 3
+
+    @patch("src.rag.reranker.get_reranker")
+    def test_rerank_enabled_calls_reranker(
+        self, mock_get_reranker, mock_vector_store, mock_llm_router
+    ):
+        """rerank ON → reranker 호출"""
+        mock_reranker = MagicMock()
+        mock_reranker.rerank.return_value = [
+            {
+                "content": "reranked 내용",
+                "metadata": {"source_type": "email", "filename": "r.eml"},
+                "score": 0.5,
+                "rerank_score": 0.95,
+                "search_method": "hybrid",
+            }
+        ]
+        mock_get_reranker.return_value = mock_reranker
+
+        engine = RAGEngine(
+            case_id="test",
+            vector_store=mock_vector_store,
+            llm_router=mock_llm_router,
+            rerank_enabled=True,
+        )
+        sources = engine.search("질의")
+
+        # 후보 수 50개로 검색
+        call_kwargs = mock_vector_store.search.call_args[1]
+        assert call_kwargs["n_results"] == 50
+
+        # reranker 호출됨
+        mock_reranker.rerank.assert_called_once()
+
+        # rerank_score가 score로 매핑됨
+        assert len(sources) == 1
+        assert sources[0].score == pytest.approx(0.95)
+
+    def test_rerank_enabled_empty_results(self, mock_vector_store, mock_llm_router):
+        """rerank ON + 검색 결과 없음 → reranker 호출 안 됨"""
+        mock_vector_store.search.return_value = []
+        engine = RAGEngine(
+            case_id="test",
+            vector_store=mock_vector_store,
+            llm_router=mock_llm_router,
+            rerank_enabled=True,
+        )
+        sources = engine.search("질의")
+        assert sources == []
+
+    @pytest.mark.asyncio
+    @patch("src.rag.reranker.get_reranker")
+    async def test_query_with_rerank(
+        self, mock_get_reranker, mock_vector_store, mock_llm_router
+    ):
+        """전체 query 흐름에서 rerank 동작"""
+        mock_reranker = MagicMock()
+        mock_reranker.rerank.return_value = _mock_search_results(2)
+        for doc in mock_reranker.rerank.return_value:
+            doc["rerank_score"] = 0.9
+        mock_get_reranker.return_value = mock_reranker
+
+        engine = RAGEngine(
+            case_id="test",
+            vector_store=mock_vector_store,
+            llm_router=mock_llm_router,
+            rerank_enabled=True,
+        )
+        result = await engine.query("질문")
+
+        assert len(result.sources) == 2
+        mock_llm_router.generate.assert_called_once()

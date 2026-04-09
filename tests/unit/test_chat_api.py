@@ -178,6 +178,58 @@ class TestChatAPI:
         _, kwargs = mock_engine.query.call_args
         assert kwargs["filters"] == {"source_type": "email"}
 
+    @patch("src.api.routes.chat.RAGEngine")
+    def test_chat_rerank_parameter(self, mock_engine_cls, client, store):
+        """POST / — rerank 파라미터가 RAGEngine에 전달"""
+        case_id = _create_ready_case(store)
+
+        mock_engine = AsyncMock()
+        mock_engine.query.return_value = MagicMock(
+            answer="답변",
+            sources=[],
+            secure_mode=True,
+            case_id=case_id,
+        )
+        mock_engine_cls.return_value = mock_engine
+
+        resp = client.post("/api/analyst/chat/", json={
+            "case_id": case_id,
+            "message": "rerank 테스트",
+            "rerank": True,
+        })
+
+        assert resp.status_code == 200
+        # RAGEngine 생성 시 rerank_enabled=True 전달 확인
+        mock_engine_cls.assert_called_once_with(
+            case_id=case_id,
+            rerank_enabled=True,
+        )
+
+    @patch("src.api.routes.chat.RAGEngine")
+    def test_chat_rerank_default_none(self, mock_engine_cls, client, store):
+        """POST / — rerank 미지정 시 None 전달 (전역 설정 사용)"""
+        case_id = _create_ready_case(store)
+
+        mock_engine = AsyncMock()
+        mock_engine.query.return_value = MagicMock(
+            answer="답변",
+            sources=[],
+            secure_mode=True,
+            case_id=case_id,
+        )
+        mock_engine_cls.return_value = mock_engine
+
+        resp = client.post("/api/analyst/chat/", json={
+            "case_id": case_id,
+            "message": "기본 테스트",
+        })
+
+        assert resp.status_code == 200
+        mock_engine_cls.assert_called_once_with(
+            case_id=case_id,
+            rerank_enabled=None,
+        )
+
 
 # === 스트리밍 API ===
 

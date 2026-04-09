@@ -64,6 +64,7 @@ class RAGEngine:
         vector_store: VectorStoreService | None = None,
         llm_router: LLMRouter | None = None,
         top_k: int | None = None,
+        rerank_enabled: bool | None = None,
     ) -> None:
         """RAGEngine 초기화
 
@@ -72,6 +73,7 @@ class RAGEngine:
             vector_store: 벡터 저장소 (기본: case_id 기반 생성)
             llm_router: LLM 라우터 (기본: 새 인스턴스)
             top_k: 검색 결과 수 (기본: settings.search_top_k)
+            rerank_enabled: Reranker 사용 여부 (None이면 settings.rerank_enabled)
         """
         self.case_id = case_id
         self.vector_store = vector_store or VectorStoreService(
@@ -79,6 +81,9 @@ class RAGEngine:
         )
         self.llm_router = llm_router or LLMRouter()
         self.top_k = top_k or settings.search_top_k
+        self.rerank_enabled = (
+            rerank_enabled if rerank_enabled is not None else settings.rerank_enabled
+        )
 
     def search(
         self,
@@ -88,6 +93,12 @@ class RAGEngine:
     ) -> list[SourceReference]:
         """하이브리드 검색만 수행 (LLM 호출 없이)
 
+        rerank_enabled=True일 경우:
+            1. rerank_top_k_candidates개 후보를 하이브리드 검색으로 가져옴
+            2. Reranker로 rerank_top_n개 선별
+        rerank_enabled=False일 경우:
+            기존 동작 (하이브리드 검색 → top_k 반환)
+
         Args:
             query: 검색 쿼리
             filters: 메타데이터 필터 (source_type, date 등)
@@ -96,11 +107,29 @@ class RAGEngine:
         Returns:
             SourceReference 리스트 (점수 내림차순)
         """
-        results = self.vector_store.search(
-            query=query,
-            n_results=n_results or self.top_k,
-            filters=filters,
-        )
+        if self.rerank_enabled:
+            # reranker용: 넉넉한 후보를 가져온 뒤 reranker가 선별
+            candidate_count = settings.rerank_top_k_candidates
+            results = self.vector_store.search(
+                query=query,
+                n_results=candidate_count,
+                filters=filters,
+            )
+
+            if results:
+                from src.rag.reranker import get_reranker
+
+                reranker = get_reranker()
+                final_n = n_results or settings.rerank_top_n
+                results = reranker.rerank(
+                    query=query, documents=results, top_n=final_n
+                )
+        else:
+            results = self.vector_store.search(
+                query=query,
+                n_results=n_results or self.top_k,
+                filters=filters,
+            )
 
         sources: list[SourceReference] = []
         for r in results:
@@ -113,7 +142,7 @@ class RAGEngine:
                     date=meta.get("date", meta.get("date_range_start", "")),
                     participants=meta.get("participants", []),
                     subject=meta.get("subject", meta.get("thread_subject", "")),
-                    score=r.get("score", 0.0),
+                    score=r.get("rerank_score", r.get("score", 0.0)),
                     search_method=r.get("search_method", ""),
                 )
             )
