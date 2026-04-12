@@ -178,6 +178,12 @@ class VectorStoreService:
         if not chunks:
             return 0
 
+        # 빈 content 청크 제거 (임베딩 400 에러 방지)
+        chunks = [c for c in chunks if c.content and c.content.strip()]
+
+        if not chunks:
+            return 0
+
         collection = self._get_collection()
 
         # 기존 컬렉션에 데이터가 있으면 벡터 차원 호환성 검증

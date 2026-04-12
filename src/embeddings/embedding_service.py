@@ -149,12 +149,24 @@ class EmbeddingService:
         if not texts:
             return []
 
+        # 빈 문자열/공백만 있는 텍스트를 필터링 (Ollama 400 에러 방지)
+        cleaned: list[tuple[int, str]] = []
+        for idx, t in enumerate(texts):
+            stripped = t.strip() if t else ""
+            if stripped:
+                cleaned.append((idx, stripped))
+
+        if not cleaned:
+            return [[] for _ in texts]
+
         batch_size = settings.embed_batch_size
-        all_vectors: list[list[float]] = []
+        # 유효 텍스트만 임베딩
+        valid_texts = [t for _, t in cleaned]
+        valid_vectors: list[list[float]] = []
         url = f"{self.base_url}/api/embed"
 
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i : i + batch_size]
+        for i in range(0, len(valid_texts), batch_size):
+            batch = valid_texts[i : i + batch_size]
             try:
                 resp = httpx.post(
                     url,
@@ -163,7 +175,7 @@ class EmbeddingService:
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                all_vectors.extend(data["embeddings"])
+                valid_vectors.extend(data["embeddings"])
             except httpx.HTTPStatusError as e:
                 raise ConnectionError(
                     f"Ollama 배치 임베딩 실패 (batch {i // batch_size + 1}, "
@@ -181,7 +193,15 @@ class EmbeddingService:
                     f"{self.base_url}, 모델: {self.model}): {e}"
                 ) from e
 
-        logger.info(f"임베딩 완료: {len(texts)}개 텍스트")
+        # 원래 인덱스에 맞게 결과 재배치 (빈 텍스트 → 빈 벡터)
+        all_vectors: list[list[float]] = [[] for _ in texts]
+        for vec_idx, (orig_idx, _) in enumerate(cleaned):
+            all_vectors[orig_idx] = valid_vectors[vec_idx]
+
+        skipped = len(texts) - len(cleaned)
+        if skipped:
+            logger.warning(f"빈 텍스트 {skipped}개 스킵 (총 {len(texts)}개 중)")
+        logger.info(f"임베딩 완료: {len(cleaned)}개 텍스트 (빈 텍스트 {skipped}개 제외)")
         return all_vectors
 
     def get_langchain_embeddings(self):
