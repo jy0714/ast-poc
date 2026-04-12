@@ -168,9 +168,21 @@ class IndexingProgress:
     total_files: int = 0
     processed_files: int = 0
     total_chunks: int = 0
+    stored_chunks: int = 0  # GPU 임베딩+저장 완료된 청크 수
     errors: list[str] = field(default_factory=list)
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    phase_times: dict[str, float] = field(default_factory=dict)  # 단계별 누적 초
+    _phase_start: float = field(default=0.0, repr=False)
+
+    def set_phase(self, phase: IndexingPhase) -> None:
+        """단계 전환 + 이전 단계 소요시간 기록"""
+        now = time.time()
+        if self._phase_start > 0 and self.phase != IndexingPhase.IDLE:
+            key = self.phase.value
+            self.phase_times[key] = self.phase_times.get(key, 0.0) + (now - self._phase_start)
+        self.phase = phase
+        self._phase_start = now
 
     @property
     def progress_percent(self) -> float:
@@ -188,14 +200,63 @@ class IndexingProgress:
             IndexingPhase.CANCELLED,
         )
 
+    @property
+    def elapsed_seconds(self) -> float:
+        """경과 시간 (초)"""
+        if not self.started_at:
+            return 0.0
+        end = self.completed_at or datetime.now()
+        return (end - self.started_at).total_seconds()
+
+    @property
+    def files_per_second(self) -> float:
+        """파일 처리 속도 (파일/초)"""
+        elapsed = self.elapsed_seconds
+        if elapsed <= 0 or self.processed_files == 0:
+            return 0.0
+        return self.processed_files / elapsed
+
+    @property
+    def chunks_per_second(self) -> float:
+        """청크 저장 속도 (청크/초)"""
+        elapsed = self.elapsed_seconds
+        if elapsed <= 0 or self.stored_chunks == 0:
+            return 0.0
+        return self.stored_chunks / elapsed
+
+    @property
+    def eta_seconds(self) -> float | None:
+        """예상 남은 시간 (초), 추정 불가하면 None"""
+        if self.processed_files == 0 or self.total_files == 0:
+            return None
+        remaining = self.total_files - self.processed_files
+        if remaining <= 0:
+            return 0.0
+        return remaining / self.files_per_second if self.files_per_second > 0 else None
+
     def to_dict(self) -> dict[str, Any]:
         """API 응답용 딕셔너리"""
-        elapsed = ""
-        if self.started_at:
-            end = self.completed_at or datetime.now()
-            secs = int((end - self.started_at).total_seconds())
-            mins, secs = divmod(secs, 60)
-            elapsed = f"{mins}분 {secs}초" if mins else f"{secs}초"
+        elapsed_secs = self.elapsed_seconds
+        mins, secs = divmod(int(elapsed_secs), 60)
+        hours, mins = divmod(mins, 60)
+        if hours:
+            elapsed = f"{hours}시간 {mins}분 {secs}초"
+        elif mins:
+            elapsed = f"{mins}분 {secs}초"
+        else:
+            elapsed = f"{secs}초"
+
+        eta = self.eta_seconds
+        eta_str = ""
+        if eta is not None and eta > 0:
+            eta_m, eta_s = divmod(int(eta), 60)
+            eta_h, eta_m = divmod(eta_m, 60)
+            if eta_h:
+                eta_str = f"~{eta_h}시간 {eta_m}분"
+            elif eta_m:
+                eta_str = f"~{eta_m}분 {eta_s}초"
+            else:
+                eta_str = f"~{eta_s}초"
 
         return {
             "case_id": self.case_id,
@@ -204,8 +265,15 @@ class IndexingProgress:
             "total_files": self.total_files,
             "processed_files": self.processed_files,
             "total_chunks": self.total_chunks,
+            "stored_chunks": self.stored_chunks,
             "progress_percent": round(self.progress_percent, 1),
             "elapsed": elapsed,
+            "eta": eta_str,
+            "files_per_second": round(self.files_per_second, 1),
+            "chunks_per_second": round(self.chunks_per_second, 1),
+            "phase_times": {
+                k: round(v, 1) for k, v in self.phase_times.items()
+            },
             "errors": self.errors,
         }
 
@@ -321,7 +389,7 @@ class IndexingPipeline:
         except Exception as e:
             logger.error(f"인덱싱 파이프라인 실패: {case_id} — {e}")
             if case_id in self._progress:
-                self._progress[case_id].phase = IndexingPhase.ERROR
+                self._progress[case_id].set_phase(IndexingPhase.ERROR)
                 self._progress[case_id].errors.append(str(e))
 
     def run(
@@ -355,13 +423,13 @@ class IndexingPipeline:
             self.case_store.update_status(case_id, CaseStatus.INDEXING)
 
             # 1. 파일 수집
-            progress.phase = IndexingPhase.SCANNING
+            progress.set_phase(IndexingPhase.SCANNING)
             files = self._collect_files(case_meta)
             progress.total_files = len(files)
             logger.info(f"파일 수집 완료: {len(files)}개 ({case_id})")
 
             if not files:
-                progress.phase = IndexingPhase.COMPLETED
+                progress.set_phase(IndexingPhase.COMPLETED)
                 progress.completed_at = datetime.now()
                 self.case_store.update_status(case_id, CaseStatus.READY)
                 self.case_store.update_stats(case_id, total_documents=0, total_chunks=0)
@@ -372,30 +440,19 @@ class IndexingPipeline:
             use_streaming = len(files) > num_workers * 2 and num_workers > 1
 
             if use_streaming:
-                progress.phase = IndexingPhase.PARSING
+                progress.set_phase(IndexingPhase.PARSING)
                 stored_count = self._run_streaming_pipeline(
                     files, case_id, progress, cancel_flag,
                 )
             else:
-                # 파일 수가 적으면 순차 처리
-                progress.phase = IndexingPhase.PARSING
-                all_chunks = self._sequential_process_files(
+                # 파일 수가 적으면 순차 처리 (배치 즉시 저장)
+                progress.set_phase(IndexingPhase.PARSING)
+                stored_count = self._sequential_pipeline(
                     files, case_id, progress, cancel_flag,
-                )
-                if cancel_flag and cancel_flag.is_set():
-                    progress.phase = IndexingPhase.CANCELLED
-                    progress.completed_at = datetime.now()
-                    self.case_store.update_status(case_id, CaseStatus.CREATED)
-                    _save_indexing_log(progress, "cancelled")
-                    return progress
-
-                progress.phase = IndexingPhase.STORING
-                stored_count = self._store_chunks_batch(
-                    all_chunks, case_id, cancel_flag,
                 )
 
             if cancel_flag and cancel_flag.is_set():
-                progress.phase = IndexingPhase.CANCELLED
+                progress.set_phase(IndexingPhase.CANCELLED)
                 progress.completed_at = datetime.now()
                 self.case_store.update_status(case_id, CaseStatus.CREATED)
                 _save_indexing_log(progress, "cancelled")
@@ -403,7 +460,8 @@ class IndexingPipeline:
                 return progress
 
             progress.total_chunks = stored_count
-            progress.phase = IndexingPhase.COMPLETED
+            progress.stored_chunks = stored_count
+            progress.set_phase(IndexingPhase.COMPLETED)
             progress.completed_at = datetime.now()
 
             # 케이스 통계 업데이트 + 상태 변경
@@ -425,7 +483,7 @@ class IndexingPipeline:
             return progress
 
         except Exception as e:
-            progress.phase = IndexingPhase.ERROR
+            progress.set_phase(IndexingPhase.ERROR)
             progress.errors.append(str(e))
             progress.completed_at = datetime.now()
             try:
@@ -469,7 +527,12 @@ class IndexingPipeline:
         )
 
         # GPU 컨슈머 결과
-        consumer_result = {"stored": 0, "errors": []}
+        consumer_result: dict[str, Any] = {
+            "stored": 0,
+            "errors": [],
+            "bm25_corpus": [],  # BM25 직접 구축용 텍스트 수집
+            "bm25_ids": [],
+        }
 
         def gpu_consumer() -> None:
             """큐에서 청크를 꺼내 배치로 모아 GPU 임베딩 + 저장"""
@@ -515,10 +578,13 @@ class IndexingPipeline:
                     buffer = buffer[batch_size:]
                     _flush_buffer(vector_store, batch, batch_num, consumer_result)
 
-            # BM25 인덱스 최종 1회 구축
+            # BM25 인덱스 최종 1회 구축 (수집한 corpus 직접 전달 → ChromaDB 재로드 불필요)
             if consumer_result["stored"] > 0:
                 logger.info("BM25 인덱스 구축 시작...")
-                vector_store.rebuild_bm25()
+                vector_store.rebuild_bm25(
+                    corpus=consumer_result["bm25_corpus"],
+                    ids=consumer_result["bm25_ids"],
+                )
                 logger.info("BM25 인덱스 구축 완료")
 
         def _flush_buffer(
@@ -531,9 +597,15 @@ class IndexingPipeline:
             try:
                 count = vector_store.add_chunks(batch, rebuild_bm25=False)
                 result["stored"] += count
+                progress.stored_chunks = result["stored"]
+                # BM25 직접 구축용 텍스트 수집
+                for c in batch:
+                    result["bm25_corpus"].append(c.content)
+                    result["bm25_ids"].append(c.chunk_id)
                 logger.info(
                     f"[GPU] 배치 {batch_num} 저장 완료: {count}개 청크 "
-                    f"(누적 {result['stored']}개)"
+                    f"(누적 {result['stored']}개, "
+                    f"{progress.chunks_per_second:.1f} 청크/초)"
                 )
             except Exception as e:
                 error_msg = f"벡터 저장 실패 (batch {batch_num}): {e}"
@@ -579,9 +651,12 @@ class IndexingPipeline:
                 if progress.total_files > 0:
                     step = max(1, progress.total_files // 10)
                     if progress.processed_files % step == 0:
+                        eta = progress.eta_seconds
+                        eta_str = f", ETA {int(eta)}초" if eta else ""
                         logger.info(
                             f"[CPU] 파싱 진행: {progress.processed_files}/{progress.total_files} "
-                            f"({progress.progress_percent:.0f}%)"
+                            f"({progress.progress_percent:.0f}%, "
+                            f"{progress.files_per_second:.1f} 파일/초{eta_str})"
                         )
 
         # 프로듀서 완료 — 종료 신호
@@ -597,50 +672,33 @@ class IndexingPipeline:
         )
         return consumer_result["stored"]
 
-    def _store_chunks_batch(
-        self,
-        chunks: list[Chunk],
-        case_id: str,
-        cancel_flag: threading.Event | None = None,
-    ) -> int:
-        """순차 모드용 벡터 저장 (파일 수가 적을 때)"""
-        if not chunks:
-            return 0
-
-        vector_store = self._create_vector_store(case_id)
-        batch_size = settings.indexing_store_batch_size
-        stored_count = 0
-
-        for i in range(0, len(chunks), batch_size):
-            if cancel_flag and cancel_flag.is_set():
-                return stored_count
-
-            batch = chunks[i : i + batch_size]
-            try:
-                stored_count += vector_store.add_chunks(batch, rebuild_bm25=False)
-            except Exception as e:
-                logger.warning(f"벡터 저장 실패: {e}")
-
-        vector_store.rebuild_bm25()
-        return stored_count
-
-    def _sequential_process_files(
+    def _sequential_pipeline(
         self,
         files: list[Path],
         case_id: str,
         progress: IndexingProgress,
         cancel_flag: threading.Event | None = None,
-    ) -> list[Chunk]:
-        """순차 파싱 (파일 수가 적을 때 또는 fallback)"""
-        all_chunks: list[Chunk] = []
+    ) -> int:
+        """순차 파싱 + 배치 즉시 저장 (메모리 절약)
+
+        파일 하나씩 파싱→청킹 후 버퍼에 쌓고, 배치 크기에 도달하면
+        즉시 GPU 임베딩+저장. 전체 청크를 메모리에 보관하지 않음.
+        """
+        vector_store = self._create_vector_store(case_id)
+        batch_size = settings.indexing_store_batch_size
+        buffer: list[Chunk] = []
+        stored_count = 0
+        batch_num = 0
+        bm25_corpus: list[str] = []
+        bm25_ids: list[str] = []
 
         for file_path in files:
             if cancel_flag and cancel_flag.is_set():
-                return all_chunks
+                break
 
             try:
                 chunks = self._process_file(file_path, case_id, progress)
-                all_chunks.extend(chunks)
+                buffer.extend(chunks)
             except Exception as e:
                 error_msg = f"파일 처리 실패 ({file_path.name}): {e}"
                 progress.errors.append(error_msg)
@@ -648,7 +706,45 @@ class IndexingPipeline:
             finally:
                 progress.processed_files += 1
 
-        return all_chunks
+            # 버퍼가 배치 크기에 도달하면 즉시 저장
+            while len(buffer) >= batch_size:
+                if cancel_flag and cancel_flag.is_set():
+                    break
+                batch_num += 1
+                batch = buffer[:batch_size]
+                buffer = buffer[batch_size:]
+                try:
+                    progress.set_phase(IndexingPhase.STORING)
+                    count = vector_store.add_chunks(batch, rebuild_bm25=False)
+                    stored_count += count
+                    progress.stored_chunks = stored_count
+                    for c in batch:
+                        bm25_corpus.append(c.content)
+                        bm25_ids.append(c.chunk_id)
+                    progress.total_chunks = stored_count
+                except Exception as e:
+                    logger.warning(f"벡터 저장 실패 (batch {batch_num}): {e}")
+                progress.set_phase(IndexingPhase.PARSING)
+
+        # 남은 버퍼 플러시
+        if buffer and not (cancel_flag and cancel_flag.is_set()):
+            batch_num += 1
+            try:
+                progress.set_phase(IndexingPhase.STORING)
+                count = vector_store.add_chunks(buffer, rebuild_bm25=False)
+                stored_count += count
+                progress.stored_chunks = stored_count
+                for c in buffer:
+                    bm25_corpus.append(c.content)
+                    bm25_ids.append(c.chunk_id)
+            except Exception as e:
+                logger.warning(f"벡터 저장 실패 (batch {batch_num}): {e}")
+
+        # BM25 인덱스 최종 구축
+        if stored_count > 0:
+            vector_store.rebuild_bm25(corpus=bm25_corpus, ids=bm25_ids)
+
+        return stored_count
 
     @staticmethod
     def _normalize_path(raw: str) -> Path:
@@ -752,7 +848,7 @@ class IndexingPipeline:
         """PST 파일 처리: 파싱 → 이메일/채팅/첨부 청킹"""
         from src.parsers.pst_parser import PSTParser
 
-        progress.phase = IndexingPhase.PARSING
+        progress.set_phase(IndexingPhase.PARSING)
         parser = PSTParser(pst_path)
         result = parser.parse()
 
@@ -760,7 +856,7 @@ class IndexingPipeline:
         pst_meta = {"pst_file": pst_path.name}
 
         # 이메일 청킹
-        progress.phase = IndexingPhase.CHUNKING
+        progress.set_phase(IndexingPhase.CHUNKING)
         if result.emails:
             email_chunks = self._email_chunker.chunk(result.emails, metadata=pst_meta)
             all_chunks.extend(email_chunks)
@@ -780,7 +876,7 @@ class IndexingPipeline:
             all_chunks.extend(att_chunks)
 
         # 메타데이터 보강
-        progress.phase = IndexingPhase.ENRICHING
+        progress.set_phase(IndexingPhase.ENRICHING)
         if all_chunks:
             enrich_chunks(all_chunks, case_id=case_id)
 
@@ -798,10 +894,10 @@ class IndexingPipeline:
         progress: IndexingProgress,
     ) -> list[Chunk]:
         """문서 파일 처리: 파싱 → 청킹 → 메타데이터 보강"""
-        progress.phase = IndexingPhase.PARSING
+        progress.set_phase(IndexingPhase.PARSING)
         parsed = self._doc_parser.parse(doc_path)
 
-        progress.phase = IndexingPhase.CHUNKING
+        progress.set_phase(IndexingPhase.CHUNKING)
         # XLSX는 list[ParsedDocument] 반환
         docs = parsed if isinstance(parsed, list) else [parsed]
 
@@ -811,7 +907,7 @@ class IndexingPipeline:
             all_chunks.extend(chunks)
 
         # 메타데이터 보강
-        progress.phase = IndexingPhase.ENRICHING
+        progress.set_phase(IndexingPhase.ENRICHING)
         if all_chunks:
             enrich_chunks(all_chunks, case_id=case_id)
 

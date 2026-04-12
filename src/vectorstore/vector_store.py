@@ -117,6 +117,9 @@ class VectorStoreService:
         self._bm25_corpus: list[str] = []  # 원본 텍스트
         self._bm25_ids: list[str] = []  # chunk_id 매핑
 
+        # 중복 체크용 인메모리 ID 캐시 (대량 인덱싱 시 ChromaDB 조회 제거)
+        self._known_ids: set[str] | None = None
+
     def _get_client(self) -> chromadb.ClientAPI:
         """ChromaDB 클라이언트 초기화 (지연 생성)"""
         if self._client is None:
@@ -137,12 +140,33 @@ class VectorStoreService:
             )
         return self._collection
 
+    def _load_known_ids(self) -> set[str]:
+        """ChromaDB에 이미 저장된 ID를 인메모리 캐시로 로드
+
+        최초 1회만 ChromaDB를 조회하고, 이후에는 캐시에서 O(1) 중복 체크.
+        대량 인덱싱 시 매 배치마다 collection.get() 호출을 제거.
+        """
+        if self._known_ids is not None:
+            return self._known_ids
+
+        collection = self._get_collection()
+        total = collection.count()
+        if total == 0:
+            self._known_ids = set()
+        else:
+            result = collection.get(include=[])
+            self._known_ids = set(result["ids"]) if result["ids"] else set()
+            logger.info(f"기존 ID 캐시 로드: {len(self._known_ids)}개 ({self.collection_name})")
+
+        return self._known_ids
+
     def add_chunks(self, chunks: list[Chunk], rebuild_bm25: bool = True) -> int:
         """청크를 벡터 저장소에 추가
 
-        1. EmbeddingService로 임베딩 생성
-        2. ChromaDB에 벡터 + 메타데이터 저장
-        3. BM25 인덱스 갱신 (rebuild_bm25=True일 때만)
+        1. 인메모리 ID 캐시로 O(1) 중복 체크
+        2. EmbeddingService로 임베딩 생성
+        3. ChromaDB에 벡터 + 메타데이터 저장
+        4. BM25 인덱스 갱신 (rebuild_bm25=True일 때만)
 
         Args:
             chunks: 저장할 청크 리스트
@@ -160,17 +184,11 @@ class VectorStoreService:
         if collection.count() > 0:
             self._validate_embedding_dimension(collection)
 
-        # 기존 ID 확인 → 중복 제거
-        chunk_ids = [c.chunk_id for c in chunks]
-        existing = set()
-        try:
-            result = collection.get(ids=chunk_ids)
-            if result and result["ids"]:
-                existing = set(result["ids"])
-        except Exception:
-            pass
+        # 인메모리 캐시로 중복 체크 (최초 1회 로드 → 이후 O(1))
+        known_ids = self._load_known_ids()
+        new_chunks = [c for c in chunks if c.chunk_id not in known_ids]
+        skipped = len(chunks) - len(new_chunks)
 
-        new_chunks = [c for c in chunks if c.chunk_id not in existing]
         if not new_chunks:
             logger.info("모든 청크가 이미 저장되어 있습니다.")
             return 0
@@ -193,19 +211,34 @@ class VectorStoreService:
             metadatas=metadatas,
         )
 
+        # 캐시에 새 ID 등록
+        known_ids.update(ids)
+
         # BM25 인덱스 갱신
         if rebuild_bm25:
             self._rebuild_bm25_index()
 
         logger.info(
             f"벡터 저장 완료: {len(new_chunks)}개 청크 추가 "
-            f"(중복 {len(existing)}개 스킵), 컬렉션={self.collection_name}"
+            f"(중복 {skipped}개 스킵), 컬렉션={self.collection_name}"
         )
         return len(new_chunks)
 
-    def rebuild_bm25(self) -> None:
-        """BM25 인덱스를 수동으로 재구축 (대량 인덱싱 후 1회 호출용)"""
-        self._rebuild_bm25_index()
+    def rebuild_bm25(
+        self,
+        corpus: list[str] | None = None,
+        ids: list[str] | None = None,
+    ) -> None:
+        """BM25 인덱스를 수동으로 재구축 (대량 인덱싱 후 1회 호출용)
+
+        Args:
+            corpus: 직접 전달할 문서 텍스트 리스트 (None이면 ChromaDB에서 로드)
+            ids: corpus에 대응하는 chunk_id 리스트
+        """
+        if corpus is not None and ids is not None:
+            self._build_bm25_from_corpus(corpus, ids)
+        else:
+            self._rebuild_bm25_index()
         self._save_bm25_index()
 
     def search(
@@ -414,6 +447,7 @@ class VectorStoreService:
             self._bm25_index = None
             self._bm25_corpus = []
             self._bm25_ids = []
+            self._known_ids = None
             logger.info(f"컬렉션 삭제 완료: {self.collection_name}")
         except ValueError:
             logger.warning(f"컬렉션이 존재하지 않습니다: {self.collection_name}")
@@ -444,6 +478,42 @@ class VectorStoreService:
         }
 
     # === BM25 인덱스 관리 ===
+
+    def _build_bm25_from_corpus(self, corpus: list[str], ids: list[str]) -> None:
+        """직접 전달받은 corpus로 BM25 인덱스 구축 (ChromaDB 재로드 불필요)
+
+        대량 인덱싱 파이프라인에서 이미 보유한 텍스트를 그대로 활용하여
+        ChromaDB 전체 문서 로드를 건너뜀.
+
+        Args:
+            corpus: 문서 텍스트 리스트
+            ids: 대응하는 chunk_id 리스트
+        """
+        if not corpus:
+            self._bm25_index = None
+            self._bm25_corpus = []
+            self._bm25_ids = []
+            return
+
+        # 기존 데이터가 있으면 병합
+        existing_id_set = set(self._bm25_ids)
+        new_texts = []
+        new_ids = []
+        for text, cid in zip(corpus, ids):
+            if cid not in existing_id_set:
+                new_texts.append(text)
+                new_ids.append(cid)
+
+        self._bm25_corpus.extend(new_texts)
+        self._bm25_ids.extend(new_ids)
+
+        tokenized_corpus = [self._tokenize(doc) for doc in self._bm25_corpus]
+        self._bm25_index = BM25Okapi(tokenized_corpus)
+
+        logger.info(
+            f"BM25 인덱스 구축 완료: {len(self._bm25_corpus)}개 문서 "
+            f"(신규 {len(new_texts)}개)"
+        )
 
     def _rebuild_bm25_index(self) -> None:
         """ChromaDB 전체 문서로 BM25 인덱스 재구축"""
