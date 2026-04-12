@@ -43,6 +43,7 @@ class Settings(BaseSettings):
 
     # === Indexing Performance ===
     indexing_workers: int = 0  # 파싱/청킹 병렬 워커 수 (0=CPU 코어 수 자동)
+    max_indexing_workers: int = 16  # 워커 수 상한 (Windows는 61 미만 필수)
     indexing_store_batch_size: int = 2000  # 벡터 저장 배치 크기 (3060 12GB 기준)
 
     # === Search ===

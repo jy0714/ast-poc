@@ -46,11 +46,25 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+# Windows ProcessPoolExecutor는 max_workers 61 이상에서 에러 발생
+_WINDOWS_MAX_WORKERS = 60
+
+
 def _get_worker_count() -> int:
-    """파싱/청킹 워커 수 결정"""
+    """파싱/청킹 워커 수 결정
+
+    우선순위: indexing_workers(명시 지정) > cpu_count(자동 감지)
+    상한: min(max_indexing_workers, 60) — Windows 61 제한 이중 안전장치
+    """
     if settings.indexing_workers > 0:
-        return settings.indexing_workers
-    return max(1, os.cpu_count() or 4)
+        base = settings.indexing_workers
+    else:
+        base = max(1, os.cpu_count() or 4)
+
+    limit = min(settings.max_indexing_workers, _WINDOWS_MAX_WORKERS)
+    workers = max(1, min(base, limit))
+    logger.info(f"인덱싱 워커 수: {workers} (요청={base}, 상한={limit})")
+    return workers
 
 
 def _process_file_worker(args: tuple[str, str]) -> list[dict[str, Any]]:
