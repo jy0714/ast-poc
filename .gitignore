@@ -46,3 +46,19 @@ logs/
 .coverage
 htmlcov/
 .pytest_cache/
+
+# ───────────────────────────────────────────────
+# 데이터 디렉토리 (감사 데이터 commit 금지)
+# ───────────────────────────────────────────────
+
+# 모든 data/ 하위는 기본적으로 gitignore
+data/
+
+# 단, benchmark_schema/ 만 예외로 허용 (스키마/샘플만)
+!data/benchmark_schema/
+!data/benchmark_schema/**
+
+# benchmark_schema 안에서도 실제 데이터 파일은 명시적 차단 (이중 안전장치)
+data/benchmark_schema/ground_truth.json
+data/benchmark_schema/ground_truth_*.json
+!data/benchmark_schema/ground_truth_sample.json
