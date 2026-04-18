@@ -183,15 +183,15 @@ async def delete_case(case_id: str):
     except CaseNotFoundError:
         raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}")
 
-    # 벡터DB 컬렉션 삭제 시도
+    # 벡터DB에서 해당 케이스 청크만 삭제 (단일 공유 컬렉션)
     try:
         from src.vectorstore.vector_store import VectorStoreService
 
-        vs = VectorStoreService(collection_name=f"case_{case_id}")
-        vs.delete_collection()
-        logger.info(f"벡터DB 컬렉션 삭제: case_{case_id}")
+        vs = VectorStoreService(case_id=case_id)
+        deleted = vs.delete_case_data()
+        logger.info(f"벡터DB 케이스 데이터 삭제: case={case_id}, {deleted}개 청크")
     except Exception as e:
-        logger.warning(f"벡터DB 컬렉션 삭제 실패 (무시): {e}")
+        logger.warning(f"벡터DB 케이스 데이터 삭제 실패 (무시): {e}")
 
     # 케이스 디렉토리 삭제
     store.delete(case_id)

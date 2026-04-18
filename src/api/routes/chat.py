@@ -129,7 +129,12 @@ def _save_chat_history(
             session.commit()
 
     except Exception as e:
-        logger.warning(f"채팅 히스토리 저장 실패 (무시): {e}")
+        # 응답 품질에는 영향 없으나 데이터 유실이므로 ERROR로 기록
+        # (운영 단계에서 메트릭 카운터로 알람 연동 예정)
+        logger.error(
+            f"채팅 히스토리 저장 실패 — case={case_id}, q='{question[:80]}': {e}",
+            exc_info=True,
+        )
 
 
 # === 엔드포인트 ===

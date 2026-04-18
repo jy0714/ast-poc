@@ -1,8 +1,12 @@
 """데이터베이스 엔진/세션 관리
 
-SQLite + SQLAlchemy 비동기 지원.
-앱 시작 시 init_db()로 테이블 자동 생성.
-향후 PostgreSQL 전환 시 DB_URL만 변경하면 됨.
+SQLite + SQLAlchemy 동기/비동기 양쪽 지원.
+
+- 동기 (`get_session`): 기존 라우터/스크립트가 사용. 단순하고 안정적.
+- 비동기 (`get_async_session`): FastAPI 핸들러에서 await 사용 시 권장.
+  PoC 단계에서는 인프라만 깔고 점진적으로 라우터 전환.
+
+향후 PostgreSQL 전환 시 DB_URL/AsyncDB_URL만 변경하면 됨.
 """
 
 from __future__ import annotations
@@ -11,6 +15,12 @@ from pathlib import Path
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.db.models import Base
@@ -23,10 +33,15 @@ logger = get_logger(__name__)
 _DB_DIR = settings.project_root / "data"
 _DB_PATH = _DB_DIR / "ast.db"
 _DB_URL = f"sqlite:///{_DB_PATH}"
+_ASYNC_DB_URL = f"sqlite+aiosqlite:///{_DB_PATH}"
 
 # 동기 엔진 (SQLite는 동기로도 충분, FastAPI에서 threadpool 사용)
 _engine: Engine | None = None
 _SessionLocal: sessionmaker[Session] | None = None
+
+# 비동기 엔진 (FastAPI async 핸들러에서 사용)
+_async_engine: AsyncEngine | None = None
+_AsyncSessionLocal: async_sessionmaker[AsyncSession] | None = None
 
 
 @event.listens_for(Engine, "connect")
@@ -91,8 +106,58 @@ def init_db(db_url: str | None = None) -> Engine:
 
 def reset_globals() -> None:
     """싱글톤 리셋 (테스트용)"""
-    global _engine, _SessionLocal
+    global _engine, _SessionLocal, _async_engine, _AsyncSessionLocal
     if _engine:
         _engine.dispose()
     _engine = None
     _SessionLocal = None
+    # async 엔진은 async dispose가 필요하지만 테스트 시 이벤트 루프가 없을 수 있어
+    # 참조만 끊고 GC에 위임 (PoC 수준에서 충분)
+    _async_engine = None
+    _AsyncSessionLocal = None
+
+
+# === 비동기 엔진/세션 (점진 도입용 — 기존 sync 경로와 병행) ===
+
+
+def get_async_engine(db_url: str | None = None) -> AsyncEngine:
+    """비동기 SQLAlchemy 엔진 반환 (싱글톤)
+
+    PoC 시점: 인프라만 제공. 라우터는 기존 sync 경로 유지.
+    향후 고동시성 핸들러부터 async로 전환 권장.
+    """
+    global _async_engine
+    if _async_engine is None:
+        url = db_url or _ASYNC_DB_URL
+        # SQLite 디렉토리 생성
+        if url.startswith("sqlite+aiosqlite:///"):
+            db_path = Path(url.replace("sqlite+aiosqlite:///", ""))
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+        _async_engine = create_async_engine(url, echo=False)
+    return _async_engine
+
+
+def get_async_session_factory(
+    engine: AsyncEngine | None = None,
+) -> async_sessionmaker[AsyncSession]:
+    """비동기 세션 팩토리 반환 (싱글톤)"""
+    global _AsyncSessionLocal
+    if _AsyncSessionLocal is None:
+        _AsyncSessionLocal = async_sessionmaker(
+            bind=engine or get_async_engine(),
+            expire_on_commit=False,
+            class_=AsyncSession,
+        )
+    return _AsyncSessionLocal
+
+
+def get_async_session() -> AsyncSession:
+    """새 비동기 세션 생성
+
+    사용 예:
+        async with get_async_session() as session:
+            result = await session.execute(select(...))
+            await session.commit()
+    """
+    factory = get_async_session_factory()
+    return factory()

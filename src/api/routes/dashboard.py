@@ -233,16 +233,17 @@ async def get_dashboard(case_id: str):
             "인덱싱이 완료된 케이스만 대시보드를 볼 수 있습니다.",
         )
 
-    # ChromaDB에서 전체 메타데이터 조회
+    # ChromaDB에서 케이스 메타데이터만 조회 (단일 공유 컬렉션 + case_id 필터)
     try:
-        vector_store = VectorStoreService(collection_name=f"case_{case_id}")
+        vector_store = VectorStoreService(case_id=case_id)
         collection = vector_store._get_collection()
-        total = collection.count()
 
-        all_metadatas: list[dict[str, Any]] = []
-        if total > 0:
-            result = collection.get(include=["metadatas"])
-            all_metadatas = result.get("metadatas") or []
+        result = collection.get(
+            where={"case_id": case_id},
+            include=["metadatas"],
+        )
+        all_metadatas: list[dict[str, Any]] = result.get("metadatas") or []
+        total = len(all_metadatas)
 
     except Exception as e:
         logger.error(f"ChromaDB 조회 실패: {case_id} — {e}")

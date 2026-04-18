@@ -76,9 +76,7 @@ class RAGEngine:
             rerank_enabled: Reranker 사용 여부 (None이면 settings.rerank_enabled)
         """
         self.case_id = case_id
-        self.vector_store = vector_store or VectorStoreService(
-            collection_name=f"case_{case_id}"
-        )
+        self.vector_store = vector_store or VectorStoreService(case_id=case_id)
         self.llm_router = llm_router or LLMRouter()
         self.top_k = top_k or settings.search_top_k
         self.rerank_enabled = (

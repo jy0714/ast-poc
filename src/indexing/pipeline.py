@@ -30,6 +30,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from src.cases.case_store import CaseMetadata, CaseStatus, CaseStore
 from src.chunkers.chunker import (
     AttachmentChunker,
@@ -50,6 +52,26 @@ logger = get_logger(__name__)
 _WINDOWS_MAX_WORKERS = 60
 
 
+def _unload_llm_for_phase_a() -> None:
+    """Phase A 시작 시 LLM을 언로드해 임베딩 모델용 VRAM 확보
+
+    Ollama에 keep_alive=0으로 generate 호출을 보내면 모델이 즉시 unload됨.
+    LLM이 이미 언로드 상태면 빠르게 no-op 반환. 실패해도 인덱싱은 계속 진행.
+    """
+    llm_model = settings.ollama_llm_model
+    url = f"{settings.ollama_base_url}/api/generate"
+    try:
+        httpx.post(
+            url,
+            json={"model": llm_model, "prompt": "", "keep_alive": 0, "stream": False},
+            timeout=10.0,
+        )
+        logger.info(f"Phase A: LLM 언로드 요청 완료 ({llm_model})")
+    except Exception as e:
+        # 언로드 실패는 치명적이지 않음 — 계속 진행
+        logger.warning(f"Phase A: LLM 언로드 실패 (무시): {e}")
+
+
 def _get_worker_count() -> int:
     """파싱/청킹 워커 수 결정
 
@@ -67,6 +89,20 @@ def _get_worker_count() -> int:
     return workers
 
 
+# 워커 프로세스 전역 (initializer로 1회 생성, 모든 task에서 재사용)
+_worker_doc_parser: DocumentParser | None = None
+
+
+def _worker_init() -> None:
+    """ProcessPoolExecutor 워커 초기화 — DocumentParser 1회 생성
+
+    파일마다 DocumentParser()를 새로 만들면 PyMuPDF/python-docx/Tesseract
+    초기화 비용이 누적됨. 워커당 1회만 만들어 재사용.
+    """
+    global _worker_doc_parser
+    _worker_doc_parser = DocumentParser()
+
+
 def _process_file_worker(args: tuple[str, str]) -> list[dict[str, Any]]:
     """멀티프로세싱 워커: 단일 파일 → 파싱 → 청킹 → 메타데이터 보강 → 직렬화된 청크 반환
 
@@ -77,7 +113,11 @@ def _process_file_worker(args: tuple[str, str]) -> list[dict[str, Any]]:
 
     try:
         suffix = file_path.suffix.lower()
-        doc_parser = DocumentParser()
+        # 워커 초기화 fallback (initializer 미사용 환경 대비)
+        global _worker_doc_parser
+        if _worker_doc_parser is None:
+            _worker_doc_parser = DocumentParser()
+        doc_parser = _worker_doc_parser
 
         if suffix in (".pst", ".ost"):
             chunks = _process_pst_standalone(file_path, case_id, doc_parser)
@@ -318,13 +358,13 @@ class IndexingPipeline:
         self._cancel_flags: dict[str, threading.Event] = {}
 
     def _create_vector_store(self, case_id: str) -> Any:
-        """케이스별 VectorStoreService 생성"""
+        """케이스별 VectorStoreService 생성 (단일 공유 컬렉션 + case_id 필터)"""
         if self._vector_store_factory:
             return self._vector_store_factory(case_id)
 
         from src.vectorstore.vector_store import VectorStoreService
 
-        return VectorStoreService(collection_name=f"case_{case_id}")
+        return VectorStoreService(case_id=case_id)
 
     def get_progress(self, case_id: str) -> IndexingProgress:
         """케이스 인덱싱 진행률 조회"""
@@ -420,7 +460,13 @@ class IndexingPipeline:
         try:
             # 케이스 조회 + 상태 전이
             case_meta = self.case_store.get(case_id)
+            if case_meta is None:
+                # case_store.get은 보통 raise하지만 방어적으로 가드
+                raise ValueError(f"케이스를 찾을 수 없습니다: {case_id}")
             self.case_store.update_status(case_id, CaseStatus.INDEXING)
+
+            # Phase A 시작: LLM 언로드해서 임베딩 모델용 VRAM 확보
+            _unload_llm_for_phase_a()
 
             # 1. 파일 수집
             progress.set_phase(IndexingPhase.SCANNING)
@@ -624,9 +670,21 @@ class IndexingPipeline:
             f"CPU 워커 {num_workers}개 + GPU 컨슈머 1개"
         )
 
-        args = [(str(f), case_id) for f in files]
+        # 파일 크기 내림차순 정렬 — 큰 파일부터 처리해 long-tail 짧게 만듦
+        try:
+            files_sorted = sorted(
+                files,
+                key=lambda p: p.stat().st_size if p.exists() else 0,
+                reverse=True,
+            )
+        except OSError:
+            files_sorted = list(files)
+        args = [(str(f), case_id) for f in files_sorted]
 
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        with ProcessPoolExecutor(
+            max_workers=num_workers,
+            initializer=_worker_init,
+        ) as executor:
             futures = {executor.submit(_process_file_worker, arg): arg for arg in args}
 
             for future in as_completed(futures):
@@ -665,6 +723,14 @@ class IndexingPipeline:
 
         # 컨슈머 에러를 progress에 병합
         progress.errors.extend(consumer_result["errors"])
+
+        # 임계 실패율 검사 — 저장 시도 대비 실패율 > 10%면 데이터 신뢰도 낮음
+        _check_failure_rate(
+            progress=progress,
+            stored=consumer_result["stored"],
+            store_errors=len(consumer_result["errors"]),
+            total_files=len(files),
+        )
 
         logger.info(
             f"스트리밍 파이프라인 완료: 파일 {progress.processed_files}개, "
@@ -743,6 +809,17 @@ class IndexingPipeline:
         # BM25 인덱스 최종 구축
         if stored_count > 0:
             vector_store.rebuild_bm25(corpus=bm25_corpus, ids=bm25_ids)
+
+        # 임계 실패율 검사
+        store_failures = sum(
+            1 for e in progress.errors if e.startswith("벡터 저장 실패")
+        )
+        _check_failure_rate(
+            progress=progress,
+            stored=stored_count,
+            store_errors=store_failures,
+            total_files=len(files),
+        )
 
         return stored_count
 
@@ -913,6 +990,44 @@ class IndexingPipeline:
 
         logger.info(f"문서 처리 완료: {doc_path.name} → {len(all_chunks)}개 청크")
         return all_chunks
+
+
+# 인덱싱 실패 임계값 — 저장 시도 대비 실패 배치/파일 비율
+_FAILURE_RATE_THRESHOLD = 0.10  # 10% 초과 시 abort
+
+
+class IndexingFailureRateExceeded(Exception):
+    """저장 실패율이 임계치를 초과해 인덱싱을 중단해야 함"""
+
+
+def _check_failure_rate(
+    progress: IndexingProgress,
+    stored: int,
+    store_errors: int,
+    total_files: int,
+) -> None:
+    """저장 실패율이 임계치를 넘으면 예외를 발생시켜 파이프라인 abort
+
+    파일 처리 에러는 별도(workers fail). 여기서는 GPU 저장 실패만 본다 —
+    저장 단계에서 silent하게 청크가 누락되면 검색 품질 저하로 직결되기 때문.
+    """
+    # 저장 시도 횟수 추정: 저장된 배치 수 + 실패한 배치 수
+    # stored=0이고 errors도 0이면 인덱싱 대상이 없었던 것 (예: 빈 케이스)
+    if stored == 0 and store_errors == 0:
+        return
+
+    # 배치 단위 실패율 (간단 근사)
+    total_attempts = max(1, store_errors + max(1, stored // max(1, settings.indexing_store_batch_size)))
+    failure_rate = store_errors / total_attempts
+
+    if failure_rate > _FAILURE_RATE_THRESHOLD:
+        msg = (
+            f"벡터 저장 실패율 {failure_rate:.1%} > 임계치 "
+            f"{_FAILURE_RATE_THRESHOLD:.0%} (실패 {store_errors}, 저장 {stored}). "
+            f"silent 데이터 손실 위험으로 인덱싱 중단."
+        )
+        logger.error(msg)
+        raise IndexingFailureRateExceeded(msg)
 
 
 def _save_indexing_log(progress: IndexingProgress, status: str) -> None:

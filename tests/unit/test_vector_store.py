@@ -89,13 +89,12 @@ class TestAddChunks:
         """빈 리스트 추가"""
         assert store.add_chunks([]) == 0
 
-    def test_duplicate_chunks_skipped(self, store):
-        """중복 청크 스킵"""
+    def test_duplicate_chunks_idempotent(self, store):
+        """중복 청크 — upsert로 멱등 (전체 카운트는 그대로 유지)"""
         chunks = _make_chunks(["감사 보고서 내용"])
         store.add_chunks(chunks)
-        # 동일 청크 다시 추가
-        added = store.add_chunks(chunks)
-        assert added == 0
+        # 동일 청크 다시 추가 — upsert이므로 덮어쓰지만 총 개수 변화 없음
+        store.add_chunks(chunks)
         assert store.get_stats()["total_chunks"] == 1
 
     def test_source_type_in_metadata(self, store):
