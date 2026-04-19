@@ -26,11 +26,14 @@ logger = get_logger(__name__)
 # 재시도 설정 (일시적 timeout / 네트워크 hiccup 대응)
 _MAX_RETRIES = 3
 _RETRY_BACKOFF_BASE = 2.0  # 초 (2 → 4 → 8)
-_REQUEST_TIMEOUT = 600.0  # 10분 (HTTP 호출 1번당)
+_REQUEST_TIMEOUT = 60.0  # 1분 — 빨리 실패하고 작은 배치로 재시도하는 편이 전체 처리량에 유리
 
-# bge-m3 토큰 한도(8192) 안전 마진 — 한글 평균 1자≈1토큰, 영문 1자≈0.3토큰
-# 보수적으로 문자 기준 6000자에서 절단. 그 이상은 OOM/400 에러 위험.
-_MAX_CHARS_PER_TEXT = 6000
+# bge-m3 컨텍스트 한도(`/api/ps` 응답상 4096 토큰)에 맞춘 보수적 절단.
+# 한글 평균 1자 ≈ 1토큰, 영문 1자 ≈ 0.3토큰. 헤더/마진 고려 2500자에서 절단.
+_MAX_CHARS_PER_TEXT = 2500
+
+# 배치 실패 시 binary subdivide 최소 단위 — 이 이하로는 더 못 쪼갬
+_MIN_SUBDIVIDE_SIZE = 1
 
 # 모델별 알려진 벡터 차원 (Ollama 기준)
 KNOWN_DIMENSIONS: dict[str, int] = {
@@ -72,6 +75,9 @@ class EmbeddingService:
         self.base_url = base_url or settings.ollama_base_url
         self._langchain_embeddings = None
         self._cached_dimension: int | None = None
+        # 가장 최근 embed_texts 호출에서 영구 실패한 텍스트의 원본 인덱스
+        # → 호출측(VectorStoreService)이 retry 큐 저장 시 사용
+        self._last_failed_indices: list[int] = []
 
     def get_dimension(self) -> int:
         """현재 모델의 벡터 차원 반환
@@ -179,19 +185,33 @@ class EmbeddingService:
         batch_size = settings.embed_batch_size
         # 유효 텍스트만 임베딩
         valid_texts = [t for _, t in cleaned]
-        valid_vectors: list[list[float]] = []
+        valid_vectors: list[list[float] | None] = [None] * len(valid_texts)
         url = f"{self.base_url}/api/embed"
 
+        # 배치 단위로 처리하되, 실패 시 binary subdivide로 자동 축소
+        # → 거대 텍스트 1개가 막아도 같은 배치의 나머지는 살림
+        failed_local_indices: list[int] = []
         for i in range(0, len(valid_texts), batch_size):
             batch = valid_texts[i : i + batch_size]
             batch_num = i // batch_size + 1
-            embeddings = self._embed_batch_with_retry(url, batch, batch_num)
-            valid_vectors.extend(embeddings)
+            self._embed_with_subdivide(
+                url=url,
+                batch=batch,
+                batch_num=batch_num,
+                local_offset=i,
+                results=valid_vectors,
+                failed_local_indices=failed_local_indices,
+            )
 
-        # 원래 인덱스에 맞게 결과 재배치 (빈 텍스트 → 빈 벡터)
+        # 원래 인덱스에 맞게 결과 재배치 (빈 텍스트 → 빈 벡터, 실패 텍스트 → 빈 벡터)
         all_vectors: list[list[float]] = [[] for _ in texts]
+        failed_orig_indices: list[int] = []
         for vec_idx, (orig_idx, _) in enumerate(cleaned):
-            all_vectors[orig_idx] = valid_vectors[vec_idx]
+            v = valid_vectors[vec_idx]
+            if v is None:
+                failed_orig_indices.append(orig_idx)
+                continue
+            all_vectors[orig_idx] = v
 
         skipped = len(texts) - len(cleaned)
         if skipped:
@@ -200,8 +220,62 @@ class EmbeddingService:
             logger.warning(
                 f"긴 텍스트 {truncated}개 truncate ({_MAX_CHARS_PER_TEXT}자 초과)"
             )
-        logger.info(f"임베딩 완료: {len(cleaned)}개 텍스트 (빈 텍스트 {skipped}개 제외)")
+        if failed_orig_indices:
+            # 실패한 텍스트 인덱스를 인스턴스 속성으로 노출 → 호출측이 retry 큐에 저장 가능
+            self._last_failed_indices = failed_orig_indices
+            logger.warning(
+                f"임베딩 영구 실패 {len(failed_orig_indices)}개 (binary subdivide 후에도 실패)"
+            )
+        else:
+            self._last_failed_indices = []
+        logger.info(
+            f"임베딩 완료: {len(cleaned) - len(failed_orig_indices)}/{len(cleaned)}개 텍스트 "
+            f"(빈 {skipped}개 제외, 실패 {len(failed_orig_indices)}개)"
+        )
         return all_vectors
+
+    def _embed_with_subdivide(
+        self,
+        url: str,
+        batch: list[str],
+        batch_num: int,
+        local_offset: int,
+        results: list[list[float] | None],
+        failed_local_indices: list[int],
+    ) -> None:
+        """배치 임베딩 + 실패 시 절반으로 쪼개 재시도
+
+        실패 사유가 거대 텍스트 1개 때문이면 binary subdivide로 그 텍스트만
+        고립시킬 수 있고, 나머지 텍스트는 정상 임베딩됨.
+        """
+        try:
+            embeddings = self._embed_batch_with_retry(url, batch, batch_num)
+            for j, vec in enumerate(embeddings):
+                results[local_offset + j] = vec
+            return
+        except ConnectionError as e:
+            if len(batch) <= _MIN_SUBDIVIDE_SIZE:
+                # 1개 텍스트도 임베딩 실패 → 영구 실패로 기록
+                logger.error(
+                    f"단일 텍스트 임베딩 실패 (batch {batch_num}, "
+                    f"길이={len(batch[0]) if batch else 0}자): {e}"
+                )
+                for j in range(len(batch)):
+                    failed_local_indices.append(local_offset + j)
+                return
+
+            mid = len(batch) // 2
+            logger.warning(
+                f"배치 {batch_num} 실패 → {len(batch)}개를 {mid}+{len(batch) - mid}개로 분할 재시도"
+            )
+            self._embed_with_subdivide(
+                url, batch[:mid], batch_num * 10 + 1,
+                local_offset, results, failed_local_indices,
+            )
+            self._embed_with_subdivide(
+                url, batch[mid:], batch_num * 10 + 2,
+                local_offset + mid, results, failed_local_indices,
+            )
 
     def _embed_batch_with_retry(
         self, url: str, batch: list[str], batch_num: int

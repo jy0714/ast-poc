@@ -641,13 +641,24 @@ class IndexingPipeline:
             batch_num: int,
             result: dict[str, Any],
         ) -> None:
-            """배치를 GPU 임베딩 + ChromaDB에 저장"""
+            """배치를 GPU 임베딩 + ChromaDB에 저장.
+
+            임베딩 영구 실패한 청크는 add_chunks 내부에서 retry 큐 파일로 저장됨.
+            성공 청크만 BM25 corpus에 합류 — 검색 결과 일관성 보장.
+            """
             try:
                 count = vector_store.add_chunks(batch, rebuild_bm25=False)
                 result["stored"] += count
                 progress.stored_chunks = result["stored"]
-                # BM25 직접 구축용 텍스트 + 메타데이터 수집 (검색 결과에서 사용)
-                for c in batch:
+                # 임베딩 실패한 청크 ID 집합 (add_chunks 내부에서 갱신됨)
+                failed_idx_set = set(
+                    vector_store._embedding_service._last_failed_indices
+                )
+                stored_chunks = [
+                    c for i, c in enumerate(batch) if i not in failed_idx_set
+                ]
+                # BM25 corpus는 실제 저장된 청크만 포함 (검색 일관성)
+                for c in stored_chunks:
                     result["bm25_corpus"].append(c.content)
                     result["bm25_ids"].append(c.chunk_id)
                     meta = dict(c.metadata) if c.metadata else {}
@@ -655,13 +666,32 @@ class IndexingPipeline:
                     if vector_store.case_id:
                         meta["case_id"] = vector_store.case_id
                     result["bm25_metadatas"].append(meta)
+                if failed_idx_set:
+                    msg = (
+                        f"배치 {batch_num} 부분 실패: "
+                        f"{len(failed_idx_set)}/{len(batch)}개 임베딩 실패 "
+                        f"(retry 큐에 저장됨)"
+                    )
+                    result["errors"].append(msg)
+                    logger.warning(msg)
                 logger.info(
                     f"[GPU] 배치 {batch_num} 저장 완료: {count}개 청크 "
                     f"(누적 {result['stored']}개, "
                     f"{progress.chunks_per_second:.1f} 청크/초)"
                 )
             except Exception as e:
-                error_msg = f"벡터 저장 실패 (batch {batch_num}): {e}"
+                # 배치 전체 실패 (Ollama 다운 등) — 청크를 retry 큐에 직접 저장
+                try:
+                    vector_store._save_failed_chunks(batch)
+                    error_msg = (
+                        f"벡터 저장 실패 (batch {batch_num}, {len(batch)}개 → "
+                        f"retry 큐 저장): {e}"
+                    )
+                except Exception as save_e:
+                    error_msg = (
+                        f"벡터 저장 실패 + retry 저장 실패 (batch {batch_num}, "
+                        f"DATA LOSS {len(batch)}개): {e} / {save_e}"
+                    )
                 result["errors"].append(error_msg)
                 logger.warning(error_msg)
 
@@ -780,19 +810,17 @@ class IndexingPipeline:
             finally:
                 progress.processed_files += 1
 
-            # 버퍼가 배치 크기에 도달하면 즉시 저장
-            while len(buffer) >= batch_size:
-                if cancel_flag and cancel_flag.is_set():
-                    break
-                batch_num += 1
-                batch = buffer[:batch_size]
-                buffer = buffer[batch_size:]
+            def _flush(batch: list[Chunk], n: int) -> int:
+                """순차 파이프라인용 배치 플러시 — 실패 청크는 retry 큐로"""
                 try:
                     progress.set_phase(IndexingPhase.STORING)
-                    count = vector_store.add_chunks(batch, rebuild_bm25=False)
-                    stored_count += count
-                    progress.stored_chunks = stored_count
-                    for c in batch:
+                    cnt = vector_store.add_chunks(batch, rebuild_bm25=False)
+                    failed_idx_set = set(
+                        vector_store._embedding_service._last_failed_indices
+                    )
+                    for i, c in enumerate(batch):
+                        if i in failed_idx_set:
+                            continue
                         bm25_corpus.append(c.content)
                         bm25_ids.append(c.chunk_id)
                         meta = dict(c.metadata) if c.metadata else {}
@@ -800,29 +828,77 @@ class IndexingPipeline:
                         if vector_store.case_id:
                             meta["case_id"] = vector_store.case_id
                         bm25_metadatas.append(meta)
-                    progress.total_chunks = stored_count
+                    if failed_idx_set:
+                        logger.warning(
+                            f"배치 {n} 부분 실패: {len(failed_idx_set)}/{len(batch)}개 "
+                            f"임베딩 실패 (retry 큐 저장됨)"
+                        )
+                    return cnt
                 except Exception as e:
-                    logger.warning(f"벡터 저장 실패 (batch {batch_num}): {e}")
-                progress.set_phase(IndexingPhase.PARSING)
+                    try:
+                        vector_store._save_failed_chunks(batch)
+                        logger.warning(
+                            f"벡터 저장 실패 (batch {n}, {len(batch)}개 → retry 큐): {e}"
+                        )
+                    except Exception as save_e:
+                        logger.error(
+                            f"벡터 저장 실패 + retry 저장 실패 (batch {n}, "
+                            f"DATA LOSS {len(batch)}개): {e} / {save_e}"
+                        )
+                    return 0
+                finally:
+                    progress.set_phase(IndexingPhase.PARSING)
+
+            # 버퍼가 배치 크기에 도달하면 즉시 저장
+            while len(buffer) >= batch_size:
+                if cancel_flag and cancel_flag.is_set():
+                    break
+                batch_num += 1
+                batch = buffer[:batch_size]
+                buffer = buffer[batch_size:]
+                count = _flush(batch, batch_num)
+                stored_count += count
+                progress.stored_chunks = stored_count
+                progress.total_chunks = stored_count
 
         # 남은 버퍼 플러시
         if buffer and not (cancel_flag and cancel_flag.is_set()):
             batch_num += 1
-            try:
-                progress.set_phase(IndexingPhase.STORING)
-                count = vector_store.add_chunks(buffer, rebuild_bm25=False)
-                stored_count += count
-                progress.stored_chunks = stored_count
-                for c in buffer:
-                    bm25_corpus.append(c.content)
-                    bm25_ids.append(c.chunk_id)
-                    meta = dict(c.metadata) if c.metadata else {}
-                    meta["source_type"] = c.source_type
-                    if vector_store.case_id:
-                        meta["case_id"] = vector_store.case_id
-                    bm25_metadatas.append(meta)
-            except Exception as e:
-                logger.warning(f"벡터 저장 실패 (batch {batch_num}): {e}")
+
+            def _flush_final(batch: list[Chunk], n: int) -> int:
+                try:
+                    progress.set_phase(IndexingPhase.STORING)
+                    cnt = vector_store.add_chunks(batch, rebuild_bm25=False)
+                    failed_idx_set = set(
+                        vector_store._embedding_service._last_failed_indices
+                    )
+                    for i, c in enumerate(batch):
+                        if i in failed_idx_set:
+                            continue
+                        bm25_corpus.append(c.content)
+                        bm25_ids.append(c.chunk_id)
+                        meta = dict(c.metadata) if c.metadata else {}
+                        meta["source_type"] = c.source_type
+                        if vector_store.case_id:
+                            meta["case_id"] = vector_store.case_id
+                        bm25_metadatas.append(meta)
+                    return cnt
+                except Exception as e:
+                    try:
+                        vector_store._save_failed_chunks(batch)
+                        logger.warning(
+                            f"벡터 저장 실패 (batch {n}, {len(batch)}개 → retry 큐): {e}"
+                        )
+                    except Exception as save_e:
+                        logger.error(
+                            f"벡터 저장 실패 + retry 저장 실패 (batch {n}, "
+                            f"DATA LOSS {len(batch)}개): {e} / {save_e}"
+                        )
+                    return 0
+
+            count = _flush_final(buffer, batch_num)
+            stored_count += count
+            progress.stored_chunks = stored_count
 
         # BM25 인덱스 최종 구축
         if stored_count > 0:

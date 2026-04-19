@@ -16,7 +16,9 @@ RRF (Reciprocal Rank Fusion): 두 검색 결과를 통합 순위로 결합
 
 from __future__ import annotations
 
+import json
 import pickle
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -223,6 +225,23 @@ class VectorStoreService:
         # 임베딩 생성
         texts = [c.content for c in chunks]
         embeddings = self._embedding_service.embed_texts(texts)
+
+        # 영구 실패 청크는 retry 큐 파일에 저장하고 본 배치에서 제외 → 데이터 유실 방지
+        failed_indices = set(self._embedding_service._last_failed_indices)
+        if failed_indices:
+            failed_chunks = [chunks[i] for i in sorted(failed_indices)]
+            self._save_failed_chunks(failed_chunks)
+            logger.warning(
+                f"임베딩 실패 청크 {len(failed_chunks)}개 → retry 큐에 저장 "
+                f"(case={self.case_id})"
+            )
+            kept_indices = [i for i in range(len(chunks)) if i not in failed_indices]
+            chunks = [chunks[i] for i in kept_indices]
+            texts = [texts[i] for i in kept_indices]
+            embeddings = [embeddings[i] for i in kept_indices]
+
+        if not chunks:
+            return 0
 
         # 메타데이터 직렬화 + source_type / case_id 자동 부착
         ids = [c.chunk_id for c in chunks]
@@ -440,6 +459,32 @@ class VectorStoreService:
             return None
 
         return len(embeddings[0])
+
+    def _save_failed_chunks(self, failed_chunks: list[Chunk]) -> None:
+        """임베딩이 영구 실패한 청크를 retry 큐 파일에 append
+
+        파일 경로: data/failed_embeddings/{case_id or collection}.jsonl
+        한 줄당 청크 1개 (chunk_id, content, metadata, source_type, ts).
+        나중에 별도 재처리 스크립트로 다시 임베딩 가능.
+        """
+        try:
+            base = Path(settings.bm25_index_dir).parent / "failed_embeddings"
+            base.mkdir(parents=True, exist_ok=True)
+            key = self.case_id or self.collection_name
+            path = base / f"{key}.jsonl"
+            ts = time.time()
+            with path.open("a", encoding="utf-8") as f:
+                for c in failed_chunks:
+                    record = {
+                        "chunk_id": c.chunk_id,
+                        "content": c.content,
+                        "metadata": c.metadata,
+                        "source_type": c.source_type,
+                        "ts": ts,
+                    }
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.error(f"실패 청크 저장 실패 (data 손실): {e}")
 
     def _validate_embedding_dimension(self, collection: chromadb.Collection) -> None:
         """현재 임베딩 모델과 기존 컬렉션의 벡터 차원이 일치하는지 검증
