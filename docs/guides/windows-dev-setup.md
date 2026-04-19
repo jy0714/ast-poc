@@ -88,9 +88,11 @@ pip install -e ".[dev]"
 > # libpff 없이 나머지 먼저 설치 (PST 파싱은 서버에서만 수행)
 > pip install -e ".[dev]" --no-deps
 > pip install fastapi uvicorn python-multipart websockets
-> pip install langchain langchain-community langchain-chroma chromadb
+> pip install langchain-ollama langchain-openai chromadb
 > pip install ollama openai
-> pip install PyMuPDF python-docx python-pptx openpyxl
+> pip install PyMuPDF python-docx python-pptx openpyxl extract-msg
+> pip install rank-bm25 kiwipiepy FlagEmbedding
+> pip install sqlalchemy aiosqlite
 > pip install pydantic pydantic-settings python-dotenv rich tqdm
 > pip install pytest pytest-asyncio pytest-cov ruff mypy httpx
 > ```
@@ -98,7 +100,11 @@ pip install -e ".[dev]"
 ### 2-4. 환경변수 설정
 
 ```powershell
-copy .env.example .env
+# 개발 환경 (3060 12GB 권장)
+copy .env.dev.example .env
+
+# 또는 운영 환경 (A5000 24GB)
+copy .env.prod.example .env
 ```
 
 `.env` 파일을 열어서 수정:
@@ -127,8 +133,8 @@ LLM은 별도 서버에서 구동하고, 개발 PC에서는 API만 호출하는 
 
 ```
 [Windows 개발 PC]              [LLM 서버]
-  FastAPI 백엔드  ──HTTP──▶  Ollama (gpt-oss:20b)
-  React 프론트엔드            Ollama (nomic-embed-text)
+  FastAPI 백엔드  ──HTTP──▶  Ollama (gemma4:e4b / gpt-oss:20b)
+  React 프론트엔드            Ollama (bge-m3)
   ChromaDB (로컬)
 ```
 
@@ -160,26 +166,28 @@ GPU가 있는 Windows 개발 PC라면 로컬에서도 구동 가능합니다.
 2. 모델 다운로드:
 
 ```powershell
+# 임베딩 (필수, 1024-dim)
+ollama pull bge-m3
+
+# LLM (개발 환경)
+ollama pull gemma4:e4b
+
+# LLM (운영 환경, A5000 24GB)
 ollama pull gpt-oss:20b
-ollama pull nomic-embed-text
 ```
 
 3. 동작 확인:
 
 ```powershell
 ollama list
-# gpt-oss:20b 와 nomic-embed-text 확인
+# bge-m3, gemma4:e4b 또는 gpt-oss:20b 확인
 
 # 간단한 테스트
-ollama run gpt-oss:20b "안녕하세요"
+ollama run gemma4:e4b "안녕하세요"
 ```
 
-> GPU VRAM이 부족하면 더 작은 모델로 개발 테스트:
-> ```powershell
-> ollama pull llama3.2:3b        # 가벼운 모델로 기능 테스트
-> ollama pull nomic-embed-text   # 임베딩은 가벼움
-> ```
-> `.env`에서 `OLLAMA_LLM_MODEL=llama3.2:3b`로 변경
+> 개발 PC GPU VRAM이 부족하면 `gemma4:e4b` 또는 더 작은 모델로 대체 가능
+> `.env`의 `OLLAMA_LLM_MODEL`로 변경
 
 ---
 

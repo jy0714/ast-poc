@@ -1,70 +1,74 @@
 # AST (Audit Support Tool) - PoC
 
-내부 이메일(PST), Teams 채팅(PST), 문서(PDF/DOCX/PPTX/XLSX)를 통합 검색할 수 있는 로컬 RAG 시스템
+내부 이메일(PST), Teams 채팅(PST), 문서(PDF/DOCX/PPTX/XLSX/EML/MSG)를 통합 검색할 수 있는 로컬 RAG 시스템.
 
 ## 주요 기능
 
 - **PST 파싱**: Outlook 이메일 및 Teams 채팅 기록 자동 파싱
-- **문서 파싱**: PDF, DOCX, PPTX, XLSX 첨부파일 및 독립 문서 파싱
-- **스마트 청킹**: 문서는 문자수 기반, 채팅은 시간 윈도우 기반 분할
-- **메타데이터 태깅**: 참여자, 날짜, 소스 타입, 토픽 자동 태깅
-- **로컬 임베딩**: Ollama nomic-embed-text (외부 전송 없음)
-- **벡터 검색**: ChromaDB 기반 하이브리드 검색 (벡터 유사도 + 메타데이터 필터)
-- **보안 모드**: ON(로컬 LLM만 사용) / OFF(외부 API 허용) 토글
-- **채팅 UI**: LLM 스타일 웹 인터페이스
+- **문서 파싱**: PDF, DOCX, PPTX, XLSX, EML, MSG 파일 지원 (OCR 옵션 포함)
+- **스마트 청킹**: 문서는 문자수 기반, 채팅은 시간 윈도우, 이메일은 스레드, 첨부는 타입별 분할
+- **메타데이터 태깅**: 참여자, 날짜, 소스 타입, 토픽, case_id 자동 부착
+- **로컬 임베딩**: Ollama bge-m3 (1024차원, 외부 전송 없음)
+- **하이브리드 검색**: ChromaDB 벡터 유사도 + BM25 키워드 + RRF (Reciprocal Rank Fusion)
+- **케이스 격리**: 단일 공유 ChromaDB 컬렉션 + `case_id` 메타필터로 케이스별 격리
+- **선택적 Reranker**: BAAI/bge-reranker-v2-m3 (전역 토글 + 요청별 오버라이드)
+- **보안 모드**: ON(임베딩+벡터DB+LLM 전부 로컬) / OFF(LLM만 외부 API 라우팅) 토글
+- **Admin/Analyst UI 분리**: 케이스 관리·인덱싱과 RAG 질의 분리
 
 ## 기술 스택
 
 | 영역 | 기술 |
 |------|------|
-| 백엔드 | Python 3.11+, FastAPI |
-| 프론트엔드 | React + TypeScript |
-| LLM (로컬) | Ollama - gpt-oss:20b |
-| LLM (외부) | OpenAI o3 (보안 모드 OFF 시) |
-| 임베딩 | Ollama - nomic-embed-text |
-| 벡터DB | ChromaDB |
-| PST 파싱 | libpff / pypff |
-| 문서 파싱 | PyMuPDF, python-docx, python-pptx, openpyxl |
-| RAG 프레임워크 | LangChain |
-| 컨테이너 | Docker + Docker Compose |
+| 백엔드 | Python 3.11+, FastAPI, Uvicorn |
+| 프론트엔드 | React + TypeScript + Vite |
+| LLM (로컬) | Ollama — 개발: `gemma4:e4b`, 운영: `gpt-oss:20b` |
+| LLM (외부) | OpenAI (보안 모드 OFF 시) |
+| 임베딩 | Ollama `bge-m3` (1024-dim, 8192 토큰) |
+| 벡터DB | ChromaDB (단일 공유 컬렉션 + 메타필터) |
+| 키워드 검색 | rank-bm25 + kiwipiepy 한국어 형태소 분석 |
+| Reranker | BAAI/bge-reranker-v2-m3 (FlagEmbedding) |
+| 메타DB | SQLite (SQLAlchemy ORM, PostgreSQL 전환 대비) |
+| 문서 파싱 | PyMuPDF, python-docx, python-pptx, openpyxl, extract-msg |
+| PST 파싱 | libpff / pypff (옵션) |
+| 컨테이너 | Docker + Docker Compose (Ollama GPU 패스스루) |
 
 ## 프로젝트 구조
 
 ```
 ast-poc/
-├── src/                    # 백엔드 소스 코드
-│   ├── parsers/            # PST, PDF, DOCX 등 파서
-│   ├── chunkers/           # 텍스트 청킹 엔진
-│   ├── embeddings/         # 임베딩 모델 연동
-│   ├── vectorstore/        # ChromaDB 연동
-│   ├── rag/                # RAG 질의 엔진
-│   ├── llm/                # LLM 라우팅 (로컬/외부)
-│   ├── api/                # FastAPI 엔드포인트
-│   └── utils/              # 공통 유틸리티
-├── frontend/               # React 프론트엔드
-│   ├── src/
-│   │   ├── components/     # UI 컴포넌트
-│   │   ├── hooks/          # 커스텀 훅
-│   │   ├── styles/         # 스타일
-│   │   └── utils/          # 프론트 유틸
-│   └── public/
-├── tests/                  # 테스트
-│   ├── unit/
-│   ├── integration/
-│   └── fixtures/           # 테스트용 샘플 데이터
-├── docs/                   # 문서화
-│   ├── architecture/       # 아키텍처 문서
-│   ├── guides/             # 사용 가이드
-│   └── api-reference/      # API 레퍼런스
-├── scripts/                # 유틸리티 스크립트
-├── docker/                 # Docker 설정
-├── data/                   # 데이터 디렉토리 (gitignore)
-│   ├── input/              # 원본 파일 투입
-│   │   ├── pst/
-│   │   └── documents/
-│   ├── processed/          # 처리된 중간 데이터
-│   └── vectordb/           # ChromaDB 저장소
-└── .github/workflows/      # CI/CD
+├── src/                        # 백엔드 소스
+│   ├── api/routes/             # FastAPI 엔드포인트
+│   │   ├── health.py
+│   │   ├── cases.py            # 케이스 CRUD (Admin)
+│   │   ├── indexing.py         # 인덱싱 관리 (Admin)
+│   │   ├── documents.py        # 문서 업로드 (Admin)
+│   │   ├── settings.py         # 설정/모델 (Admin)
+│   │   ├── chat.py             # RAG 질의 (Analyst)
+│   │   └── dashboard.py        # 커뮤니케이션 분석 (Analyst)
+│   ├── parsers/                # PST, PDF, DOCX 등 파서
+│   ├── chunkers/               # 텍스트 청킹 + 메타데이터 보강
+│   ├── embeddings/             # Ollama 임베딩 클라이언트
+│   ├── vectorstore/            # ChromaDB + BM25 하이브리드 저장소
+│   ├── rag/                    # 질의 파서, 검색, RAG 엔진
+│   ├── llm/                    # LLM 라우터 (로컬/외부 분기)
+│   ├── cases/                  # 케이스 메타데이터 + 라이프사이클
+│   ├── indexing/               # 인덱싱 파이프라인 오케스트레이터
+│   ├── db/                     # SQLAlchemy 엔진/세션 (sync + async)
+│   └── utils/                  # 설정, 로깅
+├── frontend/                   # React + TypeScript + Vite
+├── tests/
+│   ├── unit/                   # 유닛 테스트 (~340)
+│   └── integration/            # E2E 통합 테스트 (~14)
+├── docs/                       # 아키텍처/가이드/개선 항목
+├── scripts/                    # docker-init.sh, run_indexing.py, run_benchmark.py
+├── docker/                     # Dockerfile.backend, Dockerfile.frontend, nginx.conf
+├── docker-compose.yml
+└── data/                       # gitignore됨
+    ├── ast.db                  # SQLite (cases, indexing_logs, chat_history, chat_sources)
+    ├── input/{pst,documents}/  # 원본 데이터
+    ├── processed/              # 파싱/청킹 캐시
+    ├── bm25_index/             # BM25 케이스별 pickle
+    └── vectordb/               # ChromaDB 영구 저장
 ```
 
 ## 빠른 시작
@@ -72,8 +76,8 @@ ast-poc/
 ### 사전 요구사항
 
 - Python 3.11+
-- Node.js 18+
-- Ollama (gpt-oss:20b, nomic-embed-text 모델)
+- Node.js 18+ (프론트엔드)
+- Ollama (`bge-m3`, `gemma4:e4b` 또는 `gpt-oss:20b` 모델)
 - Docker & Docker Compose (선택)
 
 ### 설치
@@ -89,9 +93,11 @@ pip install -e ".[dev]"
 # 프론트엔드 의존성 설치
 cd frontend && npm install && cd ..
 
-# Ollama 모델 준비
-ollama pull gpt-oss:20b
-ollama pull bge-m3
+# Ollama 모델 준비 (개발 환경 기준)
+ollama pull bge-m3            # 임베딩 (~1.2GB)
+ollama pull gemma4:e4b        # 개발 LLM (가벼움)
+# 또는 운영 환경
+ollama pull gpt-oss:20b       # 운영 LLM (~12GB)
 ```
 
 ### 환경 설정
@@ -108,6 +114,7 @@ cp .env.prod.example .env
 
 | 설정 | 개발 (3060 12GB) | 운영 (A5000 24GB) |
 |------|-----------------|-------------------|
+| `OLLAMA_LLM_MODEL` | `gemma4:e4b` | `gpt-oss:20b` |
 | `EMBED_BATCH_SIZE` | 256 | 512 |
 | `INDEXING_STORE_BATCH_SIZE` | 2000 | 5000 |
 | `RERANK_ENABLED` | false | true |
@@ -128,7 +135,11 @@ cd frontend && npm run dev
 ### Docker로 실행
 
 ```bash
-docker compose up --build
+# 4-서비스 스택: backend + frontend(nginx) + chromadb + ollama(GPU)
+docker compose up --build -d
+
+# 모델 다운로드 + 디렉토리 초기화 (최초 1회)
+bash scripts/docker-init.sh
 ```
 
 ## 개발 가이드
@@ -140,10 +151,16 @@ ruff check src/
 # 포맷팅
 ruff format src/
 
-# 테스트
+# 테스트 (전체)
 pytest tests/
+
+# 단위 테스트만
+pytest tests/unit/ -v
+
+# 인덱싱 CLI (API 대신 직접 실행)
+python -m scripts.run_indexing <case_id>
 ```
 
 ## 라이선스
 
-Private - Internal Use Only
+Private — Internal Use Only

@@ -1,73 +1,49 @@
-# React + TypeScript + Vite
+# AST PoC Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+AST(Audit Support Tool) PoC의 React + TypeScript + Vite 프론트엔드.
 
-Currently, two official plugins are available:
+## 구성
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- **Admin UI** (`src/components/admin/`): 케이스 관리, 데이터 소스 설정, 인덱싱 모니터, 시스템 설정
+- **Analyst UI** (`src/components/analyst/`): RAG 채팅, 보안 토글, 검색 결과, 케이스 선택, 대시보드
+- **Shared** (`src/components/shared/`): 공통 컴포넌트
 
-## React Compiler
+## 개발 실행
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```bash
+# 의존성 설치 (최초 1회)
+npm install
 
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+# 개발 서버 (HMR)
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+기본 접속: http://localhost:5173
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+`/api` 요청은 백엔드(`http://localhost:8000`)로 자동 프록시됩니다 (`vite.config.ts` 참고).
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+## 빌드
+
+```bash
+# 프로덕션 빌드
+npm run build
+
+# 빌드 결과 미리보기
+npm run preview
 ```
+
+빌드 산출물은 `dist/`에 생성되며, Docker 환경에서는 nginx가 SPA로 서빙합니다 (`docker/nginx.conf`).
+
+## 린트
+
+```bash
+npm run lint
+```
+
+## 백엔드 연동
+
+- API 문서: http://localhost:8000/docs (FastAPI 자동 생성)
+- 헬스체크: http://localhost:8000/health
+- SSE 스트리밍: `/api/analyst/chat/stream` (RAG 응답 실시간 출력)
+
+전체 시스템 실행 가이드는 프로젝트 루트의 `docs/guides/quickstart.md` 참고.
