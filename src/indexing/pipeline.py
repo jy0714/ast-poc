@@ -578,6 +578,7 @@ class IndexingPipeline:
             "errors": [],
             "bm25_corpus": [],  # BM25 직접 구축용 텍스트 수집
             "bm25_ids": [],
+            "bm25_metadatas": [],  # BM25 검색 결과 메타데이터 캐시용
         }
 
         def gpu_consumer() -> None:
@@ -630,6 +631,7 @@ class IndexingPipeline:
                 vector_store.rebuild_bm25(
                     corpus=consumer_result["bm25_corpus"],
                     ids=consumer_result["bm25_ids"],
+                    metadatas=consumer_result["bm25_metadatas"],
                 )
                 logger.info("BM25 인덱스 구축 완료")
 
@@ -644,10 +646,15 @@ class IndexingPipeline:
                 count = vector_store.add_chunks(batch, rebuild_bm25=False)
                 result["stored"] += count
                 progress.stored_chunks = result["stored"]
-                # BM25 직접 구축용 텍스트 수집
+                # BM25 직접 구축용 텍스트 + 메타데이터 수집 (검색 결과에서 사용)
                 for c in batch:
                     result["bm25_corpus"].append(c.content)
                     result["bm25_ids"].append(c.chunk_id)
+                    meta = dict(c.metadata) if c.metadata else {}
+                    meta["source_type"] = c.source_type
+                    if vector_store.case_id:
+                        meta["case_id"] = vector_store.case_id
+                    result["bm25_metadatas"].append(meta)
                 logger.info(
                     f"[GPU] 배치 {batch_num} 저장 완료: {count}개 청크 "
                     f"(누적 {result['stored']}개, "
@@ -757,6 +764,7 @@ class IndexingPipeline:
         batch_num = 0
         bm25_corpus: list[str] = []
         bm25_ids: list[str] = []
+        bm25_metadatas: list[dict[str, Any]] = []
 
         for file_path in files:
             if cancel_flag and cancel_flag.is_set():
@@ -787,6 +795,11 @@ class IndexingPipeline:
                     for c in batch:
                         bm25_corpus.append(c.content)
                         bm25_ids.append(c.chunk_id)
+                        meta = dict(c.metadata) if c.metadata else {}
+                        meta["source_type"] = c.source_type
+                        if vector_store.case_id:
+                            meta["case_id"] = vector_store.case_id
+                        bm25_metadatas.append(meta)
                     progress.total_chunks = stored_count
                 except Exception as e:
                     logger.warning(f"벡터 저장 실패 (batch {batch_num}): {e}")
@@ -803,12 +816,21 @@ class IndexingPipeline:
                 for c in buffer:
                     bm25_corpus.append(c.content)
                     bm25_ids.append(c.chunk_id)
+                    meta = dict(c.metadata) if c.metadata else {}
+                    meta["source_type"] = c.source_type
+                    if vector_store.case_id:
+                        meta["case_id"] = vector_store.case_id
+                    bm25_metadatas.append(meta)
             except Exception as e:
                 logger.warning(f"벡터 저장 실패 (batch {batch_num}): {e}")
 
         # BM25 인덱스 최종 구축
         if stored_count > 0:
-            vector_store.rebuild_bm25(corpus=bm25_corpus, ids=bm25_ids)
+            vector_store.rebuild_bm25(
+                corpus=bm25_corpus,
+                ids=bm25_ids,
+                metadatas=bm25_metadatas,
+            )
 
         # 임계 실패율 검사
         store_failures = sum(

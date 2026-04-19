@@ -148,6 +148,9 @@ class VectorStoreService:
         # BM25 검색 결과를 ChromaDB 재조회 없이 반환하기 위한 메타데이터 캐시
         self._bm25_metadata: dict[str, dict[str, Any]] = {}
 
+        # 차원 검증 1회만 수행 (대량 인덱싱 시 매 배치 collection.count()/peek() 회피)
+        self._dim_validated: bool = False
+
     def _get_client(self) -> chromadb.ClientAPI:
         """ChromaDB 클라이언트 초기화 (지연 생성)"""
         if self._client is None:
@@ -211,9 +214,11 @@ class VectorStoreService:
 
         collection = self._get_collection()
 
-        # 기존 컬렉션에 데이터가 있으면 벡터 차원 호환성 검증
-        if collection.count() > 0:
-            self._validate_embedding_dimension(collection)
+        # 차원 검증 — 인스턴스당 1회만 (단일 공유 컬렉션에서 매 배치 count()/peek() 누적 회피)
+        if not self._dim_validated:
+            if collection.count() > 0:
+                self._validate_embedding_dimension(collection)
+            self._dim_validated = True
 
         # 임베딩 생성
         texts = [c.content for c in chunks]
@@ -237,17 +242,18 @@ class VectorStoreService:
             metadatas=metadatas,
         )
 
-        # BM25 corpus/메타데이터 캐시 갱신 (이미 있는 ID는 스킵)
-        existing_id_set = set(self._bm25_ids)
-        for cid, text, meta in zip(ids, texts, metadatas):
-            if cid in existing_id_set:
-                continue
-            self._bm25_corpus.append(text)
-            self._bm25_ids.append(cid)
-            self._bm25_tokenized.append(self._tokenize(text))
-            self._bm25_metadata[cid] = meta
-
+        # BM25 캐시 갱신 + 인덱스 재구축은 rebuild_bm25=True일 때만.
+        # 대량 인덱싱(rebuild_bm25=False)에서는 GPU 컨슈머 critical path에서 형태소 분석 회피 —
+        # 마지막에 rebuild_bm25(corpus=..., ids=...) 호출로 일괄 토큰화.
         if rebuild_bm25:
+            existing_id_set = set(self._bm25_ids)
+            for cid, text, meta in zip(ids, texts, metadatas):
+                if cid in existing_id_set:
+                    continue
+                self._bm25_corpus.append(text)
+                self._bm25_ids.append(cid)
+                self._bm25_tokenized.append(self._tokenize(text))
+                self._bm25_metadata[cid] = meta
             self._rebuild_bm25_from_cache()
 
         logger.info(
