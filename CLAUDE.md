@@ -30,7 +30,7 @@ PST 파일 / 내부 문서
   → 자동 분류 (이메일 본문 / Teams 대화 / 첨부파일)
   → 스마트 청킹 (문서: 문자수, 채팅: 시간윈도우, 이메일: 스레드, 첨부: 타입별)
   → 메타데이터 부착 (participants, date_range, source_type, topics, case_id, file_name)
-  → 로컬 임베딩 (Ollama bge-m3, 1024-dim, 8192 토큰)
+  → 로컬 임베딩 (Ollama bge-m3, 1024-dim, 4096 토큰; 배치 실패 시 binary subdivide + retry 큐)
   → 단일 공유 ChromaDB 컬렉션 + BM25 키워드 인덱스 (케이스별 pickle)
   → case_id 메타필터로 케이스 격리
 ```
@@ -73,6 +73,12 @@ PST 파일 / 내부 문서
 ### Processed (`data/processed/`)
 - 파싱/청킹 결과 JSONL 캐시
 - 증분 인덱싱 시 재파싱 방지 (파일 해시 기반 중복 체크)
+
+### Failed embeddings (`data/failed_embeddings/`)
+- 케이스별 JSONL (`{case_id}.jsonl`)에 영구 임베딩 실패 청크 보존
+- `vector_store._save_failed_chunks()`가 binary subdivide 후에도 실패한 청크를 append
+- BM25 corpus에는 성공한 청크만 들어가 벡터 DB와 키워드 인덱스 간 일관성 유지
+- 운영 시 별도 스크립트로 재처리하여 데이터 손실 방지 (현재 재처리 스크립트는 미구현)
 
 ## 프론트엔드 구조
 
@@ -152,6 +158,7 @@ ast-poc/
     ├── input/{pst,documents}/  # 원본 데이터
     ├── processed/              # 파싱/청킹 JSONL 캐시
     ├── bm25_index/             # BM25 케이스별 pickle
+    ├── failed_embeddings/      # 임베딩 영구 실패 청크 (case_id별 JSONL, 재처리용)
     └── vectordb/               # ChromaDB 영구 저장
 ```
 
@@ -162,7 +169,7 @@ ast-poc/
 - **Reranker**: BAAI/bge-reranker-v2-m3 (FlagEmbedding) — 선택적
 - **LLM 로컬**: 개발 `gemma4:e4b`, 운영 `gpt-oss:20b` (Ollama)
 - **LLM 외부**: OpenAI (langchain-openai)
-- **임베딩**: Ollama `bge-m3` (1024-dim, 8192 토큰)
+- **임베딩**: Ollama `bge-m3` (1024-dim, 4096 토큰; 배치 실패 시 binary subdivide + retry 큐)
 - **PST 파싱**: libpff / pypff (옵션)
 - **문서 파싱**: PyMuPDF, python-docx, python-pptx, openpyxl, extract-msg
 
@@ -230,11 +237,22 @@ docker compose logs -f backend  # 로그 확인
 
 ## 현재 상태 (2026-04-19 기준)
 
-- **최신 커밋**: `d50f7b0` (main) — Skip BM25 tokenization on hot path during bulk indexing
+- **최신 커밋**: `8c43691` (main) — Prevent embedding timeout cascade with binary subdivide and retry queue
 - **테스트**: ~356 (unit ~342 + integration ~14)
 - **환경**: Python 3.11+, Windows 11, VS 2026 Community (C++ 빌드 도구 설치됨)
 - **chroma-hnswlib**: 0.7.6 (C++ 빌드 완료 — 한글 Windows에서 DISTUTILS_USE_SDK=1 필요)
 - **Phase 5 Docker**: 완료 (backend + frontend/nginx + ChromaDB + Ollama GPU)
+
+### 인덱싱 안정화 (2026-04-19)
+
+기존: `EMBED_BATCH_SIZE=64` × `_MAX_CHARS_PER_TEXT=6000` 조합으로 bge-m3 4096 토큰 컨텍스트를 초과 → Ollama가 600s × 3 retry 동안 막혀 GPU consumer 스레드 정지 → producer 큐 정지 → CPU 워커 정지 (30분간 58 파일만 처리되는 증상).
+
+해결:
+- `_REQUEST_TIMEOUT`: 600s → 60s (빨리 실패하고 작은 배치로 재시도)
+- `_MAX_CHARS_PER_TEXT`: 6000 → 2500 (4096 토큰 안전 마진)
+- 배치 실패 시 binary subdivide로 절반씩 재시도 → 거대 텍스트 1개만 고립
+- 영구 실패 청크는 `data/failed_embeddings/{case_id}.jsonl`로 보존 (데이터 손실 방지)
+- BM25 corpus에는 성공한 청크만 추가 → 벡터 DB와 키워드 인덱스 일관성
 
 ### 환경 이슈 (chroma-hnswlib 빌드)
 
@@ -264,8 +282,8 @@ subprocess.run(['pip', 'install', 'chroma-hnswlib', '--no-build-isolation'], env
 | PST 파서 | `src/parsers/pst_parser.py` | PST 이메일/채팅/첨부 파싱 |
 | 청킹 | `src/chunkers/chunker.py` | 문서/채팅/이메일/첨부 4종 청커 |
 | 메타데이터 | `src/chunkers/metadata_enricher.py` | 토픽 추출 + case_id 부착 |
-| 임베딩 | `src/embeddings/embedding_service.py` | Ollama bge-m3 (1024-dim) |
-| 벡터 저장소 | `src/vectorstore/vector_store.py` | ChromaDB 단일 공유 컬렉션 + BM25 + RRF |
+| 임베딩 | `src/embeddings/embedding_service.py` | Ollama bge-m3 (1024-dim) + binary subdivide 재시도 |
+| 벡터 저장소 | `src/vectorstore/vector_store.py` | ChromaDB 단일 공유 컬렉션 + BM25 + RRF + 실패 청크 retry 큐 |
 | 케이스 관리 | `src/cases/case_store.py` | SQLAlchemy CRUD + 라이프사이클 상태 머신 |
 | DB 엔진 | `src/db/database.py`, `db/models.py` | SQLAlchemy sync + async (aiosqlite) |
 | 인덱싱 | `src/indexing/pipeline.py` | 파이프라인 오케스트레이터 (백그라운드 + Producer-Consumer) |
@@ -329,7 +347,9 @@ subprocess.run(['pip', 'install', 'chroma-hnswlib', '--no-build-isolation'], env
 ### 환경 설정 파일
 
 환경별 `.env` 예시 파일을 사용:
-- `.env.dev.example` — 개발 환경 (3060 12GB, gemma4:e4b, EMBED_BATCH_SIZE=256, RERANK_ENABLED=false)
-- `.env.prod.example` — 운영 환경 (A5000 24GB, gpt-oss:20b, EMBED_BATCH_SIZE=512, RERANK_ENABLED=true)
+- `.env.dev.example` — 개발 환경 (3060 12GB, gemma4:e4b, EMBED_BATCH_SIZE=8, INDEXING_STORE_BATCH_SIZE=64, RERANK_ENABLED=false)
+- `.env.prod.example` — 운영 환경 (A5000 24GB, gpt-oss:20b, EMBED_BATCH_SIZE=16, INDEXING_STORE_BATCH_SIZE=128, RERANK_ENABLED=true)
 
 대상 환경 파일을 `.env`로 복사하여 사용. 개별 변수는 환경 변수로 오버라이드 가능.
+
+> **임베딩 배치 크기 주의**: 위 값은 보수적 기본값입니다. bge-m3 4096 토큰 컨텍스트와 Ollama 큐 동작상 큰 배치는 timeout 캐스케이드를 유발해 인덱싱이 멈춥니다. 안정 동작 확인 후 단계적으로(8→16→32) 상향하고 로그를 모니터링하세요.

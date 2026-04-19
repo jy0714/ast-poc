@@ -99,6 +99,6 @@ AST(Audit Support Tool)는 내부 커뮤니케이션(이메일, Teams 채팅)과
 - **LLM (개발)**: Ollama `gemma4:e4b`
 - **LLM (운영)**: Ollama `gpt-oss:20b`
 - **LLM 외부**: OpenAI (보안 모드 OFF 시)
-- **임베딩**: Ollama `bge-m3` (1024-dim, 8192 토큰)
+- **임베딩**: Ollama `bge-m3` (1024-dim, 4096 토큰; 배치 실패 시 binary subdivide + retry 큐 보존)
 - **메타DB**: SQLite (SQLAlchemy ORM, sync + async)
 - **컨테이너**: Docker + Docker Compose (Ollama GPU 패스스루)

@@ -18,7 +18,7 @@
 Ollama 모델 다운로드 (최초 1회):
 
 ```powershell
-ollama pull bge-m3               # 임베딩 모델 (~1.2GB, 1024-dim, 8192 토큰)
+ollama pull bge-m3               # 임베딩 모델 (~1.2GB, 1024-dim, 4096 토큰)
 ollama pull gemma4:e4b           # 개발용 LLM (가벼움)
 # 운영 환경에서는
 ollama pull gpt-oss:20b          # 운영 LLM (~12GB)

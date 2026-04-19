@@ -23,7 +23,7 @@
 | 프론트엔드 | React + TypeScript + Vite |
 | LLM (로컬) | Ollama — 개발: `gemma4:e4b`, 운영: `gpt-oss:20b` |
 | LLM (외부) | OpenAI (보안 모드 OFF 시) |
-| 임베딩 | Ollama `bge-m3` (1024-dim, 8192 토큰) |
+| 임베딩 | Ollama `bge-m3` (1024-dim, 4096 토큰) — 배치 실패 시 binary subdivide 자동 재시도 |
 | 벡터DB | ChromaDB (단일 공유 컬렉션 + 메타필터) |
 | 키워드 검색 | rank-bm25 + kiwipiepy 한국어 형태소 분석 |
 | Reranker | BAAI/bge-reranker-v2-m3 (FlagEmbedding) |
@@ -68,6 +68,7 @@ ast-poc/
     ├── input/{pst,documents}/  # 원본 데이터
     ├── processed/              # 파싱/청킹 캐시
     ├── bm25_index/             # BM25 케이스별 pickle
+    ├── failed_embeddings/      # 임베딩 영구 실패 청크 (case_id별 JSONL, 재처리용)
     └── vectordb/               # ChromaDB 영구 저장
 ```
 
@@ -115,10 +116,12 @@ cp .env.prod.example .env
 | 설정 | 개발 (3060 12GB) | 운영 (A5000 24GB) |
 |------|-----------------|-------------------|
 | `OLLAMA_LLM_MODEL` | `gemma4:e4b` | `gpt-oss:20b` |
-| `EMBED_BATCH_SIZE` | 256 | 512 |
-| `INDEXING_STORE_BATCH_SIZE` | 2000 | 5000 |
+| `EMBED_BATCH_SIZE` | 8 | 16 |
+| `INDEXING_STORE_BATCH_SIZE` | 64 | 128 |
 | `RERANK_ENABLED` | false | true |
 | `OLLAMA_BASE_URL` | localhost:11434 | ollama:11434 (Docker) |
+
+> **임베딩 배치 크기 주의**: bge-m3 실제 컨텍스트 한도(4096 토큰)와 Ollama 큐 동작상, 큰 배치는 타임아웃 캐스케이드를 유발해 인덱싱이 멈출 수 있습니다. 위 기본값에서 안정 동작을 확인 후 단계적으로 상향하세요. 영구 실패한 청크는 `data/failed_embeddings/{case_id}.jsonl`에 보존되어 재처리 가능합니다.
 
 필요에 따라 `.env` 값을 직접 수정하거나, 환경 변수로 개별 오버라이드할 수 있습니다.
 
