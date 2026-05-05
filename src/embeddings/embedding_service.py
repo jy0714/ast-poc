@@ -14,7 +14,9 @@ validate_dimension()으로 호환성을 검증해야 함.
 
 from __future__ import annotations
 
+import re
 import time
+import unicodedata
 
 import httpx
 
@@ -147,6 +149,44 @@ class EmbeddingService:
                 f"Ollama 임베딩 실패 ({self.base_url}, 모델: {self.model}): {e}"
             ) from e
 
+    # 제어 문자 제거용 패턴 (탭 \x09, 줄바꿈 \x0a, 캐리지리턴 \x0d 는 유지)
+    _CONTROL_CHAR_RE = re.compile(
+        r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]"
+    )
+    # 제로폭 공백, BOM, 기타 보이지 않는 특수 문자
+    _INVISIBLE_RE = re.compile(
+        r"[\u200b\u200c\u200d\u2060\ufeff\u00ad\u180e"
+        r"\u2000-\u200a\u202f\u205f\u3000]"
+    )
+    # 연속 공백 (줄바꿈 제외)
+    _MULTI_SPACE_RE = re.compile(r"[^\S\n]+")
+
+    def _sanitize_text(self, text: str) -> str:
+        """임베딩에 안전한 텍스트로 정제
+
+        1. NULL 문자 제거
+        2. 제어 문자 제거 (탭/줄바꿈/CR 유지)
+        3. 서로게이트 페어 깨진 유니코드 제거
+        4. 제로폭 공백, BOM 등 보이지 않는 특수 문자 제거
+        5. 연속 공백을 단일 공백으로 치환
+        """
+        # 서로게이트 깨진 유니코드 제거 (encode → decode with surrogateescape 우회)
+        text = text.encode("utf-8", errors="surrogatepass").decode(
+            "utf-8", errors="ignore"
+        )
+        # Cc (제어 문자) 중 유해한 것 제거
+        text = self._CONTROL_CHAR_RE.sub("", text)
+        # 보이지 않는 유니코드 제거
+        text = self._INVISIBLE_RE.sub("", text)
+        # 유니코드 카테고리 Cf(포맷 문자) 중 남은 것 제거 (soft hyphen 등)
+        text = "".join(
+            ch for ch in text
+            if unicodedata.category(ch) != "Cf"
+        )
+        # 연속 공백 → 단일 공백 (줄바꿈 보존)
+        text = self._MULTI_SPACE_RE.sub(" ", text)
+        return text.strip()
+
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """배치 텍스트 임베딩 — Ollama /api/embed 네이티브 배치 API 사용
 
@@ -166,11 +206,23 @@ class EmbeddingService:
         if not texts:
             return []
 
+        # 텍스트 전처리 (sanitize) → Ollama에 안전한 입력으로 정제
+        sanitized_count = 0
+        sanitized_texts: list[str] = []
+        for t in texts:
+            s = self._sanitize_text(t) if t else ""
+            if s != (t or ""):
+                sanitized_count += 1
+            sanitized_texts.append(s)
+
+        if sanitized_count:
+            logger.info(f"텍스트 전처리: {sanitized_count}/{len(texts)}개 정제됨")
+
         # 빈 문자열/공백만 있는 텍스트를 필터링 (Ollama 400 에러 방지)
         # + 모델 토큰 한도를 넘는 텍스트는 truncate (bge-m3 8192 토큰 한도)
         cleaned: list[tuple[int, str]] = []
         truncated = 0
-        for idx, t in enumerate(texts):
+        for idx, t in enumerate(sanitized_texts):
             stripped = t.strip() if t else ""
             if not stripped:
                 continue
