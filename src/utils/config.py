@@ -40,10 +40,12 @@ class Settings(BaseSettings):
 
     # === Embedding ===
     embed_batch_size: int = 256  # VRAM에 따라 조정 (3060 12GB: 256, A5000 24GB: 512+)
+    embed_max_concurrent: int = 2  # 동시 배치 요청 수 (Ollama OLLAMA_NUM_PARALLEL과 맞춰 조정)
 
     # === Indexing Performance ===
     indexing_workers: int = 0  # 파싱/청킹 병렬 워커 수 (0=CPU 코어 수 자동)
     max_indexing_workers: int = 16  # 워커 수 상한 (Windows는 61 미만 필수)
+    max_parsing_workers: int = 8  # 파싱 풀 워커 상한 (ProcessPool/ThreadPool 각각 cap; Windows 61 하드캡 자동 적용)
     indexing_store_batch_size: int = 2000  # 벡터 저장 배치 크기 (3060 12GB 기준)
 
     # === Search ===

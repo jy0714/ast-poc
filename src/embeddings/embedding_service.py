@@ -14,6 +14,8 @@ validate_dimension()으로 호환성을 검증해야 함.
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import re
 import time
 import unicodedata
@@ -188,11 +190,41 @@ class EmbeddingService:
         return text.strip()
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """배치 텍스트 임베딩 — Ollama /api/embed 네이티브 배치 API 사용
+        """배치 텍스트 임베딩 — 동기 래퍼 (내부적으로 async 구현 호출)
 
-        LangChain OllamaEmbeddings.embed_documents()는 내부적으로 텍스트를
-        하나씩 순차 호출하므로 GPU 활용률이 낮음. Ollama의 /api/embed 엔드포인트는
-        input 배열을 한 번에 받아 GPU에서 진짜 배치 처리를 수행.
+        Ollama의 /api/embed 엔드포인트에 여러 배치를 동시 전송 (asyncio.Semaphore로
+        embed_max_concurrent 만큼 제한). 호출측 인터페이스는 동기 유지.
+
+        실행 컨텍스트 처리:
+        - 일반 동기 컨텍스트: asyncio.run() 직접 호출
+        - 이미 이벤트 루프가 도는 환경 (FastAPI 등): ThreadPoolExecutor에서 격리 실행
+
+        Args:
+            texts: 임베딩할 텍스트 리스트
+
+        Returns:
+            임베딩 벡터 리스트
+
+        Raises:
+            ConnectionError: Ollama 서버 연결 실패
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # 실행 중인 루프 없음 → asyncio.run() 으로 직접 실행
+            return asyncio.run(self.embed_texts_async(texts))
+
+        # 이미 루프 위에서 호출됨 → 별도 스레드에서 새 루프로 실행
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(asyncio.run, self.embed_texts_async(texts))
+            return future.result()
+
+    async def embed_texts_async(self, texts: list[str]) -> list[list[float]]:
+        """배치 텍스트 임베딩 (비동기) — 여러 배치를 Ollama에 동시 전송
+
+        httpx.AsyncClient + asyncio.Semaphore(embed_max_concurrent)로 동시성 제한.
+        각 배치는 코루틴으로 만들어 asyncio.gather로 병렬 실행.
+        실패 시 binary subdivide 재시도 로직은 동기 버전과 동일.
 
         Args:
             texts: 임베딩할 텍스트 리스트
@@ -219,7 +251,7 @@ class EmbeddingService:
             logger.info(f"텍스트 전처리: {sanitized_count}/{len(texts)}개 정제됨")
 
         # 빈 문자열/공백만 있는 텍스트를 필터링 (Ollama 400 에러 방지)
-        # + 모델 토큰 한도를 넘는 텍스트는 truncate (bge-m3 8192 토큰 한도)
+        # + 모델 토큰 한도를 넘는 텍스트는 truncate (bge-m3 4096 토큰 한도)
         cleaned: list[tuple[int, str]] = []
         truncated = 0
         for idx, t in enumerate(sanitized_texts):
@@ -235,25 +267,48 @@ class EmbeddingService:
             return [[] for _ in texts]
 
         batch_size = settings.embed_batch_size
+        max_concurrent = max(1, settings.embed_max_concurrent)
         # 유효 텍스트만 임베딩
         valid_texts = [t for _, t in cleaned]
         valid_vectors: list[list[float] | None] = [None] * len(valid_texts)
         url = f"{self.base_url}/api/embed"
 
-        # 배치 단위로 처리하되, 실패 시 binary subdivide로 자동 축소
-        # → 거대 텍스트 1개가 막아도 같은 배치의 나머지는 살림
-        failed_local_indices: list[int] = []
+        # 배치 단위로 분할
+        batches: list[tuple[int, int, list[str]]] = []  # (batch_num, local_offset, batch)
         for i in range(0, len(valid_texts), batch_size):
-            batch = valid_texts[i : i + batch_size]
-            batch_num = i // batch_size + 1
-            self._embed_with_subdivide(
-                url=url,
-                batch=batch,
-                batch_num=batch_num,
-                local_offset=i,
-                results=valid_vectors,
-                failed_local_indices=failed_local_indices,
+            batches.append((i // batch_size + 1, i, valid_texts[i : i + batch_size]))
+
+        failed_local_indices: list[int] = []
+        semaphore = asyncio.Semaphore(max_concurrent)
+        total_start = time.monotonic()
+        logger.info(
+            f"임베딩 동시 전송 시작: {len(batches)}개 배치, "
+            f"동시성 {max_concurrent} (배치 크기 {batch_size})"
+        )
+
+        async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT) as client:
+            async def run_batch(batch_num: int, local_offset: int, batch: list[str]) -> None:
+                async with semaphore:
+                    batch_start = time.monotonic()
+                    await self._embed_with_subdivide_async(
+                        client=client,
+                        url=url,
+                        batch=batch,
+                        batch_num=batch_num,
+                        local_offset=local_offset,
+                        results=valid_vectors,
+                        failed_local_indices=failed_local_indices,
+                    )
+                    elapsed = time.monotonic() - batch_start
+                    logger.info(
+                        f"배치 {batch_num} 완료: {len(batch)}개 텍스트, {elapsed:.2f}초"
+                    )
+
+            await asyncio.gather(
+                *(run_batch(bn, lo, b) for bn, lo, b in batches)
             )
+
+        total_elapsed = time.monotonic() - total_start
 
         # 원래 인덱스에 맞게 결과 재배치 (빈 텍스트 → 빈 벡터, 실패 텍스트 → 빈 벡터)
         all_vectors: list[list[float]] = [[] for _ in texts]
@@ -282,12 +337,14 @@ class EmbeddingService:
             self._last_failed_indices = []
         logger.info(
             f"임베딩 완료: {len(cleaned) - len(failed_orig_indices)}/{len(cleaned)}개 텍스트 "
-            f"(빈 {skipped}개 제외, 실패 {len(failed_orig_indices)}개)"
+            f"(빈 {skipped}개 제외, 실패 {len(failed_orig_indices)}개, "
+            f"{len(batches)}개 배치, 총 {total_elapsed:.2f}초)"
         )
         return all_vectors
 
-    def _embed_with_subdivide(
+    async def _embed_with_subdivide_async(
         self,
+        client: httpx.AsyncClient,
         url: str,
         batch: list[str],
         batch_num: int,
@@ -295,13 +352,15 @@ class EmbeddingService:
         results: list[list[float] | None],
         failed_local_indices: list[int],
     ) -> None:
-        """배치 임베딩 + 실패 시 절반으로 쪼개 재시도
+        """배치 임베딩 + 실패 시 절반으로 쪼개 재시도 (async)
 
         실패 사유가 거대 텍스트 1개 때문이면 binary subdivide로 그 텍스트만
         고립시킬 수 있고, 나머지 텍스트는 정상 임베딩됨.
         """
         try:
-            embeddings = self._embed_batch_with_retry(url, batch, batch_num)
+            embeddings = await self._embed_batch_with_retry_async(
+                client, url, batch, batch_num
+            )
             for j, vec in enumerate(embeddings):
                 results[local_offset + j] = vec
             return
@@ -320,19 +379,23 @@ class EmbeddingService:
             logger.warning(
                 f"배치 {batch_num} 실패 → {len(batch)}개를 {mid}+{len(batch) - mid}개로 분할 재시도"
             )
-            self._embed_with_subdivide(
-                url, batch[:mid], batch_num * 10 + 1,
+            await self._embed_with_subdivide_async(
+                client, url, batch[:mid], batch_num * 10 + 1,
                 local_offset, results, failed_local_indices,
             )
-            self._embed_with_subdivide(
-                url, batch[mid:], batch_num * 10 + 2,
+            await self._embed_with_subdivide_async(
+                client, url, batch[mid:], batch_num * 10 + 2,
                 local_offset + mid, results, failed_local_indices,
             )
 
-    def _embed_batch_with_retry(
-        self, url: str, batch: list[str], batch_num: int
+    async def _embed_batch_with_retry_async(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        batch: list[str],
+        batch_num: int,
     ) -> list[list[float]]:
-        """단일 배치 임베딩 — 일시적 timeout/네트워크 에러 시 재시도
+        """단일 배치 임베딩 (async) — 일시적 timeout/네트워크 에러 시 재시도
 
         keep_alive=-1로 모델을 VRAM에 상주시켜 배치 간 재로드 비용을 제거.
         timeout/connect 에러는 _MAX_RETRIES회까지 지수 백오프로 재시도.
@@ -347,7 +410,7 @@ class EmbeddingService:
         last_err: Exception | None = None
         for attempt in range(_MAX_RETRIES):
             try:
-                resp = httpx.post(url, json=payload, timeout=_REQUEST_TIMEOUT)
+                resp = await client.post(url, json=payload, timeout=_REQUEST_TIMEOUT)
                 resp.raise_for_status()
                 return resp.json()["embeddings"]
 
@@ -376,7 +439,7 @@ class EmbeddingService:
                     f"임베딩 재시도 {attempt + 1}/{_MAX_RETRIES - 1} "
                     f"(batch {batch_num}, {wait:.0f}초 후): {last_err}"
                 )
-                time.sleep(wait)
+                await asyncio.sleep(wait)
 
         raise ConnectionError(
             f"Ollama 배치 임베딩 {_MAX_RETRIES}회 재시도 모두 실패 "
