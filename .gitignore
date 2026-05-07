@@ -41,6 +41,7 @@ docker/volumes/
 # === Logs ===
 *.log
 logs/
+error_logs/
 
 # === Test ===
 .coverage
