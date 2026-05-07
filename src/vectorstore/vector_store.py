@@ -17,7 +17,9 @@ RRF (Reciprocal Rank Fusion): 두 검색 결과를 통합 순위로 결합
 from __future__ import annotations
 
 import json
+import os
 import pickle
+import shutil
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -39,6 +41,37 @@ logger = get_logger(__name__)
 
 # get_stats()에서 카운트하는 known source_type — 신규 타입은 여기 추가
 _KNOWN_SOURCE_TYPES = ("email", "teams_chat", "document", "attachment")
+
+# HNSW 세그먼트가 정상이라면 모두 0바이트 초과여야 하는 필수 파일.
+# 하나라도 누락되거나 0바이트면 ChromaDB가 'unsupported opcode \0' 등으로 deserialize 실패.
+_CHROMA_REQUIRED_SEGMENT_FILES = (
+    "data_level0.bin",
+    "header.bin",
+    "length.bin",
+    "link_lists.bin",
+)
+
+# 무결성 체크는 같은 persist_dir에 대해 프로세스당 1회만 수행 (불필요한 fs 스캔 방지)
+_integrity_checked: set[str] = set()
+
+
+class ChromaIntegrityError(RuntimeError):
+    """ChromaDB persist 디렉토리의 HNSW 세그먼트가 손상된 상태로 감지됨"""
+
+
+def _is_chroma_segment_dir(name: str) -> bool:
+    """ChromaDB 세그먼트 디렉토리 이름은 UUID4 형식 (8-4-4-4-12 hex)"""
+    if len(name) != 36:
+        return False
+    parts = name.split("-")
+    if tuple(len(p) for p in parts) != (8, 4, 4, 4, 12):
+        return False
+    return all(c in "0123456789abcdef-" for c in name.lower())
+
+
+def _auto_quarantine_enabled() -> bool:
+    """CHROMA_AUTO_QUARANTINE — 손상 감지 시 persist_dir 자동 격리 여부 (기본 ON)"""
+    return os.environ.get("CHROMA_AUTO_QUARANTINE", "1").lower() in ("1", "true", "yes", "on")
 
 # --- BM25 토크나이저 (kiwipiepy 우선, 정규식 fallback) ---
 
@@ -160,8 +193,89 @@ class VectorStoreService:
                 self._client = chromadb.EphemeralClient()
             else:
                 Path(self.persist_dir).mkdir(parents=True, exist_ok=True)
+                self._check_chroma_integrity()
                 self._client = chromadb.PersistentClient(path=self.persist_dir)
         return self._client
+
+    def _check_chroma_integrity(self) -> None:
+        """ChromaDB persist_dir의 HNSW 세그먼트 무결성 검증.
+
+        강제 종료(process kill) 시 `link_lists.bin` 등이 0바이트로 남아
+        다음 write 시 `unsupported opcode '\\0'` pickle deserialize 에러로
+        모든 저장이 실패하는 케이스를 사전 차단.
+
+        - 손상 감지 + `CHROMA_AUTO_QUARANTINE=1`(기본): persist_dir 전체를
+          `vectordb.quarantine_<ts>`로 이동하고 빈 디렉토리 새로 생성.
+          기존 데이터는 보존되어 사후 분석 가능.
+        - 손상 감지 + `CHROMA_AUTO_QUARANTINE=0`: ChromaIntegrityError 발생.
+        """
+        persist_path = Path(self.persist_dir).resolve()
+        key = str(persist_path)
+        if key in _integrity_checked:
+            return
+
+        if not persist_path.exists():
+            _integrity_checked.add(key)
+            return
+
+        corrupted: list[tuple[str, list[str]]] = []
+        for entry in persist_path.iterdir():
+            if not entry.is_dir() or not _is_chroma_segment_dir(entry.name):
+                continue
+            problems: list[str] = []
+            for fname in _CHROMA_REQUIRED_SEGMENT_FILES:
+                fpath = entry / fname
+                if not fpath.exists():
+                    problems.append(f"{fname} 누락")
+                elif fpath.stat().st_size == 0:
+                    problems.append(f"{fname} 0바이트")
+            if problems:
+                corrupted.append((entry.name, problems))
+
+        if not corrupted:
+            _integrity_checked.add(key)
+            return
+
+        details = "\n".join(
+            f"  - {seg_id}: {', '.join(probs)}" for seg_id, probs in corrupted
+        )
+        diagnosis = (
+            f"ChromaDB HNSW 세그먼트 손상 감지 ({len(corrupted)}개, "
+            f"persist_dir={persist_path}):\n{details}\n"
+            f"원인: 인덱싱 도중 강제 종료로 세그먼트 write가 끊겨 필수 파일이 "
+            f"0바이트로 남음. 그대로 진행하면 모든 벡터 저장이 "
+            f"'unsupported opcode \\0' 에러로 실패함."
+        )
+
+        if not _auto_quarantine_enabled():
+            logger.error(diagnosis)
+            raise ChromaIntegrityError(
+                diagnosis
+                + "\n복구: CHROMA_AUTO_QUARANTINE=1로 자동 격리하거나 "
+                "persist_dir을 백업 후 삭제하고 케이스를 재인덱싱."
+            )
+
+        quarantine = self._quarantine_persist_dir(persist_path)
+        logger.warning(
+            f"{diagnosis}\n→ 자동 격리: {persist_path} → {quarantine}\n"
+            f"주의: 이 케이스의 BM25 인덱스(data/bm25_index/)와 SQLite 케이스 상태도 "
+            f"stale 상태이므로 케이스를 삭제 후 재생성하거나 status를 created로 되돌려 "
+            f"재인덱싱 필요."
+        )
+        _integrity_checked.add(key)
+
+    def _quarantine_persist_dir(self, persist_path: Path) -> Path:
+        """persist_dir 전체를 형제 디렉토리 `vectordb.quarantine_<ts>`로 이동 후 빈 디렉토리 재생성"""
+        ts = int(time.time())
+        quarantine = persist_path.parent / f"{persist_path.name}.quarantine_{ts}"
+        # 동일 timestamp 충돌 방지
+        suffix = 0
+        while quarantine.exists():
+            suffix += 1
+            quarantine = persist_path.parent / f"{persist_path.name}.quarantine_{ts}_{suffix}"
+        shutil.move(str(persist_path), str(quarantine))
+        persist_path.mkdir(parents=True, exist_ok=True)
+        return quarantine
 
     def _get_collection(self) -> chromadb.Collection:
         """ChromaDB 컬렉션 가져오기/생성"""
@@ -277,6 +391,77 @@ class VectorStoreService:
 
         logger.info(
             f"벡터 저장 완료: {len(chunks)}개 청크 upsert, 컬렉션={self.collection_name}"
+            + (f", case={self.case_id}" if self.case_id else "")
+        )
+        return len(chunks)
+
+    def add_chunks_with_embeddings(
+        self,
+        chunks: list[Chunk],
+        embeddings: list[list[float]],
+        rebuild_bm25: bool = False,
+    ) -> int:
+        """이미 임베딩이 계산된 청크를 벡터 저장소에 저장 (임베딩 호출 생략)
+
+        파이프라인의 임베딩 단계와 저장 단계를 분리할 때 사용.
+        호출자가 EmbeddingService.embed_texts()를 직접 호출하고 실패 청크를
+        retry 큐로 처리한 뒤, 성공한 (chunk, embedding) 쌍만 이 메서드에 전달한다.
+
+        Args:
+            chunks: 저장할 청크 리스트 (임베딩 성공한 것만)
+            embeddings: chunks와 동일 순서의 임베딩 벡터 리스트
+            rebuild_bm25: BM25 인덱스 즉시 재구축 여부 (대량 처리 시 False)
+
+        Returns:
+            업서트된 청크 수
+        """
+        if not chunks:
+            return 0
+        if len(chunks) != len(embeddings):
+            raise ValueError(
+                f"chunks({len(chunks)})와 embeddings({len(embeddings)}) 길이가 다릅니다"
+            )
+
+        collection = self._get_collection()
+
+        # 차원 검증 — 인스턴스당 1회만
+        if not self._dim_validated:
+            if collection.count() > 0:
+                self._validate_embedding_dimension(collection)
+            self._dim_validated = True
+
+        # 메타데이터 직렬화 + source_type / case_id 자동 부착
+        ids = [c.chunk_id for c in chunks]
+        texts = [c.content for c in chunks]
+        metadatas = []
+        for c in chunks:
+            meta = serialize_metadata_for_chroma(c.metadata)
+            meta["source_type"] = c.source_type
+            if self.case_id:
+                meta["case_id"] = self.case_id
+            metadatas.append(meta)
+
+        collection.upsert(
+            ids=ids,
+            embeddings=embeddings,
+            documents=texts,
+            metadatas=metadatas,
+        )
+
+        if rebuild_bm25:
+            existing_id_set = set(self._bm25_ids)
+            for cid, text, meta in zip(ids, texts, metadatas):
+                if cid in existing_id_set:
+                    continue
+                self._bm25_corpus.append(text)
+                self._bm25_ids.append(cid)
+                self._bm25_tokenized.append(self._tokenize(text))
+                self._bm25_metadata[cid] = meta
+            self._rebuild_bm25_from_cache()
+
+        logger.info(
+            f"벡터 저장 완료(pre-embedded): {len(chunks)}개 청크 upsert, "
+            f"컬렉션={self.collection_name}"
             + (f", case={self.case_id}" if self.case_id else "")
         )
         return len(chunks)
@@ -484,7 +669,13 @@ class VectorStoreService:
                     }
                     f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception as e:
-            logger.error(f"실패 청크 저장 실패 (data 손실): {e}")
+            # JSONL 저장이 실패하면 청크가 영구 증발 — 호출측이 인지할 수 있도록
+            # error 로그 + raise 로 데이터 손실을 가시화.
+            logger.error(
+                f"실패 청크 JSONL 저장 실패 (DATA LOSS, {len(failed_chunks)}개): {e}",
+                exc_info=True,
+            )
+            raise
 
     def _validate_embedding_dimension(self, collection: chromadb.Collection) -> None:
         """현재 임베딩 모델과 기존 컬렉션의 벡터 차원이 일치하는지 검증
