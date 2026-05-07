@@ -43,12 +43,13 @@ export default function AdminPage() {
     const indexingCases = cases.filter(c => c.status === 'indexing');
     if (indexingCases.length === 0) return;
 
+    const TERMINAL_PHASES = new Set(['completed', 'error', 'cancelled']);
     const interval = setInterval(async () => {
       for (const c of indexingCases) {
         try {
           const p = await indexingApi.progress(c.case_id);
           setProgress(prev => ({ ...prev, [c.case_id]: p }));
-          if (p.phase === 'completed' || p.phase === 'error') {
+          if (TERMINAL_PHASES.has(p.phase)) {
             loadCases();
           }
         } catch { /* ignore */ }

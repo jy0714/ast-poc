@@ -476,6 +476,40 @@ class IndexingPipeline:
             return True
         return False
 
+    def cancel_and_wait(self, case_id: str, timeout: float = 10.0) -> bool:
+        """인덱싱 중단 + 워커 스레드 종료 대기
+
+        삭제·재시작 등 즉시 후속 동작이 필요한 호출자가 사용. cancel()과 달리
+        워커 스레드가 cancel_flag를 인지하고 정리(파일 핸들 close, vectorstore
+        flush 등)할 때까지 join으로 기다림. timeout 안에 종료되지 않아도 워커는
+        백그라운드에서 cancel_flag를 계속 체크하므로 곧 멈추지만, 정합성을 위해
+        호출자는 timeout 후 별도 정리 작업이 필요할 수 있음.
+
+        Args:
+            case_id: 케이스 ID
+            timeout: 종료 대기 최대 시간 (초). 기본 10초.
+
+        Returns:
+            True: 실행 중이 아니거나 timeout 안에 정상 종료, False: timeout 초과
+        """
+        if not self.is_running(case_id):
+            return True
+
+        self.cancel(case_id)
+        thread = self._threads.get(case_id)
+        if thread is None or not thread.is_alive():
+            return True
+
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            logger.warning(
+                f"인덱싱 종료 대기 timeout ({timeout}초): {case_id} — "
+                "워커가 백그라운드에서 cancel을 계속 처리합니다."
+            )
+            return False
+        logger.info(f"인덱싱 워커 종료 확인: {case_id}")
+        return True
+
     def run_async(self, case_id: str) -> IndexingProgress:
         """백그라운드 스레드로 인덱싱 실행
 

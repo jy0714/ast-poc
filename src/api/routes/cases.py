@@ -175,13 +175,30 @@ async def update_case_sources(case_id: str, request: CaseUpdateSources):
 
 @router.delete("/{case_id}", response_model=DeleteResponse)
 async def delete_case(case_id: str):
-    """케이스 삭제 (벡터DB 컬렉션 + BM25 인덱스 + 메타데이터 삭제)"""
+    """케이스 삭제 (벡터DB 컬렉션 + BM25 인덱스 + 메타데이터 삭제)
+
+    인덱싱이 실행 중이면 워커를 먼저 cancel하고 종료될 때까지 대기.
+    그렇지 않으면 워커가 삭제 직후 stale 청크를 vectorstore에 다시 upsert하는
+    race가 발생할 수 있음.
+    """
     store = get_store()
 
     try:
         store.get(case_id)
     except CaseNotFoundError:
         raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}")
+
+    # 인덱싱 실행 중이면 워커부터 정지 (orphan write 방지)
+    from src.api.routes.indexing import get_pipeline
+
+    pipeline = get_pipeline()
+    if pipeline.is_running(case_id):
+        logger.info(f"삭제 전 실행 중 인덱싱 중단: {case_id}")
+        finished = pipeline.cancel_and_wait(case_id, timeout=10.0)
+        if not finished:
+            logger.warning(
+                f"인덱싱 워커가 timeout 안에 종료되지 않음: {case_id} — 삭제는 진행"
+            )
 
     # 벡터DB에서 해당 케이스 청크만 삭제 (단일 공유 컬렉션)
     try:
