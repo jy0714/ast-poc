@@ -64,6 +64,7 @@ PST 파일 / 내부 문서
 - `persist_directory`로 디스크 영구 저장
 - **단일 공유 컬렉션** (`ast_chunks`) + `case_id` 메타필터로 케이스 격리
 - 벡터 유사도 검색용 (1024-dim bge-m3)
+- **무결성 자동 체크**: `VectorStoreService._get_client()`가 PersistentClient 생성 직전에 HNSW 세그먼트 디렉토리를 스캔. `data_level0.bin / header.bin / length.bin / link_lists.bin` 중 0바이트나 누락 파일 발견 시 (강제 종료 후 흔한 패턴) → `CHROMA_AUTO_QUARANTINE=1`(기본)이면 persist_dir 전체를 `vectordb.quarantine_<ts>`로 이동하고 빈 디렉토리 재생성. `=0`이면 `ChromaIntegrityError` raise. 격리 후 BM25 인덱스와 SQLite 케이스 상태도 stale이므로 케이스 재생성 또는 status 리셋 필요.
 
 ### BM25 (`data/bm25_index/`)
 - pickle 직렬화로 키워드 인덱스 저장
@@ -79,6 +80,16 @@ PST 파일 / 내부 문서
 - `vector_store._save_failed_chunks()`가 binary subdivide 후에도 실패한 청크를 append
 - BM25 corpus에는 성공한 청크만 들어가 벡터 DB와 키워드 인덱스 간 일관성 유지
 - 운영 시 별도 스크립트로 재처리하여 데이터 손실 방지 (현재 재처리 스크립트는 미구현)
+
+### Error logs (`error_logs/`)
+- `src/utils/logger.py`가 component별 RotatingFileHandler를 자동 부착
+- WARNING 이상(INFO 초과)만 기록 — 일상 로그는 콘솔에만 남고 파일은 분석용 시그널만 유지
+- component는 모듈 경로의 두 번째 세그먼트:
+  - `embeddings.log` — Ollama 임베딩 timeout/실패
+  - `llm.log` — LLM 응답 생성/스트리밍 실패
+  - `vectorstore.log` — ChromaDB 저장/실패 청크 JSONL 저장 실패
+  - `indexing.log` — 파이프라인 실패, 파일 처리 실패, 배치 저장 실패
+- RotatingFileHandler 100MB × 5 회전 — 사후 분석용으로만 사용하고 인덱싱 중에는 콘솔로 모니터링
 
 ## 프론트엔드 구조
 
@@ -160,6 +171,11 @@ ast-poc/
     ├── bm25_index/             # BM25 케이스별 pickle
     ├── failed_embeddings/      # 임베딩 영구 실패 청크 (case_id별 JSONL, 재처리용)
     └── vectordb/               # ChromaDB 영구 저장
+└── error_logs/                 # WARNING+ 로그 (component별 .log, gitignore됨)
+    ├── embeddings.log
+    ├── llm.log
+    ├── vectorstore.log
+    └── indexing.log
 ```
 
 ### 주요 의존성

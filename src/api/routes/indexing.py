@@ -43,7 +43,11 @@ class IndexingRequest(BaseModel):
 
 
 class IndexingProgress(BaseModel):
-    """인덱싱 진행률 응답"""
+    """인덱싱 진행률 응답
+
+    기존 필드는 그대로 유지. 3-stage 파이프라인 도입으로 단계별 진행도 +
+    벤치마크 메트릭을 추가 노출 (모두 default 있음 → 후방 호환).
+    """
 
     case_id: str
     status: str
@@ -54,6 +58,23 @@ class IndexingProgress(BaseModel):
     progress_percent: float
     elapsed: str = ""
     errors: list[str] = []
+    # === 추가: 단계별 청크 카운트 (3-stage 파이프라인 가시성) ===
+    parsed_chunks: int = 0
+    embedded_chunks: int = 0
+    stored_chunks: int = 0
+    chunks_parsed: int = 0  # parsed_chunks alias
+    chunks_embedded: int = 0  # embedded_chunks alias
+    chunks_stored: int = 0  # stored_chunks alias
+    # === 추가: 벤치마크 메트릭 ===
+    elapsed_seconds: float = 0.0
+    eta: str = ""
+    estimated_remaining_seconds: float | None = None
+    files_per_second: float = 0.0
+    chunks_per_second: float = 0.0
+    throughput_per_min: float = 0.0
+    peak_throughput_per_min: float = 0.0
+    phase_times: dict[str, float] = {}
+    stage_wall_seconds: dict[str, float] = {}
 
 
 class IncrementalRequest(BaseModel):

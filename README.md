@@ -70,6 +70,11 @@ ast-poc/
     ├── bm25_index/             # BM25 케이스별 pickle
     ├── failed_embeddings/      # 임베딩 영구 실패 청크 (case_id별 JSONL, 재처리용)
     └── vectordb/               # ChromaDB 영구 저장
+└── error_logs/                 # WARNING+ 사후 분석용 로그 (gitignore)
+    ├── embeddings.log          # 임베딩 timeout/실패
+    ├── llm.log                 # LLM 응답/스트리밍 실패
+    ├── vectorstore.log         # 벡터 저장 실패
+    └── indexing.log            # 파이프라인/파일 처리 실패
 ```
 
 ## 빠른 시작
