@@ -106,6 +106,11 @@ export interface ChatSource {
   attachments?: string[];
   message_id?: string;
   in_reply_to?: string;
+  // Office/PDF 작성자·수정자 추적
+  author?: string;
+  last_modified_by?: string;
+  created_date?: string;
+  last_modified?: string;
 }
 
 export interface ChatResponse {

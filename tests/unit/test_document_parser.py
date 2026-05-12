@@ -180,6 +180,30 @@ class TestPdfParser:
         assert result.metadata["author"] == "Test Author"
         assert result.metadata["title"] == "Test Title"
 
+    def test_parse_pdf_creator_producer(self, parser: DocumentParser):
+        """PDF creator/producer/modDate 메타데이터 추출 (작성자 추적용)"""
+        try:
+            import fitz
+        except ImportError:
+            pytest.skip("PyMuPDF가 설치되지 않았습니다")
+
+        path = TEST_DIR / "test_creator.pdf"
+        doc = fitz.open()
+        doc.set_metadata({
+            "author": "Original Author",
+            "creator": "Microsoft Word",
+            "producer": "Adobe PDF Library 21.0",
+        })
+        page = doc.new_page()
+        page.insert_text((72, 72), "Content", fontsize=12)
+        doc.save(str(path))
+        doc.close()
+
+        result = parser.parse(path)
+        assert result.metadata["author"] == "Original Author"
+        assert result.metadata["creator"] == "Microsoft Word"
+        assert result.metadata["producer"] == "Adobe PDF Library 21.0"
+
     def test_parse_pdf_bytes(self, parser: DocumentParser):
         """PDF 바이트 파싱 테스트"""
         try:
@@ -476,6 +500,25 @@ class TestPptxParser:
         assert sections[1]["title"] == "예산 현황"
         assert sections[1]["slide_num"] == 2
 
+    def test_parse_pptx_author_modifier(self, parser: DocumentParser):
+        """PPTX author + last_modified_by 메타데이터 추출 (작성자 추적용)"""
+        try:
+            from pptx import Presentation
+        except ImportError:
+            pytest.skip("python-pptx가 설치되지 않았습니다")
+
+        path = TEST_DIR / "test_author_pptx.pptx"
+        prs = Presentation()
+        prs.core_properties.author = "원작성자"
+        prs.core_properties.last_modified_by = "수정자"
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = "프레젠테이션"
+        prs.save(str(path))
+
+        result = parser.parse(path)
+        assert result.metadata["author"] == "원작성자"
+        assert result.metadata["last_modified_by"] == "수정자"
+
 
 # === XLSX 파서 테스트 ===
 
@@ -542,6 +585,36 @@ class TestXlsxParser:
         assert "sheet_names" in doc.metadata
         assert "file_hash" in doc.metadata
         assert "file_size" in doc.metadata
+
+    def test_parse_xlsx_author_modifier(self, parser: DocumentParser):
+        """XLSX author + last_modified_by 메타데이터 추출 (작성자 추적용)
+
+        모든 시트가 동일한 워크북 author/last_modified_by를 공유해야 함.
+        """
+        try:
+            from openpyxl import Workbook
+        except ImportError:
+            pytest.skip("openpyxl이 설치되지 않았습니다")
+
+        path = TEST_DIR / "test_xlsx_author.xlsx"
+        wb = Workbook()
+        wb.properties.creator = "견적서작성자"
+        wb.properties.lastModifiedBy = "수정한사람"
+        wb.properties.title = "견적서 v3"
+        ws = wb.active
+        ws.title = "견적"
+        ws.append(["품목", "금액"])
+        ws.append(["서버", 1000])
+        wb.create_sheet("부록").append(["부록 내용"])
+        wb.save(str(path))
+        wb.close()
+
+        result = parser.parse(path)
+        assert isinstance(result, list)
+        for doc in result:
+            assert doc.metadata["author"] == "견적서작성자"
+            assert doc.metadata["last_modified_by"] == "수정한사람"
+            assert doc.metadata["title"] == "견적서 v3"
 
     def test_parse_xlsx_bytes(self, parser: DocumentParser):
         """XLSX 바이트 파싱 테스트"""

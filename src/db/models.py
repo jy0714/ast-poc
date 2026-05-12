@@ -110,6 +110,11 @@ class ChatSourceModel(Base):
     attachments: Mapped[str] = mapped_column(Text, default="[]")  # JSON 직렬화
     message_id: Mapped[str] = mapped_column(String(500), default="")
     in_reply_to: Mapped[str] = mapped_column(String(500), default="")
+    # Office/PDF 작성자·수정자 추적
+    author: Mapped[str] = mapped_column(String(500), default="")
+    last_modified_by: Mapped[str] = mapped_column(String(500), default="")
+    created_date: Mapped[str] = mapped_column(String(50), default="")
+    last_modified: Mapped[str] = mapped_column(String(50), default="")
 
     # Relationship
     chat: Mapped[ChatHistoryModel] = relationship(back_populates="sources")

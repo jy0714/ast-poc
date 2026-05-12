@@ -10,10 +10,12 @@
 
 메타데이터:
 - 공통: filename, file_path, file_size, file_type, file_hash, language, char_count
-- PDF: author, created_date, page_count, title, is_ocr
-- DOCX: author, created_date, last_modified, last_modified_by
-- PPTX: author, slide_count, title
-- XLSX: sheet_names, sheet_name, sheet_count, row_count
+- PDF: author, title, page_count, is_ocr, is_encrypted, created_date, modified_date,
+       creator, producer
+- DOCX: author, last_modified_by, created_date, last_modified
+- PPTX: author, title, slide_count, last_modified_by, created_date, last_modified
+- XLSX: sheet_names, sheet_name, sheet_count, row_count, author, last_modified_by,
+        created_date, last_modified
 - EML: subject, sender, recipients, cc, participants, date, message_id, in_reply_to,
        references, reply_to, has_attachments, attachment_filenames
 - MSG: subject, sender, recipients, cc, participants, date, message_id, in_reply_to,
@@ -281,6 +283,9 @@ class DocumentParser:
             "page_count": len(doc),
             "is_ocr": ocr_used,
             "is_encrypted": False,
+            # 작성자/수정자 추적용 추가 필드
+            "creator": pdf_meta.get("creator", "") or "",
+            "producer": pdf_meta.get("producer", "") or "",
         }
         if page_failures:
             metadata["page_failures"] = page_failures
@@ -291,6 +296,10 @@ class DocumentParser:
         created_date = pdf_meta.get("creationDate", "")
         if created_date:
             metadata["created_date"] = self._parse_pdf_date(created_date)
+
+        modified_date = pdf_meta.get("modDate", "")
+        if modified_date:
+            metadata["modified_date"] = self._parse_pdf_date(modified_date)
 
         return ParsedDocument(
             filename=filename,
@@ -551,7 +560,12 @@ class DocumentParser:
             "author": props.author or "",
             "title": props.title or "",
             "slide_count": len(prs.slides),
+            "last_modified_by": props.last_modified_by or "",
         }
+        if props.created:
+            metadata["created_date"] = props.created.isoformat()
+        if props.modified:
+            metadata["last_modified"] = props.modified.isoformat()
 
         if sections:
             metadata["sections"] = sections
@@ -591,8 +605,25 @@ class DocumentParser:
 
         각 시트가 독립적인 ParsedDocument로 생성됨.
         data_only=True로 수식 결과값만 추출.
+        모든 시트는 동일한 워크북 작성자/수정자 메타데이터를 공유.
         """
         sheet_names = wb.sheetnames
+
+        # 워크북 단위 작성자/수정자 정보 (시트마다 같음)
+        workbook_meta: dict[str, Any] = {}
+        try:
+            props = wb.properties  # openpyxl DocumentProperties
+            workbook_meta["author"] = props.creator or ""
+            workbook_meta["last_modified_by"] = props.lastModifiedBy or ""
+            if props.created:
+                workbook_meta["created_date"] = props.created.isoformat()
+            if props.modified:
+                workbook_meta["last_modified"] = props.modified.isoformat()
+            if props.title:
+                workbook_meta["title"] = props.title
+        except Exception as e:
+            logger.debug(f"XLSX 워크북 프로퍼티 읽기 실패: {filename} ({e})")
+
         documents: list[ParsedDocument] = []
 
         for sheet_name in sheet_names:
@@ -614,6 +645,7 @@ class DocumentParser:
                 "sheet_names": sheet_names,
                 "sheet_count": len(sheet_names),
                 "row_count": row_count,
+                **workbook_meta,
             }
 
             documents.append(

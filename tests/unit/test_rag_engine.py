@@ -172,6 +172,39 @@ class TestFormatContext:
         assert "문서" in text
         assert "report.pdf" in text
 
+    def test_format_document_with_author(self):
+        """문서 출처 — author/last_modified_by/created_date/last_modified 표시"""
+        source = SourceReference(
+            content="견적서 내용",
+            source_type="document",
+            filename="quote.xlsx",
+            author="alice",
+            last_modified_by="bob",
+            created_date="2026-03-01T10:00:00",
+            last_modified="2026-04-15T16:30:00",
+        )
+        text = RAGEngine._format_source_context(source)
+        assert "작성자: alice" in text
+        assert "마지막 수정: bob" in text
+        assert "생성일: 2026-03-01T10:00:00" in text
+        assert "수정일: 2026-04-15T16:30:00" in text
+
+    def test_format_document_same_author_modifier(self):
+        """문서 출처 — author == last_modified_by이면 수정자 라인 생략"""
+        source = SourceReference(
+            content="x",
+            source_type="document",
+            filename="own.docx",
+            author="alice",
+            last_modified_by="alice",
+            created_date="2026-03-01",
+            last_modified="2026-03-01",
+        )
+        text = RAGEngine._format_source_context(source)
+        assert "작성자: alice" in text
+        assert "마지막 수정" not in text  # 동일하므로 생략
+        assert "수정일" not in text  # created_date == last_modified이면 생략
+
     def test_format_empty_source(self):
         """빈 출처 정보"""
         source = SourceReference(content="내용만", source_type="")

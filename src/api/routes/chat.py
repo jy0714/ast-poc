@@ -59,6 +59,11 @@ class SourceReference(BaseModel):
     attachments: list[str] = []
     message_id: str = ""
     in_reply_to: str = ""
+    # Office/PDF 작성자·수정자 추적
+    author: str = ""
+    last_modified_by: str = ""
+    created_date: str = ""
+    last_modified: str = ""
 
 
 class ChatResponse(BaseModel):
@@ -136,6 +141,10 @@ def _save_chat_history(
                     attachments=json.dumps(src.attachments[:10], ensure_ascii=False),
                     message_id=src.message_id,
                     in_reply_to=src.in_reply_to,
+                    author=src.author,
+                    last_modified_by=src.last_modified_by,
+                    created_date=src.created_date,
+                    last_modified=src.last_modified,
                 )
                 session.add(source_record)
 
@@ -201,6 +210,10 @@ async def chat(request: ChatRequest):
             attachments=s.attachments[:10],
             message_id=s.message_id,
             in_reply_to=s.in_reply_to,
+            author=s.author,
+            last_modified_by=s.last_modified_by,
+            created_date=s.created_date,
+            last_modified=s.last_modified,
         )
         for s in result.sources
     ]
@@ -281,6 +294,10 @@ async def chat_stream(request: ChatRequest):
                     attachments=s.attachments[:10],
                     message_id=s.message_id,
                     in_reply_to=s.in_reply_to,
+                    author=s.author,
+                    last_modified_by=s.last_modified_by,
+                    created_date=s.created_date,
+                    last_modified=s.last_modified,
                 )
                 collected_sources.append(src_ref)
                 sources_data.append(src_ref.model_dump())

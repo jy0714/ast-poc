@@ -120,6 +120,10 @@ def _apply_lightweight_migrations(engine: Engine) -> None:
         ("chat_sources", "attachments", "TEXT DEFAULT '[]'"),
         ("chat_sources", "message_id", "VARCHAR(500) DEFAULT ''"),
         ("chat_sources", "in_reply_to", "VARCHAR(500) DEFAULT ''"),
+        ("chat_sources", "author", "VARCHAR(500) DEFAULT ''"),
+        ("chat_sources", "last_modified_by", "VARCHAR(500) DEFAULT ''"),
+        ("chat_sources", "created_date", "VARCHAR(50) DEFAULT ''"),
+        ("chat_sources", "last_modified", "VARCHAR(50) DEFAULT ''"),
     ]
 
     inspector = inspect(engine)

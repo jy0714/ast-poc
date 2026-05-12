@@ -267,12 +267,22 @@ function SourceCard({ source }: { source: ChatSource }) {
               )}
             </div>
           ) : (
-            <>
-              {source.date && <div className="mt-1 text-gray-400">날짜: {source.date}</div>}
+            <div className="mt-2 space-y-0.5 text-gray-500">
+              {source.author && <div>작성자: {source.author}</div>}
+              {source.last_modified_by && source.last_modified_by !== source.author && (
+                <div>마지막 수정: {source.last_modified_by}</div>
+              )}
+              {source.created_date && <div>생성일: {source.created_date}</div>}
+              {source.last_modified && source.last_modified !== source.created_date && (
+                <div>수정일: {source.last_modified}</div>
+              )}
+              {source.date && !source.created_date && (
+                <div className="text-gray-400">날짜: {source.date}</div>
+              )}
               {source.participants.length > 0 && (
                 <div className="text-gray-400">참여자: {source.participants.join(', ')}</div>
               )}
-            </>
+            </div>
           )}
         </div>
       )}

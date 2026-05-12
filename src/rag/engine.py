@@ -42,6 +42,11 @@ class SourceReference:
     attachments: list[str] = field(default_factory=list)
     message_id: str = ""
     in_reply_to: str = ""
+    # Office/PDF 작성자·수정자 추적용
+    author: str = ""
+    last_modified_by: str = ""
+    created_date: str = ""
+    last_modified: str = ""
 
 
 @dataclass
@@ -155,6 +160,10 @@ class RAGEngine:
                     attachments=meta.get("attachment_filenames", []),
                     message_id=meta.get("message_id", ""),
                     in_reply_to=meta.get("in_reply_to", ""),
+                    author=meta.get("author", ""),
+                    last_modified_by=meta.get("last_modified_by", ""),
+                    created_date=meta.get("created_date", ""),
+                    last_modified=meta.get("last_modified", ""),
                 )
             )
 
@@ -326,8 +335,18 @@ class RAGEngine:
                 header_parts.append(f"Cc: {', '.join(source.cc[:5])}")
             if source.attachments:
                 header_parts.append(f"첨부: {', '.join(source.attachments[:5])}")
-        elif source.participants:
-            header_parts.append(f"참여자: {', '.join(source.participants[:5])}")
+        else:
+            # 문서/첨부: 작성자/수정자 추적 정보
+            if source.author:
+                header_parts.append(f"작성자: {source.author}")
+            if source.last_modified_by and source.last_modified_by != source.author:
+                header_parts.append(f"마지막 수정: {source.last_modified_by}")
+            if source.created_date:
+                header_parts.append(f"생성일: {source.created_date}")
+            if source.last_modified and source.last_modified != source.created_date:
+                header_parts.append(f"수정일: {source.last_modified}")
+            if source.participants:
+                header_parts.append(f"참여자: {', '.join(source.participants[:5])}")
 
         header = " | ".join(header_parts) if header_parts else "출처 불명"
         return f"[{header}]\n{source.content}"
