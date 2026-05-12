@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -98,10 +98,43 @@ def init_db(db_url: str | None = None) -> Engine:
 
     engine = get_engine(db_url)
     Base.metadata.create_all(bind=engine)
+    _apply_lightweight_migrations(engine)
     _SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
     logger.info(f"DB 초기화 완료: {engine.url}")
     return engine
+
+
+def _apply_lightweight_migrations(engine: Engine) -> None:
+    """기존 SQLite DB에 누락된 컬럼을 ALTER TABLE로 추가
+
+    Alembic 도입 전 PoC용. SQLAlchemy create_all은 새 테이블만 생성하고 기존
+    테이블의 컬럼 추가는 처리하지 않으므로, 모델에 새 컬럼이 추가됐을 때
+    기존 운영 DB가 깨지지 않도록 SQLite ADD COLUMN을 호출.
+    """
+    # (테이블, 컬럼명, SQL 정의) 튜플 — 모델 변경 시 이 리스트만 갱신
+    expected_columns: list[tuple[str, str, str]] = [
+        ("chat_sources", "sender", "VARCHAR(500) DEFAULT ''"),
+        ("chat_sources", "recipients", "TEXT DEFAULT '[]'"),
+        ("chat_sources", "cc", "TEXT DEFAULT '[]'"),
+        ("chat_sources", "attachments", "TEXT DEFAULT '[]'"),
+        ("chat_sources", "message_id", "VARCHAR(500) DEFAULT ''"),
+        ("chat_sources", "in_reply_to", "VARCHAR(500) DEFAULT ''"),
+    ]
+
+    inspector = inspect(engine)
+    with engine.begin() as conn:
+        for table, column, ddl in expected_columns:
+            if table not in inspector.get_table_names():
+                continue
+            existing = {c["name"] for c in inspector.get_columns(table)}
+            if column in existing:
+                continue
+            try:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+                logger.info(f"DB 마이그레이션: {table}.{column} 추가")
+            except Exception as e:
+                logger.warning(f"컬럼 추가 실패 (skip) — {table}.{column}: {e}")
 
 
 def reset_globals() -> None:

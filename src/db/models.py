@@ -102,6 +102,14 @@ class ChatSourceModel(Base):
     subject: Mapped[str] = mapped_column(String(500), default="")
     relevance_score: Mapped[float] = mapped_column(Float, default=0.0)
     search_method: Mapped[str] = mapped_column(String(20), default="")
+    # 이메일 전용 (다른 source_type에서는 빈 값/리스트). 기존 DB는 init_db의
+    # 자동 마이그레이션이 ALTER TABLE로 추가.
+    sender: Mapped[str] = mapped_column(String(500), default="")
+    recipients: Mapped[str] = mapped_column(Text, default="[]")  # JSON 직렬화
+    cc: Mapped[str] = mapped_column(Text, default="[]")  # JSON 직렬화
+    attachments: Mapped[str] = mapped_column(Text, default="[]")  # JSON 직렬화
+    message_id: Mapped[str] = mapped_column(String(500), default="")
+    in_reply_to: Mapped[str] = mapped_column(String(500), default="")
 
     # Relationship
     chat: Mapped[ChatHistoryModel] = relationship(back_populates="sources")

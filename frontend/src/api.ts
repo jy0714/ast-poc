@@ -99,6 +99,13 @@ export interface ChatSource {
   subject: string;
   relevance_score: number;
   search_method: string;
+  // 이메일 전용 — 비-이메일에서는 빈 값
+  sender?: string;
+  recipients?: string[];
+  cc?: string[];
+  attachments?: string[];
+  message_id?: string;
+  in_reply_to?: string;
 }
 
 export interface ChatResponse {

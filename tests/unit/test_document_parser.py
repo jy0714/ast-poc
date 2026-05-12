@@ -197,6 +197,64 @@ class TestPdfParser:
         assert "Byte content test" in result.content
         assert result.metadata["file_size"] == len(pdf_bytes)
 
+    def test_encrypted_pdf_returns_empty_with_flag(self, parser: DocumentParser):
+        """암호화된 PDF → 빈 본문 + is_encrypted=True"""
+        try:
+            import fitz
+        except ImportError:
+            pytest.skip("PyMuPDF가 설치되지 않았습니다")
+
+        # 암호 설정한 PDF 생성
+        path = TEST_DIR / "encrypted.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Secret content", fontsize=12)
+        doc.save(
+            str(path),
+            encryption=fitz.PDF_ENCRYPT_AES_256,
+            owner_pw="ownerpw",
+            user_pw="userpw",
+        )
+        doc.close()
+
+        result = parser.parse(path)
+        assert result.content == ""
+        assert result.metadata.get("is_encrypted") is True
+
+    def test_pdf_page_failure_isolated(self, parser: DocumentParser, monkeypatch):
+        """한 페이지의 텍스트 추출이 실패해도 나머지 페이지는 추출"""
+        try:
+            import fitz
+        except ImportError:
+            pytest.skip("PyMuPDF가 설치되지 않았습니다")
+
+        path = TEST_DIR / "multi_page.pdf"
+        doc = fitz.open()
+        for i in range(3):
+            p = doc.new_page()
+            p.insert_text((72, 72), f"Page {i} content text body.", fontsize=12)
+        doc.save(str(path))
+        doc.close()
+
+        # 페이지 1번에서 get_text 호출 시 강제 예외
+        original_get_text = fitz.Page.get_text
+        call_count = {"n": 0}
+
+        def faulty_get_text(self, *args, **kwargs):
+            call_count["n"] += 1
+            # 페이지 인덱스 1을 처음 호출할 때만 예외 (page.number == 1)
+            if self.number == 1 and call_count["n"] <= 4:
+                raise RuntimeError("simulated page corruption")
+            return original_get_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(fitz.Page, "get_text", faulty_get_text)
+
+        result = parser.parse(path)
+        assert "Page 0" in result.content
+        assert "Page 2" in result.content
+        # 페이지 실패가 메타데이터에 기록됨
+        assert result.metadata.get("page_failures", 0) >= 1
+
     def test_ocr_fallback_graceful(self, parser: DocumentParser):
         """OCR 라이브러리 없을 때 graceful 폴백"""
         try:
@@ -580,10 +638,12 @@ def _make_eml(
     subject: str = "테스트 메일",
     sender: str = "sender@example.com",
     to: str = "recipient@example.com",
+    recipient: str | None = None,  # to 별칭
     cc: str = "",
     body: str = "이것은 테스트 이메일 본문입니다.",
     html_body: str = "",
     attachments: list[tuple[str, bytes]] | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> bytes:
     """테스트용 EML 바이트 생성"""
     from email.mime.multipart import MIMEMultipart
@@ -609,11 +669,15 @@ def _make_eml(
 
     msg["Subject"] = subject
     msg["From"] = sender
-    msg["To"] = to
+    msg["To"] = recipient if recipient is not None else to
     if cc:
         msg["Cc"] = cc
     msg["Date"] = "Mon, 23 Mar 2026 10:30:00 +0900"
     msg["Message-ID"] = "<test-123@example.com>"
+
+    if extra_headers:
+        for k, v in extra_headers.items():
+            msg[k] = v
 
     return msg.as_bytes()
 
@@ -700,6 +764,63 @@ class TestEmlParser:
         assert result.metadata["char_count"] > 0
         assert result.metadata["file_hash"]
         assert result.metadata["filename"].endswith(".eml")
+
+    def test_parse_eml_participants_merged(self, parser: DocumentParser):
+        """EML participants는 sender+recipients+cc 통합 (중복 제거)"""
+        eml_bytes = _make_eml(
+            sender="alice@example.com",
+            recipient="bob@example.com",
+            cc="carol@example.com, alice@example.com",  # alice 중복
+        )
+        result = parser.parse_bytes(eml_bytes, "merge.eml")
+
+        participants = result.metadata["participants"]
+        # 중복 제거된 상태로 3명
+        emails = {p.lower() for p in participants}
+        assert "alice@example.com" in emails
+        assert "bob@example.com" in emails
+        assert "carol@example.com" in emails
+        assert len(participants) == 3
+
+    def test_parse_eml_threading_headers(self, parser: DocumentParser):
+        """EML In-Reply-To / References / Reply-To 헤더 추출"""
+        eml_bytes = _make_eml(
+            extra_headers={
+                "In-Reply-To": "<parent-msg-1@example.com>",
+                "References": "<root-msg@example.com> <parent-msg-1@example.com>",
+                "Reply-To": "noreply@example.com",
+            },
+        )
+        result = parser.parse_bytes(eml_bytes, "threading.eml")
+
+        assert result.metadata["in_reply_to"] == "<parent-msg-1@example.com>"
+        assert result.metadata["reply_to"] == "noreply@example.com"
+        assert "<root-msg@example.com>" in result.metadata["references"]
+        assert "<parent-msg-1@example.com>" in result.metadata["references"]
+
+    def test_parse_eml_attachments_in_header_block(self, parser: DocumentParser):
+        """EML 본문 헤더 블록에 첨부파일 목록도 포함"""
+        eml_bytes = _make_eml(
+            attachments=[("report.pdf", b"x"), ("budget.xlsx", b"y")],
+        )
+        result = parser.parse_bytes(eml_bytes, "att_header.eml")
+
+        assert "Attachments: report.pdf, budget.xlsx" in result.content
+
+    def test_parse_eml_corrupt_mime_returns_empty_doc(self, parser: DocumentParser):
+        """손상된 MIME → 빈 본문 + parse_error 메타로 반환 (raise 하지 않음)"""
+        # MIME 헤더가 깨진 바이트 — 실제로는 message_from_bytes가 관대해서
+        # 거의 모든 경우 파싱하므로, 강제로 None을 반환하도록 monkey patch
+        from unittest.mock import patch
+
+        with patch("email.message_from_bytes", side_effect=Exception("boom")):
+            result = parser.parse_bytes(b"garbage", "broken.eml")
+
+        assert result.content == ""
+        assert result.metadata.get("parse_error")
+        # source 메타 부착(부재) 없이도 안전하게 반환
+        assert result.metadata["subject"] == ""
+        assert result.metadata["recipients"] == []
 
 
 # === MSG 파서 테스트 ===

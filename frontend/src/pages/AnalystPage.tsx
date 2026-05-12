@@ -246,9 +246,33 @@ function SourceCard({ source }: { source: ChatSource }) {
       {expanded && (
         <div className="mt-2 text-gray-600 whitespace-pre-wrap leading-relaxed">
           {source.content}
-          {source.date && <div className="mt-1 text-gray-400">날짜: {source.date}</div>}
-          {source.participants.length > 0 && (
-            <div className="text-gray-400">참여자: {source.participants.join(', ')}</div>
+          {source.source_type === 'email' ? (
+            <div className="mt-2 space-y-0.5 text-gray-500">
+              {source.sender && <div>보낸 사람: {source.sender}</div>}
+              {source.recipients && source.recipients.length > 0 && (
+                <div>받는 사람: {source.recipients.join(', ')}</div>
+              )}
+              {source.cc && source.cc.length > 0 && (
+                <div>참조: {source.cc.join(', ')}</div>
+              )}
+              {source.date && <div>날짜: {source.date}</div>}
+              {source.attachments && source.attachments.length > 0 && (
+                <div>첨부파일: {source.attachments.join(', ')}</div>
+              )}
+              {source.message_id && (
+                <div className="text-gray-400 truncate">Message-ID: {source.message_id}</div>
+              )}
+              {source.in_reply_to && (
+                <div className="text-gray-400 truncate">In-Reply-To: {source.in_reply_to}</div>
+              )}
+            </div>
+          ) : (
+            <>
+              {source.date && <div className="mt-1 text-gray-400">날짜: {source.date}</div>}
+              {source.participants.length > 0 && (
+                <div className="text-gray-400">참여자: {source.participants.join(', ')}</div>
+              )}
+            </>
           )}
         </div>
       )}

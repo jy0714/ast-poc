@@ -218,6 +218,8 @@ class DocumentChunker:
         """ParsedDocument 객체를 직접 청킹
 
         ParsedDocument의 메타데이터(sections 포함)를 각 청크에 전파.
+        EML/MSG는 청크별로 헤더 라인을 prepend + source_type을 "email"로 설정하여
+        분할된 본문 청크에서도 LLM이 발신/수신/제목/날짜를 볼 수 있도록 함.
 
         Args:
             parsed_doc: DocumentParser가 반환한 ParsedDocument
@@ -227,7 +229,66 @@ class DocumentChunker:
         if extra_metadata:
             meta.update(extra_metadata)
 
+        file_type = (parsed_doc.file_type or "").lower()
+        is_email = file_type in ("eml", "msg")
+
+        if is_email:
+            # 본문에서 파서가 prepend한 헤더 블록을 제거 후 본문만 분할
+            body_text = self._strip_email_header_block(parsed_doc.content)
+            chunks = self.chunk(body_text, metadata=meta)
+            header_line = self._build_email_header_line(meta)
+            for c in chunks:
+                c.source_type = "email"
+                if header_line:
+                    c.content = f"{header_line}\n\n{c.content}"
+            return chunks
+
         return self.chunk(parsed_doc.content, metadata=meta)
+
+    @staticmethod
+    def _strip_email_header_block(content: str) -> str:
+        """파서가 본문 앞에 붙인 헤더 블록 (\n\n으로 구분된 첫 블록) 제거
+
+        헤더 라인은 청크에서 다시 prepend되므로, 분할 전에 한 번 떼어내어
+        중복 노출을 방지. From: 으로 시작하지 않으면 원본 그대로 반환.
+        """
+        if not content:
+            return content
+        first_line = content.lstrip().split("\n", 1)[0]
+        if not first_line.lower().startswith("from:"):
+            return content
+        parts = content.split("\n\n", 1)
+        return parts[1] if len(parts) == 2 else ""
+
+    @staticmethod
+    def _build_email_header_line(meta: dict[str, Any]) -> str:
+        """이메일 메타데이터 → 모든 청크에 prepend할 단일 헤더 블록
+
+        포맷:
+            From: ... | To: a, b | Cc: c | Subject: ... | Date: ... | Attachments: ...
+        """
+        parts: list[str] = []
+        sender = meta.get("sender") or ""
+        recipients = meta.get("recipients") or []
+        cc = meta.get("cc") or []
+        subject = meta.get("subject") or ""
+        date = meta.get("date") or ""
+        attachments = meta.get("attachment_filenames") or []
+
+        if sender:
+            parts.append(f"From: {sender}")
+        if recipients:
+            parts.append(f"To: {', '.join(recipients)}")
+        if cc:
+            parts.append(f"Cc: {', '.join(cc)}")
+        if subject:
+            parts.append(f"Subject: {subject}")
+        if date:
+            parts.append(f"Date: {date}")
+        if attachments:
+            parts.append(f"Attachments: {', '.join(attachments)}")
+
+        return " | ".join(parts)
 
 
 # === ChatChunker ===

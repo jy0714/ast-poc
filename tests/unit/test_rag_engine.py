@@ -138,20 +138,28 @@ class TestQuery:
 
 class TestFormatContext:
     def test_format_email_source(self):
-        """이메일 출처 포맷"""
+        """이메일 출처 포맷 — sender/recipients/cc/첨부 분리 표시"""
         source = SourceReference(
             content="이메일 내용",
             source_type="email",
             filename="mail.eml",
             subject="회의록",
             date="2025-03-15",
-            participants=["홍길동", "김철수"],
+            participants=["홍길동", "김철수"],  # legacy fallback (이메일에선 미사용)
+            sender="홍길동 <hong@example.com>",
+            recipients=["김철수 <kim@example.com>"],
+            cc=["박영희 <park@example.com>"],
+            attachments=["보고서.pdf"],
         )
         text = RAGEngine._format_source_context(source)
         assert "이메일" in text
         assert "회의록" in text
-        assert "홍길동" in text
         assert "이메일 내용" in text
+        # 이메일 분리 표시
+        assert "From:" in text and "홍길동" in text
+        assert "To:" in text and "김철수" in text
+        assert "Cc:" in text and "박영희" in text
+        assert "첨부:" in text and "보고서.pdf" in text
 
     def test_format_document_source(self):
         """문서 출처 포맷"""

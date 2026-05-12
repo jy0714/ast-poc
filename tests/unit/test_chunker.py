@@ -110,6 +110,60 @@ class TestDocumentChunker:
             assert c.metadata["case_id"] == "C001"
 
 
+class TestDocumentChunkerEmail:
+    """EML/MSG 처리 시 source_type=email + 모든 청크에 헤더 prepend"""
+
+    def _eml_doc(self, body_chars: int):
+        from src.parsers.document_parser import ParsedDocument
+
+        body = "본문 내용. " * body_chars
+        # 파서가 만들어주는 형식 그대로 (헤더 + \n\n + 본문)
+        header = (
+            "From: alice@example.com\nTo: bob@example.com\nSubject: 회의록\n"
+            "Date: 2026-04-01T09:00:00"
+        )
+        return ParsedDocument(
+            filename="m.eml",
+            content=f"{header}\n\n{body}",
+            file_type="eml",
+            metadata={
+                "subject": "회의록",
+                "sender": "alice@example.com",
+                "recipients": ["bob@example.com"],
+                "cc": ["carol@example.com"],
+                "date": "2026-04-01T09:00:00",
+                "attachment_filenames": ["agenda.pdf"],
+            },
+        )
+
+    def test_eml_source_type_is_email(self):
+        chunker = DocumentChunker(chunk_size=200, chunk_overlap=20)
+        chunks = chunker.chunk_parsed_document(self._eml_doc(100))
+        assert chunks
+        for c in chunks:
+            assert c.source_type == "email"
+
+    def test_eml_header_prepended_to_every_chunk(self):
+        chunker = DocumentChunker(chunk_size=200, chunk_overlap=20)
+        chunks = chunker.chunk_parsed_document(self._eml_doc(200))
+        assert len(chunks) > 1, "본문이 충분히 길어 여러 청크여야 함"
+        for c in chunks:
+            assert "From: alice@example.com" in c.content
+            assert "To: bob@example.com" in c.content
+            assert "Cc: carol@example.com" in c.content
+            assert "Subject: 회의록" in c.content
+            assert "Attachments: agenda.pdf" in c.content
+
+    def test_eml_body_not_duplicated(self):
+        """파서가 prepend한 헤더 블록은 분할 전에 한 번만 떼어내고, 본문 자체는
+        중복되지 않아야 한다"""
+        chunker = DocumentChunker(chunk_size=200, chunk_overlap=20)
+        doc = self._eml_doc(100)
+        chunks = chunker.chunk_parsed_document(doc)
+        # 첫 청크에 "From:" 라인은 정확히 1번만 등장
+        assert chunks[0].content.count("From: alice@example.com") == 1
+
+
 # === DocumentChunker 섹션 기반 청킹 테스트 ===
 
 

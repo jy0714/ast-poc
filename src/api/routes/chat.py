@@ -52,6 +52,13 @@ class SourceReference(BaseModel):
     subject: str = ""
     relevance_score: float = 0.0
     search_method: str = ""
+    # 이메일 전용 필드 (다른 source_type은 빈 값)
+    sender: str = ""
+    recipients: list[str] = []
+    cc: list[str] = []
+    attachments: list[str] = []
+    message_id: str = ""
+    in_reply_to: str = ""
 
 
 class ChatResponse(BaseModel):
@@ -123,6 +130,12 @@ def _save_chat_history(
                     subject=src.subject,
                     relevance_score=src.relevance_score,
                     search_method=src.search_method,
+                    sender=src.sender,
+                    recipients=json.dumps(src.recipients[:10], ensure_ascii=False),
+                    cc=json.dumps(src.cc[:10], ensure_ascii=False),
+                    attachments=json.dumps(src.attachments[:10], ensure_ascii=False),
+                    message_id=src.message_id,
+                    in_reply_to=src.in_reply_to,
                 )
                 session.add(source_record)
 
@@ -182,6 +195,12 @@ async def chat(request: ChatRequest):
             subject=s.subject,
             relevance_score=round(s.score, 4),
             search_method=s.search_method,
+            sender=s.sender,
+            recipients=s.recipients[:10],
+            cc=s.cc[:10],
+            attachments=s.attachments[:10],
+            message_id=s.message_id,
+            in_reply_to=s.in_reply_to,
         )
         for s in result.sources
     ]
@@ -256,6 +275,12 @@ async def chat_stream(request: ChatRequest):
                     subject=s.subject,
                     relevance_score=round(s.score, 4),
                     search_method=s.search_method,
+                    sender=s.sender,
+                    recipients=s.recipients[:10],
+                    cc=s.cc[:10],
+                    attachments=s.attachments[:10],
+                    message_id=s.message_id,
+                    in_reply_to=s.in_reply_to,
                 )
                 collected_sources.append(src_ref)
                 sources_data.append(src_ref.model_dump())

@@ -35,6 +35,13 @@ class SourceReference:
     subject: str = ""
     score: float = 0.0
     search_method: str = ""  # "vector" | "bm25" | "hybrid"
+    # 이메일 전용 — 비-이메일 출처에서는 빈 값
+    sender: str = ""
+    recipients: list[str] = field(default_factory=list)
+    cc: list[str] = field(default_factory=list)
+    attachments: list[str] = field(default_factory=list)
+    message_id: str = ""
+    in_reply_to: str = ""
 
 
 @dataclass
@@ -142,6 +149,12 @@ class RAGEngine:
                     subject=meta.get("subject", meta.get("thread_subject", "")),
                     score=r.get("rerank_score", r.get("score", 0.0)),
                     search_method=r.get("search_method", ""),
+                    sender=meta.get("sender", ""),
+                    recipients=meta.get("recipients", []),
+                    cc=meta.get("cc", []),
+                    attachments=meta.get("attachment_filenames", []),
+                    message_id=meta.get("message_id", ""),
+                    in_reply_to=meta.get("in_reply_to", ""),
                 )
             )
 
@@ -280,16 +293,20 @@ class RAGEngine:
 
     @staticmethod
     def _format_source_context(source: SourceReference) -> str:
-        """출처 정보를 LLM 컨텍스트 텍스트로 포맷"""
+        """출처 정보를 LLM 컨텍스트 텍스트로 포맷
+
+        이메일은 From/To/Cc/첨부를 별도 노출 (LLM이 발신자/수신자 관계를
+        정확히 식별할 수 있도록). 그 외 소스는 기존 방식 유지.
+        """
         header_parts: list[str] = []
 
+        type_labels = {
+            "email": "이메일",
+            "teams_chat": "Teams 채팅",
+            "document": "문서",
+            "attachment": "첨부파일",
+        }
         if source.source_type:
-            type_labels = {
-                "email": "이메일",
-                "teams_chat": "Teams 채팅",
-                "document": "문서",
-                "attachment": "첨부파일",
-            }
             header_parts.append(
                 f"유형: {type_labels.get(source.source_type, source.source_type)}"
             )
@@ -299,7 +316,17 @@ class RAGEngine:
             header_parts.append(f"제목: {source.subject}")
         if source.date:
             header_parts.append(f"날짜: {source.date}")
-        if source.participants:
+
+        if source.source_type == "email":
+            if source.sender:
+                header_parts.append(f"From: {source.sender}")
+            if source.recipients:
+                header_parts.append(f"To: {', '.join(source.recipients[:5])}")
+            if source.cc:
+                header_parts.append(f"Cc: {', '.join(source.cc[:5])}")
+            if source.attachments:
+                header_parts.append(f"첨부: {', '.join(source.attachments[:5])}")
+        elif source.participants:
             header_parts.append(f"참여자: {', '.join(source.participants[:5])}")
 
         header = " | ".join(header_parts) if header_parts else "출처 불명"

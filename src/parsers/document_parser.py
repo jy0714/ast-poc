@@ -14,8 +14,10 @@
 - DOCX: author, created_date, last_modified, last_modified_by
 - PPTX: author, slide_count, title
 - XLSX: sheet_names, sheet_name, sheet_count, row_count
-- EML: subject, sender, recipients, cc, date, message_id, has_attachments, attachment_filenames
-- MSG: subject, sender, recipients, cc, date, message_id, has_attachments, attachment_filenames
+- EML: subject, sender, recipients, cc, participants, date, message_id, in_reply_to,
+       references, reply_to, has_attachments, attachment_filenames
+- MSG: subject, sender, recipients, cc, participants, date, message_id, in_reply_to,
+       reply_to, has_attachments, attachment_filenames
 """
 
 from __future__ import annotations
@@ -195,19 +197,50 @@ class DocumentParser:
 
         텍스트 레이어가 없거나 빈약한 페이지는 Tesseract OCR로 폴백.
         폰트 크기 분석으로 헤딩(섹션 경계)을 감지하여 sections 메타데이터에 포함.
+        암호화된 PDF는 빈 본문으로 처리하고 메타데이터에 표시. 한 페이지의 텍스트
+        추출이 실패해도 나머지 페이지는 계속 추출.
         """
-        import fitz
+        # 암호화 PDF 감지 — get_text가 빈 결과를 줘서 무성 실패하는 것을 방지
+        is_encrypted = bool(getattr(doc, "needs_pass", False) or getattr(doc, "is_encrypted", False))
+        if is_encrypted:
+            logger.warning(f"PDF가 암호화되어 텍스트를 추출할 수 없음: {filename}")
+            metadata: dict[str, Any] = {
+                "author": "",
+                "title": "",
+                "page_count": len(doc),
+                "is_ocr": False,
+                "is_encrypted": True,
+            }
+            return ParsedDocument(
+                filename=filename,
+                content="",
+                file_type="pdf",
+                page_count=len(doc),
+                metadata=metadata,
+            )
 
         pages_text: list[str] = []
         ocr_used = False
+        page_failures = 0
         ocr_threshold = 50  # 페이지당 최소 문자 수 — 이하이면 OCR 시도
 
         # 섹션 감지를 위한 블록 수집
         all_blocks: list[dict[str, Any]] = []
 
         for page_num in range(len(doc)):
-            page = doc[page_num]
-            text = page.get_text("text").strip()
+            try:
+                page = doc[page_num]
+            except Exception as e:
+                page_failures += 1
+                logger.debug(f"PDF 페이지 로드 실패 ({filename} p{page_num}): {e}")
+                continue
+
+            try:
+                text = page.get_text("text").strip()
+            except Exception as e:
+                page_failures += 1
+                logger.debug(f"PDF 페이지 텍스트 추출 실패 ({filename} p{page_num}): {e}")
+                continue
 
             # 텍스트가 빈약하면 OCR 폴백
             if len(text) < ocr_threshold:
@@ -220,23 +253,37 @@ class DocumentParser:
                 pages_text.append(text)
 
             # 폰트 크기 기반 섹션 감지 (OCR 페이지 제외)
-            if len(page.get_text("text").strip()) >= ocr_threshold:
-                blocks = self._extract_text_blocks_with_font(page, page_num)
-                all_blocks.extend(blocks)
+            if len(text) >= ocr_threshold and not ocr_used:
+                try:
+                    blocks = self._extract_text_blocks_with_font(page, page_num)
+                    all_blocks.extend(blocks)
+                except Exception as e:
+                    logger.debug(f"PDF 섹션 감지 실패 ({filename} p{page_num}): {e}")
+
+        if page_failures:
+            logger.warning(
+                f"PDF 부분 추출: {filename} — {page_failures}/{len(doc)} 페이지 추출 실패"
+            )
 
         full_text = "\n\n".join(pages_text)
 
         # 섹션 경계 감지
         sections = self._detect_sections(all_blocks)
 
-        # PDF 메타데이터 추출
-        pdf_meta = doc.metadata or {}
+        # PDF 메타데이터 추출 (doc.metadata 자체가 None일 수도 있어서 방어)
+        try:
+            pdf_meta = doc.metadata or {}
+        except Exception:
+            pdf_meta = {}
         metadata: dict[str, Any] = {
-            "author": pdf_meta.get("author", ""),
-            "title": pdf_meta.get("title", ""),
+            "author": pdf_meta.get("author", "") or "",
+            "title": pdf_meta.get("title", "") or "",
             "page_count": len(doc),
             "is_ocr": ocr_used,
+            "is_encrypted": False,
         }
+        if page_failures:
+            metadata["page_failures"] = page_failures
 
         if sections:
             metadata["sections"] = sections
@@ -353,24 +400,27 @@ class DocumentParser:
 
     @staticmethod
     def _parse_pdf_date(date_str: str) -> str:
-        """PDF 날짜 문자열 파싱 (D:20240115120000+09'00' 형식)"""
+        """PDF 날짜 문자열 파싱 (D:20240115120000+09'00' 형식)
+
+        타임존 정보(+09'00' 등)는 제거하고 앞 14자리(yyyyMMddHHmmss)만 파싱.
+        14자리 미만이면 0으로 패딩, 파싱 실패 시 원본 문자열 반환.
+        """
         if not date_str:
             return ""
 
-        # 'D:' 접두사 제거
+        # 'D:' 접두사 제거 + 숫자만 남김 (타임존 기호 제거)
         cleaned = date_str.replace("D:", "").strip()
+        digits = re.sub(r"[^0-9]", "", cleaned)
 
-        # 타임존 정보 제거 후 기본 파싱
-        for fmt in ("%Y%m%d%H%M%S", "%Y%m%d%H%M", "%Y%m%d"):
-            try:
-                # 타임존 부분(+09'00' 등) 제거
-                date_part = cleaned[:len(fmt.replace("%", "").replace("Y", "YYYY").replace("m", "MM").replace("d", "DD").replace("H", "HH").replace("M", "MM").replace("S", "SS"))]
-                dt = datetime.strptime(cleaned[:14].ljust(14, "0"), "%Y%m%d%H%M%S")
-                return dt.isoformat()
-            except (ValueError, IndexError):
-                continue
+        if not digits:
+            return date_str
 
-        return date_str  # 파싱 실패 시 원본 반환
+        try:
+            padded = digits[:14].ljust(14, "0")
+            dt = datetime.strptime(padded, "%Y%m%d%H%M%S")
+            return dt.isoformat()
+        except (ValueError, IndexError):
+            return date_str
 
     # ==================== DOCX ====================
 
@@ -628,47 +678,100 @@ class DocumentParser:
         """EML 바이트에서 본문 텍스트 및 메타데이터 추출
 
         text/plain 파트를 우선 사용하고, 없으면 text/html에서
-        태그를 제거하여 텍스트를 추출.
+        태그를 제거하여 텍스트를 추출. 손상된 MIME 구조여도 헤더만이라도
+        남기도록 단계별로 방어.
         """
-        msg = email.message_from_bytes(raw, policy=email.policy.default)
+        # 손상된 MIME에도 가능한 정보 추출하기 위해 message_from_bytes 자체를 보호
+        try:
+            msg = email.message_from_bytes(raw, policy=email.policy.default)
+        except Exception as e:
+            logger.warning(f"EML MIME 파싱 실패 — 본문/헤더 빈 문서 반환: {filename} ({e})")
+            return ParsedDocument(
+                filename=filename,
+                content="",
+                file_type="eml",
+                page_count=0,
+                metadata={
+                    "subject": "",
+                    "sender": "",
+                    "recipients": [],
+                    "cc": [],
+                    "participants": [],
+                    "date": "",
+                    "message_id": "",
+                    "in_reply_to": "",
+                    "references": [],
+                    "reply_to": "",
+                    "has_attachments": False,
+                    "attachment_filenames": [],
+                    "parse_error": str(e),
+                },
+            )
 
-        # 본문 추출
+        # 본문 추출 (part-level 격리됨)
         body = self._extract_eml_body(msg)
 
-        # 헤더 메타데이터
-        subject = str(msg.get("Subject", ""))
-        sender = str(msg.get("From", ""))
-        date_str = msg.get("Date", "")
-        message_id = str(msg.get("Message-ID", ""))
+        # 헤더 메타데이터 (안전 디코딩)
+        subject = self._safe_header(msg, "Subject")
+        sender = self._safe_header(msg, "From")
+        date_str = self._safe_header(msg, "Date")
+        message_id = self._safe_header(msg, "Message-ID")
+        in_reply_to = self._safe_header(msg, "In-Reply-To")
+        reply_to = self._safe_header(msg, "Reply-To")
 
-        # 수신자 파싱
-        recipients = self._parse_eml_addresses(msg.get_all("To"))
-        cc = self._parse_eml_addresses(msg.get_all("Cc"))
+        # References 헤더는 공백 구분된 message-id 리스트
+        references_raw = self._safe_header(msg, "References")
+        references = [r.strip() for r in re.split(r"\s+", references_raw) if r.strip()]
+
+        # 수신자 파싱 (헤더 자체가 없거나 깨졌어도 빈 리스트 반환)
+        try:
+            recipients = self._parse_eml_addresses(msg.get_all("To"))
+        except Exception as e:
+            logger.warning(f"EML To 헤더 파싱 실패: {filename} ({e})")
+            recipients = []
+        try:
+            cc = self._parse_eml_addresses(msg.get_all("Cc"))
+        except Exception as e:
+            logger.warning(f"EML Cc 헤더 파싱 실패: {filename} ({e})")
+            cc = []
 
         # 날짜 파싱
         parsed_date = ""
         if date_str:
             try:
-                dt = parsedate_to_datetime(str(date_str))
-                parsed_date = dt.isoformat()
+                dt = parsedate_to_datetime(date_str)
+                parsed_date = dt.isoformat() if dt else ""
             except (ValueError, TypeError):
-                parsed_date = str(date_str)
+                parsed_date = date_str  # 원본 보존
 
-        # 첨부파일 목록 수집
+        # 첨부파일 목록 수집 (walk 자체가 corrupted part에서 예외 가능)
         attachment_filenames: list[str] = []
-        for part in msg.walk():
-            disposition = part.get_content_disposition()
-            if disposition == "attachment":
-                att_name = part.get_filename() or "unnamed"
-                attachment_filenames.append(att_name)
+        try:
+            for part in msg.walk():
+                try:
+                    if part.get_content_disposition() == "attachment":
+                        att_name = part.get_filename() or "unnamed"
+                        attachment_filenames.append(att_name)
+                except Exception as e:
+                    logger.debug(f"EML part 메타 읽기 실패 (계속): {filename} ({e})")
+                    continue
+        except Exception as e:
+            logger.warning(f"EML 첨부파일 walk 실패: {filename} ({e})")
 
-        # 본문에 헤더 정보 포함하여 검색 가능하게 구성
-        header_text = f"From: {sender}\nTo: {', '.join(recipients)}"
+        # 통합 참여자 (검색/UI에서 단일 리스트로 사용)
+        participants = self._merge_participants(sender, recipients, cc)
+
+        # 본문에 헤더 정보 포함 — 청크 분할 후 첫 청크는 자동으로 헤더를 포함
+        # (모든 청크에 헤더를 prepend하는 작업은 chunker 단에서 수행)
+        header_lines = [f"From: {sender}", f"To: {', '.join(recipients)}"]
         if cc:
-            header_text += f"\nCc: {', '.join(cc)}"
-        header_text += f"\nSubject: {subject}"
+            header_lines.append(f"Cc: {', '.join(cc)}")
+        header_lines.append(f"Subject: {subject}")
         if parsed_date:
-            header_text += f"\nDate: {parsed_date}"
+            header_lines.append(f"Date: {parsed_date}")
+        if attachment_filenames:
+            header_lines.append(f"Attachments: {', '.join(attachment_filenames)}")
+        header_text = "\n".join(header_lines)
 
         full_text = f"{header_text}\n\n{body}"
 
@@ -677,8 +780,12 @@ class DocumentParser:
             "sender": sender,
             "recipients": recipients,
             "cc": cc,
+            "participants": participants,
             "date": parsed_date,
             "message_id": message_id,
+            "in_reply_to": in_reply_to,
+            "references": references,
+            "reply_to": reply_to,
             "has_attachments": len(attachment_filenames) > 0,
             "attachment_filenames": attachment_filenames,
         }
@@ -695,37 +802,110 @@ class DocumentParser:
     def _extract_eml_body(msg: Any) -> str:
         """이메일 메시지에서 본문 텍스트 추출
 
-        text/plain 우선, 없으면 text/html에서 태그 제거.
+        text/plain 우선, 없으면 text/html에서 태그 제거. 잘못된 charset
+        이나 손상된 part가 있어도 가능한 만큼 추출 (part-level 격리).
         """
         plain_parts: list[str] = []
         html_parts: list[str] = []
 
-        for part in msg.walk():
-            content_type = part.get_content_type()
-            disposition = part.get_content_disposition()
+        try:
+            walker = msg.walk()
+        except Exception:
+            return ""
 
-            # 첨부파일 파트는 건너뛰기
-            if disposition == "attachment":
+        for part in walker:
+            try:
+                content_type = part.get_content_type()
+                if part.get_content_disposition() == "attachment":
+                    continue
+
+                if content_type not in ("text/plain", "text/html"):
+                    continue
+
+                # 1차: policy.default 기반 디코딩
+                try:
+                    payload = part.get_content()
+                except (LookupError, UnicodeDecodeError, AssertionError) as decode_err:
+                    # 2차: raw payload + 다중 인코딩 시도
+                    raw_payload = part.get_payload(decode=True)
+                    if not isinstance(raw_payload, bytes):
+                        logger.debug(f"EML part 디코드 실패 (skip): {decode_err}")
+                        continue
+                    payload = None
+                    declared = (part.get_content_charset() or "").lower()
+                    candidates = [declared] if declared else []
+                    candidates.extend(["utf-8", "cp949", "euc-kr", "latin-1"])
+                    for enc in candidates:
+                        if not enc:
+                            continue
+                        try:
+                            payload = raw_payload.decode(enc, errors="strict")
+                            break
+                        except (UnicodeDecodeError, LookupError):
+                            continue
+                    if payload is None:
+                        # 마지막 fallback: 손실 허용 디코드
+                        payload = raw_payload.decode("utf-8", errors="replace")
+
+                if isinstance(payload, str):
+                    if content_type == "text/plain":
+                        plain_parts.append(payload)
+                    else:
+                        html_parts.append(payload)
+            except Exception as e:
+                # 한 part가 깨져도 다른 part 추출 계속
+                logger.debug(f"EML part 처리 실패 (skip): {e}")
                 continue
-
-            if content_type == "text/plain":
-                payload = part.get_content()
-                if isinstance(payload, str):
-                    plain_parts.append(payload)
-            elif content_type == "text/html":
-                payload = part.get_content()
-                if isinstance(payload, str):
-                    html_parts.append(payload)
 
         if plain_parts:
             return "\n".join(plain_parts).strip()
 
         if html_parts:
-            # HTML 태그 제거
             html_text = "\n".join(html_parts)
             return DocumentParser._strip_html(html_text).strip()
 
         return ""
+
+    @staticmethod
+    def _safe_header(msg: Any, name: str) -> str:
+        """헤더를 안전하게 문자열로 디코딩 (잘못된 인코딩 방어)"""
+        try:
+            value = msg.get(name)
+        except Exception:
+            return ""
+        if value is None:
+            return ""
+        try:
+            return str(value).strip()
+        except Exception:
+            try:
+                return repr(value)
+            except Exception:
+                return ""
+
+    @staticmethod
+    def _merge_participants(
+        sender: str, recipients: list[str], cc: list[str]
+    ) -> list[str]:
+        """sender + recipients + cc를 중복 제거하여 통합 참여자 리스트 생성
+
+        검색/UI에서 단일 필드로 노출하기 위함. 이메일 주소만 추출 (이름 부분 제외).
+        """
+        all_addrs: list[str] = []
+        if sender:
+            _, addr = parseaddr(sender)
+            all_addrs.append(addr or sender)
+        all_addrs.extend(recipients)
+        all_addrs.extend(cc)
+
+        seen: set[str] = set()
+        unique: list[str] = []
+        for a in all_addrs:
+            key = a.lower().strip()
+            if key and key not in seen:
+                seen.add(key)
+                unique.append(a)
+        return unique
 
     @staticmethod
     def _strip_html(html: str) -> str:
@@ -784,45 +964,86 @@ class DocumentParser:
     def _extract_msg(self, msg: Any, filename: str) -> ParsedDocument:
         """MSG 메시지 객체에서 본문 텍스트 및 메타데이터 추출"""
         # 본문 추출 (plain text 우선, HTML 폴백)
-        body = msg.body or ""
-        if not body.strip() and msg.htmlBody:
-            html_content = msg.htmlBody
-            if isinstance(html_content, bytes):
-                html_content = html_content.decode("utf-8", errors="replace")
-            body = self._strip_html(html_content)
+        body = ""
+        try:
+            body = msg.body or ""
+        except Exception as e:
+            logger.warning(f"MSG body 읽기 실패: {filename} ({e})")
 
-        subject = msg.subject or ""
-        sender = msg.sender or ""
-        date_str = ""
-        if msg.date:
+        if not body or not body.strip():
             try:
-                date_str = msg.date.isoformat() if hasattr(msg.date, "isoformat") else str(msg.date)
-            except (ValueError, AttributeError):
-                date_str = str(msg.date)
+                html_content = msg.htmlBody
+                if html_content:
+                    if isinstance(html_content, bytes):
+                        html_content = html_content.decode("utf-8", errors="replace")
+                    body = self._strip_html(html_content)
+            except Exception as e:
+                logger.debug(f"MSG htmlBody 폴백 실패: {filename} ({e})")
 
-        message_id = msg.messageId or ""
+        subject = self._safe_attr(msg, "subject")
+        sender = self._safe_attr(msg, "sender")
 
-        # 수신자 파싱
+        date_str = ""
+        try:
+            raw_date = msg.date
+            if raw_date:
+                date_str = (
+                    raw_date.isoformat() if hasattr(raw_date, "isoformat") else str(raw_date)
+                )
+        except (ValueError, AttributeError, Exception) as e:
+            logger.debug(f"MSG date 읽기 실패: {filename} ({e})")
+
+        message_id = self._safe_attr(msg, "messageId")
+        in_reply_to = self._safe_attr(msg, "inReplyTo")
+        reply_to = self._safe_attr(msg, "replyTo")
+
+        # 수신자 파싱 (";" 또는 "," 구분 모두 허용)
+        def _split_addrs(raw: str) -> list[str]:
+            parts = re.split(r"[;,]", raw)
+            return [p.strip() for p in parts if p.strip()]
+
         recipients: list[str] = []
         cc: list[str] = []
-        if msg.to:
-            recipients = [addr.strip() for addr in str(msg.to).split(";") if addr.strip()]
-        if msg.cc:
-            cc = [addr.strip() for addr in str(msg.cc).split(";") if addr.strip()]
+        try:
+            if msg.to:
+                recipients = _split_addrs(str(msg.to))
+        except Exception as e:
+            logger.debug(f"MSG to 헤더 파싱 실패: {filename} ({e})")
+        try:
+            if msg.cc:
+                cc = _split_addrs(str(msg.cc))
+        except Exception as e:
+            logger.debug(f"MSG cc 헤더 파싱 실패: {filename} ({e})")
 
-        # 첨부파일 목록
+        # 첨부파일 목록 (각 첨부 처리 격리)
         attachment_filenames: list[str] = []
-        for att in msg.attachments:
-            att_name = getattr(att, "longFilename", None) or getattr(att, "shortFilename", None) or "unnamed"
-            attachment_filenames.append(att_name)
+        try:
+            for att in msg.attachments:
+                try:
+                    att_name = (
+                        getattr(att, "longFilename", None)
+                        or getattr(att, "shortFilename", None)
+                        or "unnamed"
+                    )
+                    attachment_filenames.append(str(att_name))
+                except Exception as e:
+                    logger.debug(f"MSG 첨부파일 읽기 실패 (skip): {filename} ({e})")
+                    continue
+        except Exception as e:
+            logger.warning(f"MSG attachments 순회 실패: {filename} ({e})")
+
+        participants = self._merge_participants(sender, recipients, cc)
 
         # 본문에 헤더 정보 포함
-        header_text = f"From: {sender}\nTo: {', '.join(recipients)}"
+        header_lines = [f"From: {sender}", f"To: {', '.join(recipients)}"]
         if cc:
-            header_text += f"\nCc: {', '.join(cc)}"
-        header_text += f"\nSubject: {subject}"
+            header_lines.append(f"Cc: {', '.join(cc)}")
+        header_lines.append(f"Subject: {subject}")
         if date_str:
-            header_text += f"\nDate: {date_str}"
+            header_lines.append(f"Date: {date_str}")
+        if attachment_filenames:
+            header_lines.append(f"Attachments: {', '.join(attachment_filenames)}")
+        header_text = "\n".join(header_lines)
 
         full_text = f"{header_text}\n\n{body}"
 
@@ -831,8 +1052,11 @@ class DocumentParser:
             "sender": sender,
             "recipients": recipients,
             "cc": cc,
+            "participants": participants,
             "date": date_str,
             "message_id": message_id,
+            "in_reply_to": in_reply_to,
+            "reply_to": reply_to,
             "has_attachments": len(attachment_filenames) > 0,
             "attachment_filenames": attachment_filenames,
         }
@@ -844,6 +1068,20 @@ class DocumentParser:
             page_count=0,
             metadata=metadata,
         )
+
+    @staticmethod
+    def _safe_attr(obj: Any, name: str) -> str:
+        """객체 속성을 안전하게 문자열로 가져오기 (예외 시 빈 문자열)"""
+        try:
+            value = getattr(obj, name, None)
+        except Exception:
+            return ""
+        if value is None:
+            return ""
+        try:
+            return str(value).strip()
+        except Exception:
+            return ""
 
     # ==================== 공통 메타데이터 ====================
 
