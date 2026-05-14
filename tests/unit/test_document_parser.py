@@ -245,6 +245,60 @@ class TestPdfParser:
         assert result.content == ""
         assert result.metadata.get("is_encrypted") is True
 
+    def test_ocr_check_cached_one_warning(self, monkeypatch, caplog):
+        """OCR 가용성 체크는 1회만 — 매 페이지마다 WARNING이 누적되지 않음"""
+        import logging
+
+        from src.parsers.document_parser import DocumentParser
+
+        # 캐시 리셋
+        DocumentParser._ocr_available = None
+        DocumentParser._ocr_unavailable_reason = ""
+
+        # pytesseract import 실패하도록 sys.modules에 None 주입
+        import sys
+
+        monkeypatch.setitem(sys.modules, "pytesseract", None)
+
+        with caplog.at_level(logging.WARNING):
+            r1 = DocumentParser._check_ocr_available()
+            r2 = DocumentParser._check_ocr_available()
+            r3 = DocumentParser._check_ocr_available()
+
+        assert r1 is False and r2 is False and r3 is False
+        # WARNING은 첫 호출 1번만
+        ocr_warnings = [
+            r for r in caplog.records
+            if r.levelname == "WARNING" and "OCR" in r.message
+        ]
+        assert len(ocr_warnings) == 1
+
+    def test_scan_pdf_metadata_set(self, parser: DocumentParser, monkeypatch):
+        """텍스트 거의 없고 OCR 미가용 → scan_pdf=true 메타"""
+        try:
+            import fitz
+        except ImportError:
+            pytest.skip("PyMuPDF가 설치되지 않았습니다")
+
+        # OCR 미가용으로 캐시
+        from src.parsers.document_parser import DocumentParser
+
+        monkeypatch.setattr(DocumentParser, "_ocr_available", False)
+        monkeypatch.setattr(DocumentParser, "_ocr_unavailable_reason", "test")
+
+        # 빈 페이지 PDF 생성 (텍스트 없음 → 모든 페이지 sparse)
+        path = TEST_DIR / "scan_like.pdf"
+        doc = fitz.open()
+        for _ in range(3):
+            doc.new_page()  # 빈 페이지
+        doc.save(str(path))
+        doc.close()
+
+        result = parser.parse(path)
+        assert result.metadata["scan_pdf"] is True
+        assert result.metadata["sparse_pages"] == 3
+        assert result.metadata["is_ocr"] is False
+
     def test_pdf_page_failure_isolated(self, parser: DocumentParser, monkeypatch):
         """한 페이지의 텍스트 추출이 실패해도 나머지 페이지는 추출"""
         try:

@@ -263,6 +263,9 @@ class IndexingProgress:
     store_wall_seconds: float = 0.0
     peak_embed_chunks_per_min: float = 0.0  # 10초 슬라이딩 윈도우 기준 피크 throughput
     last_success_at: float | None = None  # 마지막 임베딩 성공 시각 (epoch). stalled 판단용.
+    # 운영 가시성 — 본문 추출 불가능했던 PDF 목록 (파일명, dedup)
+    encrypted_pdfs: list[str] = field(default_factory=list)
+    scan_pdfs_no_ocr: list[str] = field(default_factory=list)
     _phase_start: float = field(default=0.0, repr=False)
 
     @property
@@ -422,6 +425,8 @@ class IndexingProgress:
                 if self.last_success_at else None
             ),
             "stalled": self.stalled,
+            "encrypted_pdfs": list(self.encrypted_pdfs),
+            "scan_pdfs_no_ocr": list(self.scan_pdfs_no_ocr),
             "errors": self.errors,
         }
 
@@ -663,11 +668,24 @@ class IndexingPipeline:
             )
             self.case_store.update_status(case_id, CaseStatus.READY)
 
-            logger.info(
+            summary = (
                 f"인덱싱 완료: {case_id} — "
                 f"파일 {progress.processed_files}개, 청크 {stored_count}개, "
                 f"에러 {len(progress.errors)}개"
             )
+            if progress.encrypted_pdfs:
+                summary += (
+                    f", 암호화 PDF {len(progress.encrypted_pdfs)}개 "
+                    f"({', '.join(progress.encrypted_pdfs[:3])}"
+                    f"{'...' if len(progress.encrypted_pdfs) > 3 else ''})"
+                )
+            if progress.scan_pdfs_no_ocr:
+                summary += (
+                    f", 스캔 PDF(OCR 미적용) {len(progress.scan_pdfs_no_ocr)}개 "
+                    f"({', '.join(progress.scan_pdfs_no_ocr[:3])}"
+                    f"{'...' if len(progress.scan_pdfs_no_ocr) > 3 else ''})"
+                )
+            logger.info(summary)
 
             # 인덱싱 이력 저장
             _save_indexing_log(progress, "completed")
@@ -1097,6 +1115,16 @@ class IndexingPipeline:
                                     chunk_queue.put(chunks)
                                     with counter_lock:
                                         progress.parsed_chunks += len(chunks)
+                                        # 본문 추출 불가 PDF 추적 (multi-process 경로)
+                                        meta0 = chunks[0].metadata
+                                        if meta0.get("file_type") == "pdf":
+                                            fname = meta0.get("filename", file_path.name)
+                                            if (meta0.get("is_encrypted")
+                                                and fname not in progress.encrypted_pdfs):
+                                                progress.encrypted_pdfs.append(fname)
+                                            if (meta0.get("scan_pdf")
+                                                and fname not in progress.scan_pdfs_no_ocr):
+                                                progress.scan_pdfs_no_ocr.append(fname)
                                 parse_summary[f"{mode}_success"] += 1
                         except Exception as e:
                             error_msg = (
@@ -1508,6 +1536,14 @@ class IndexingPipeline:
         # XLSX는 list[ParsedDocument] 반환
         docs = parsed if isinstance(parsed, list) else [parsed]
 
+        # 본문 추출 불가 PDF 추적 (운영 가시성)
+        if docs and docs[0].file_type == "pdf":
+            meta0 = docs[0].metadata
+            if meta0.get("is_encrypted") and doc_path.name not in progress.encrypted_pdfs:
+                progress.encrypted_pdfs.append(doc_path.name)
+            if meta0.get("scan_pdf") and doc_path.name not in progress.scan_pdfs_no_ocr:
+                progress.scan_pdfs_no_ocr.append(doc_path.name)
+
         all_chunks: list[Chunk] = []
         for doc in docs:
             chunks = self._doc_chunker.chunk_parsed_document(doc)
@@ -1561,33 +1597,75 @@ def _check_failure_rate(
 
 
 def _save_indexing_log(progress: IndexingProgress, status: str) -> None:
-    """인덱싱 이력을 DB에 저장"""
+    """인덱싱 이력을 DB에 저장 — 케이스 부재/DB 미초기화에 대해 명확히 분류
+
+    실패 시나리오와 대응:
+    - 케이스가 이미 삭제됨 (FK violation 또는 사전 SELECT NULL): INFO + skip.
+      운영 중 흔한 race이고 데이터 손실 아님.
+    - indexing_logs 테이블 부재 (no such table): ERROR + skip.
+      init_db()가 호출되지 않은 상태이므로 인프라 문제. 다음 호출도 동일 실패 예상.
+    - DB 파일 접근 불가 (unable to open database file): ERROR + skip.
+      tmpdir cleanup 후 백그라운드 워커가 DB 호출 시 흔히 발생.
+    - 그 외: WARNING.
+    """
     try:
         import json
 
+        from sqlalchemy.exc import IntegrityError, OperationalError
+
         from src.db.database import get_session
-        from src.db.models import IndexingLogModel
+        from src.db.models import CaseModel, IndexingLogModel
 
         elapsed = 0
         if progress.started_at:
             end = progress.completed_at or datetime.now()
             elapsed = int((end - progress.started_at).total_seconds())
 
-        log = IndexingLogModel(
-            case_id=progress.case_id,
-            started_at=progress.started_at or datetime.now(),
-            completed_at=progress.completed_at,
-            status=status,
-            total_files=progress.total_files,
-            processed_files=progress.processed_files,
-            total_chunks=progress.total_chunks,
-            errors=json.dumps(progress.errors, ensure_ascii=False),
-            elapsed_seconds=elapsed,
-        )
-
+        # 케이스 존재 사전 확인 — FK violation을 ERROR 로그 없이 INFO로 처리.
+        # 인덱싱 도중 사용자가 케이스를 삭제하면 워커가 완료 시 호출되어 흔히 발생.
         with get_session() as session:
-            session.add(log)
-            session.commit()
+            case_exists = session.get(CaseModel, progress.case_id) is not None
+            if not case_exists:
+                logger.info(
+                    f"인덱싱 이력 저장 skip: 케이스 {progress.case_id}가 이미 삭제됨"
+                )
+                return
+
+            log = IndexingLogModel(
+                case_id=progress.case_id,
+                started_at=progress.started_at or datetime.now(),
+                completed_at=progress.completed_at,
+                status=status,
+                total_files=progress.total_files,
+                processed_files=progress.processed_files,
+                total_chunks=progress.total_chunks,
+                errors=json.dumps(progress.errors, ensure_ascii=False),
+                elapsed_seconds=elapsed,
+            )
+            try:
+                session.add(log)
+                session.commit()
+            except IntegrityError as ie:
+                # 사전 확인과 commit 사이에 케이스가 삭제되는 race
+                logger.info(
+                    f"인덱싱 이력 저장 skip (FK race): 케이스 {progress.case_id} — {ie}"
+                )
+                session.rollback()
+                return
+            except OperationalError as oe:
+                # 테이블 부재 / DB 파일 접근 불가 — 인프라 문제
+                msg = str(oe).lower()
+                if "no such table" in msg or "unable to open database file" in msg:
+                    logger.error(
+                        f"인덱싱 이력 저장 실패 (인프라 문제, DB init 확인 필요): "
+                        f"{progress.case_id} — {oe}"
+                    )
+                else:
+                    logger.warning(
+                        f"인덱싱 이력 저장 실패: {progress.case_id} — {oe}"
+                    )
+                session.rollback()
+                return
 
     except Exception as e:
         logger.warning(f"인덱싱 이력 저장 실패 (무시): {e}")

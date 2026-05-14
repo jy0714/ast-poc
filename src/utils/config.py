@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     indexing_shutdown_timeout: int = 30
     # 마지막 성공 임베딩 후 N초 경과하면 stalled 플래그 ON (progress API에 노출).
     indexing_stall_threshold_sec: int = 300
+    # 케이스가 INDEXING 상태에서 N분 이상 updated_at 갱신 없이 멈춰있으면 비정상 종료로
+    # 판정. start_indexing API가 자동으로 ERROR로 복구한 뒤 새 인덱싱 진행 허용.
+    # 프로세스 kill / OOM / 정전 등으로 INDEXING 상태가 영구 고착되는 것 방지.
+    indexing_stuck_timeout_min: int = 30
 
     # === Search ===
     search_top_k: int = 20  # 하이브리드 검색 초기 후보 수

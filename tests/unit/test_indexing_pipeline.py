@@ -395,3 +395,50 @@ class TestGetProgress:
         p = pipeline.get_progress("unknown")
         assert p.phase == IndexingPhase.IDLE
         assert p.case_id == "unknown"
+
+
+# === _save_indexing_log 안전망 (P1-B) ===
+
+
+class TestSaveIndexingLog:
+    """_save_indexing_log가 케이스 부재/DB 문제에서 graceful degrade"""
+
+    def test_skip_when_case_missing(self, case_store, caplog):
+        """케이스가 cases 테이블에 없으면 INSERT skip + INFO 로그"""
+        import logging
+
+        from src.indexing.pipeline import IndexingProgress, _save_indexing_log
+
+        progress = IndexingProgress(case_id="never_existed_xyz")
+        progress.total_files = 5
+        progress.processed_files = 5
+
+        with caplog.at_level(logging.INFO):
+            # 예외 없이 통과해야 함
+            _save_indexing_log(progress, "completed")
+
+        # FK violation ERROR가 아니라 INFO로 처리됨
+        msgs = [r.message for r in caplog.records]
+        assert any("이미 삭제됨" in m for m in msgs)
+        assert not any("FOREIGN KEY constraint" in m for m in msgs)
+
+
+# === stalled / 운영 가시성 필드 (P3-E) ===
+
+
+class TestProgressStalledField:
+    """to_dict()가 last_success_at, stalled, encrypted_pdfs, scan_pdfs_no_ocr 노출"""
+
+    def test_to_dict_has_new_fields(self):
+        from src.indexing.pipeline import IndexingProgress
+
+        p = IndexingProgress(case_id="x")
+        d = p.to_dict()
+        assert "last_success_at" in d
+        assert "stalled" in d
+        assert "encrypted_pdfs" in d
+        assert "scan_pdfs_no_ocr" in d
+        assert d["last_success_at"] is None
+        assert d["stalled"] is False
+        assert d["encrypted_pdfs"] == []
+        assert d["scan_pdfs_no_ocr"] == []

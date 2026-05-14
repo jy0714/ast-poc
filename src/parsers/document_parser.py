@@ -72,6 +72,11 @@ class DocumentParser:
 
     SUPPORTED_TYPES = {".pdf", ".docx", ".pptx", ".xlsx", ".txt", ".eml", ".msg"}
 
+    # OCR 가용성을 프로세스 단위 1회만 체크 (반복 ImportError WARNING 방지).
+    # None=미체크, True=설치됨, False=미설치.
+    _ocr_available: bool | None = None
+    _ocr_unavailable_reason: str = ""
+
     def __init__(self, ocr_languages: str = "eng+kor+chi_sim") -> None:
         """DocumentParser 초기화
 
@@ -79,6 +84,40 @@ class DocumentParser:
             ocr_languages: Tesseract OCR 언어 설정 ('+' 구분자)
         """
         self.ocr_languages = ocr_languages
+
+    @classmethod
+    def _check_ocr_available(cls) -> bool:
+        """OCR 의존성(pytesseract + Pillow + tesseract 바이너리) 1회 체크 후 캐시
+
+        첫 호출 시 미설치이면 WARNING 1회 로그. 이후 호출은 캐시 반환 (조용함).
+        """
+        if cls._ocr_available is not None:
+            return cls._ocr_available
+        try:
+            import pytesseract
+            from PIL import Image  # noqa: F401
+            # tesseract 바이너리도 확인 (pytesseract만 있고 바이너리 없는 경우 흔함)
+            try:
+                pytesseract.get_tesseract_version()
+            except Exception as bin_err:
+                cls._ocr_available = False
+                cls._ocr_unavailable_reason = f"tesseract 바이너리 미설치: {bin_err}"
+                logger.warning(
+                    f"OCR 비활성화 — {cls._ocr_unavailable_reason}. "
+                    "스캔 PDF는 텍스트 추출 없이 메타데이터만 인덱싱됩니다."
+                )
+                return False
+            cls._ocr_available = True
+            logger.info("OCR 가용 — pytesseract + tesseract 바이너리 확인됨")
+            return True
+        except ImportError as e:
+            cls._ocr_available = False
+            cls._ocr_unavailable_reason = f"pytesseract/Pillow 미설치: {e}"
+            logger.warning(
+                f"OCR 비활성화 — {cls._ocr_unavailable_reason}. "
+                "스캔 PDF는 텍스트 추출 없이 메타데이터만 인덱싱됩니다."
+            )
+            return False
 
     def parse(self, file_path: str | Path) -> ParsedDocument | list[ParsedDocument]:
         """파일 타입을 감지하고 적절한 파서로 텍스트 추출
@@ -224,7 +263,9 @@ class DocumentParser:
         pages_text: list[str] = []
         ocr_used = False
         page_failures = 0
+        sparse_pages = 0  # 텍스트 거의 없는 페이지 (스캔 PDF 판정용)
         ocr_threshold = 50  # 페이지당 최소 문자 수 — 이하이면 OCR 시도
+        ocr_available = self._check_ocr_available()
 
         # 섹션 감지를 위한 블록 수집
         all_blocks: list[dict[str, Any]] = []
@@ -244,12 +285,14 @@ class DocumentParser:
                 logger.debug(f"PDF 페이지 텍스트 추출 실패 ({filename} p{page_num}): {e}")
                 continue
 
-            # 텍스트가 빈약하면 OCR 폴백
+            # 텍스트가 빈약하면 OCR 폴백 (가용 시에만 시도)
             if len(text) < ocr_threshold:
-                ocr_text = self._ocr_page(page)
-                if ocr_text:
-                    text = ocr_text
-                    ocr_used = True
+                sparse_pages += 1
+                if ocr_available:
+                    ocr_text = self._ocr_page(page)
+                    if ocr_text:
+                        text = ocr_text
+                        ocr_used = True
 
             if text:
                 pages_text.append(text)
@@ -265,6 +308,18 @@ class DocumentParser:
         if page_failures:
             logger.warning(
                 f"PDF 부분 추출: {filename} — {page_failures}/{len(doc)} 페이지 추출 실패"
+            )
+
+        # 스캔 PDF 판정: 페이지의 절반 이상이 sparse + OCR로도 채우지 못함
+        is_scan_pdf = (
+            len(doc) > 0
+            and sparse_pages * 2 >= len(doc)
+            and not ocr_used
+        )
+        if is_scan_pdf:
+            logger.info(
+                f"스캔 PDF로 판정: {filename} — {sparse_pages}/{len(doc)} 페이지가 텍스트 부족"
+                + (" (OCR 미가용)" if not ocr_available else "")
             )
 
         full_text = "\n\n".join(pages_text)
@@ -283,12 +338,15 @@ class DocumentParser:
             "page_count": len(doc),
             "is_ocr": ocr_used,
             "is_encrypted": False,
+            "scan_pdf": is_scan_pdf,
             # 작성자/수정자 추적용 추가 필드
             "creator": pdf_meta.get("creator", "") or "",
             "producer": pdf_meta.get("producer", "") or "",
         }
         if page_failures:
             metadata["page_failures"] = page_failures
+        if sparse_pages:
+            metadata["sparse_pages"] = sparse_pages
 
         if sections:
             metadata["sections"] = sections
@@ -388,23 +446,25 @@ class DocumentParser:
         return sections
 
     def _ocr_page(self, page: Any) -> str:
-        """PyMuPDF 페이지를 이미지로 렌더링 후 Tesseract OCR 수행"""
-        try:
-            import pytesseract
-            from PIL import Image
-        except ImportError:
-            logger.warning("pytesseract 또는 Pillow가 설치되지 않아 OCR을 건너뜁니다.")
+        """PyMuPDF 페이지를 이미지로 렌더링 후 Tesseract OCR 수행
+
+        OCR 가용성은 클래스 캐시(_check_ocr_available)로 1회만 체크 — 미설치
+        시 매 페이지마다 ImportError WARNING이 누적되는 것을 방지.
+        OCR 실패는 DEBUG로 기록 (페이지 단위 흔한 실패 — 운영 노이즈 아님).
+        """
+        if not self._check_ocr_available():
             return ""
 
         try:
-            # 페이지를 이미지로 렌더링 (300 DPI)
+            import pytesseract
+            from PIL import Image
+
             pix = page.get_pixmap(dpi=300)
             img = Image.open(io.BytesIO(pix.tobytes("png")))
-
             text = pytesseract.image_to_string(img, lang=self.ocr_languages)
             return text.strip()
         except Exception as e:
-            logger.warning(f"OCR 처리 실패: {e}")
+            logger.debug(f"OCR 처리 실패 (page skip): {e}")
             return ""
 
     @staticmethod

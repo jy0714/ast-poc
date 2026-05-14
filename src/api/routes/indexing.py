@@ -75,6 +75,11 @@ class IndexingProgress(BaseModel):
     peak_throughput_per_min: float = 0.0
     phase_times: dict[str, float] = {}
     stage_wall_seconds: dict[str, float] = {}
+    # === 신규: 운영 가시성 ===
+    last_success_at: str | None = None
+    stalled: bool = False
+    encrypted_pdfs: list[str] = []
+    scan_pdfs_no_ocr: list[str] = []
 
 
 class IncrementalRequest(BaseModel):
@@ -96,9 +101,19 @@ class StopResponse(BaseModel):
 
 @router.post("/start", response_model=IndexingProgress)
 async def start_indexing(request: IndexingRequest):
-    """인덱싱 시작 (백그라운드 스레드)"""
+    """인덱싱 시작 (백그라운드 스레드)
+
+    케이스 상태가 INDEXING이면:
+    1. 실제 워커가 메모리 상에 살아있으면 (is_running=True) 진짜 진행 중 → 409
+    2. 워커가 없는데 status만 INDEXING이면 비정상 종료 → settings
+       indexing_stuck_timeout_min(기본 30분) 경과 시 자동으로 ERROR로 복구한 뒤
+       새 인덱싱 시작 허용. 경과 안 했으면 409.
+    """
     pipeline = get_pipeline()
     store = get_case_store()
+
+    from src.cases.case_store import CaseStatus
+    from src.utils.config import settings
 
     # 케이스 존재 확인
     try:
@@ -106,15 +121,31 @@ async def start_indexing(request: IndexingRequest):
     except CaseNotFoundError:
         raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {request.case_id}")
 
-    # 이미 실행 중인지 확인
+    # 보관 상태 체크
+    if case_meta.status == CaseStatus.ARCHIVED:
+        raise HTTPException(status_code=409, detail="보관된 케이스는 인덱싱할 수 없습니다")
+
+    # 실제 워커 진행 중 → 거부
     if pipeline.is_running(request.case_id):
         raise HTTPException(status_code=409, detail="이미 인덱싱이 진행 중입니다")
 
-    # 보관 상태 체크
-    from src.cases.case_store import CaseStatus
-
-    if case_meta.status == CaseStatus.ARCHIVED:
-        raise HTTPException(status_code=409, detail="보관된 케이스는 인덱싱할 수 없습니다")
+    # status만 INDEXING이고 워커 없음 → stuck 자동 복구 시도
+    if case_meta.status == CaseStatus.INDEXING:
+        recovered = store.recover_if_stuck(
+            request.case_id,
+            timeout_min=settings.indexing_stuck_timeout_min,
+        )
+        if recovered is None:
+            # 아직 timeout 도달 안 함 → 정말 진행 중일 수 있으므로 거부
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"이미 인덱싱이 진행 중입니다 (status=indexing, "
+                    f"stuck timeout {settings.indexing_stuck_timeout_min}분 미경과). "
+                    "비정상 종료된 것으로 보이면 잠시 후 다시 시도하세요."
+                ),
+            )
+        case_meta = recovered  # ERROR 상태로 갱신됨
 
     # 백그라운드 실행
     progress = pipeline.run_async(request.case_id)
