@@ -150,6 +150,53 @@ docker compose up --build -d
 bash scripts/docker-init.sh
 ```
 
+## OCR (스캔 PDF 텍스트 추출)
+
+스캔된 PDF나 텍스트 레이어가 없는 PDF는 OCR로 텍스트를 추출합니다. 두 엔진을 지원하며
+`settings.ocr_engine`으로 토글합니다.
+
+### Tesseract (기본, 가벼움)
+
+- **정확도**: 한국어 70~85%, 영어 90%+
+- **의존성**: 시스템 `tesseract` 바이너리 + 언어 모델
+- **설치**:
+  - Linux/Docker: `apt-get install tesseract-ocr tesseract-ocr-kor tesseract-ocr-eng`
+  - macOS: `brew install tesseract tesseract-lang`
+  - Windows: [UB Mannheim 빌드](https://github.com/UB-Mannheim/tesseract/wiki) 설치 후 PATH 등록
+
+### PaddleOCR (선택, 한국어 정확도 95%+)
+
+- **정확도**: 한국어 95%+, GPU 활용 시 빠름
+- **의존성**: paddleocr + paddlepaddle (~4GB)
+- **설치**:
+  ```bash
+  # CPU
+  pip install -e ".[ocr-paddle]"
+
+  # GPU (CUDA)
+  pip install paddleocr paddlepaddle-gpu
+  ```
+- 설치 후 `settings.ocr_engine="auto"`(기본)이면 자동으로 paddle 우선 사용. 미설치 시
+  자동으로 tesseract fallback.
+
+### 동작 옵션 (`.env` 또는 환경 변수)
+
+| 키 | 기본 | 설명 |
+|---|---|---|
+| `ocr_engine` | `auto` | `auto` / `tesseract` / `paddle` |
+| `ocr_languages` | `eng+kor+chi_sim` | tesseract 형식 (paddle은 첫 매칭 언어 자동 선택) |
+| `ocr_dpi` | `200` | 페이지 → 이미지 렌더링 DPI (300이 표준이지만 200이 속도 1.5배) |
+| `ocr_max_workers` | `4` | tesseract 페이지 병렬 워커 (paddle은 GPU 단일 컨텍스트라 1로 강제) |
+| `ocr_preprocess` | `true` | deskew + denoise + contrast 보정 (OpenCV) |
+| `ocr_cache_enabled` | `true` | 페이지 이미지 sha256 → 결과 캐시 (재인덱싱 시 즉시 반환) |
+| `ocr_cache_dir` | `./data/ocr_cache` | 캐시 위치 (gitignored) |
+
+### 동작이 안 될 때 확인 순서
+
+1. 인덱싱 완료 로그에서 `스캔 PDF(OCR 미적용) N개`가 보이는지 — 보이면 OCR 엔진 미가용
+2. 시작 시 로그에 `Tesseract OCR 가용` 또는 `PaddleOCR 가용`이 한 번 출력되는지
+3. 안 보이면 위 설치 단계 확인
+
 ## 개발 가이드
 
 ```bash

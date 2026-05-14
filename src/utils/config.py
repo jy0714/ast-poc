@@ -58,6 +58,26 @@ class Settings(BaseSettings):
     # padding overhead로 인한 5xx 예방.
     embed_short_text_threshold: int = 5
 
+    # === OCR ===
+    # 사용할 OCR 엔진. "tesseract" | "paddle" | "auto"(paddle 가능 시 우선, 아니면 tesseract).
+    # paddle은 paddleocr + paddlepaddle 패키지가 설치되어 있어야 함 — 미설치 시 자동으로
+    # tesseract fallback. 한국어 정확도: paddle ≈ 95%, tesseract ≈ 70~85%.
+    ocr_engine: str = "auto"
+    # OCR 언어 — tesseract 형식 ("eng+kor+chi_sim"). paddle 엔진은 내부적으로 매핑.
+    ocr_languages: str = "eng+kor+chi_sim"
+    # PDF 페이지 → 이미지 렌더링 DPI. 300이 표준이지만 200으로도 한국어 95% 이상 인식되며
+    # 메모리/시간 ~50% 절약.
+    ocr_dpi: int = 200
+    # 한 PDF 안에서 여러 페이지를 동시에 OCR할 워커 수. tesseract는 CPU 바운드이므로 코어 수,
+    # paddle은 GPU 단일 인스턴스라 1로 강제됨.
+    ocr_max_workers: int = 4
+    # 이미지 전처리 (deskew + contrast 보정 + denoise) 적용 여부. 약간의 비용 대비 정확도 향상.
+    ocr_preprocess: bool = True
+    # OCR 결과 캐싱 — 페이지 이미지 sha256 → 인식 텍스트. 재인덱싱 시 즉시 반환.
+    ocr_cache_enabled: bool = True
+    # 캐시 디렉토리 (gitignored). 케이스 삭제 시에도 보존됨 (다른 케이스에서도 같은 PDF가 들어올 수 있음).
+    ocr_cache_dir: str = "./data/ocr_cache"
+
     # === Indexing Performance ===
     indexing_workers: int = 0  # 파싱/청킹 병렬 워커 수 (0=CPU 코어 수 자동)
     max_indexing_workers: int = 16  # 워커 수 상한 (Windows는 61 미만 필수)

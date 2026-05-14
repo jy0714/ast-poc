@@ -246,32 +246,35 @@ class TestPdfParser:
         assert result.metadata.get("is_encrypted") is True
 
     def test_ocr_check_cached_one_warning(self, monkeypatch, caplog):
-        """OCR 가용성 체크는 1회만 — 매 페이지마다 WARNING이 누적되지 않음"""
+        """OCR 엔진 가용성 체크는 1회만 — 매 호출마다 WARNING이 누적되지 않음"""
         import logging
 
-        from src.parsers.document_parser import DocumentParser
+        from src.parsers.ocr import reset_engine_cache
+        from src.parsers.ocr.tesseract import TesseractEngine
 
-        # 캐시 리셋
-        DocumentParser._ocr_available = None
-        DocumentParser._ocr_unavailable_reason = ""
+        # 엔진 싱글톤 + 가용성 캐시 리셋
+        reset_engine_cache()
+        TesseractEngine._available = None
+        TesseractEngine._unavailable_reason = ""
 
         # pytesseract import 실패하도록 sys.modules에 None 주입
         import sys
 
         monkeypatch.setitem(sys.modules, "pytesseract", None)
 
+        engine = TesseractEngine()
         with caplog.at_level(logging.WARNING):
-            r1 = DocumentParser._check_ocr_available()
-            r2 = DocumentParser._check_ocr_available()
-            r3 = DocumentParser._check_ocr_available()
+            r1 = engine.is_available()
+            r2 = engine.is_available()
+            r3 = engine.is_available()
 
         assert r1 is False and r2 is False and r3 is False
         # WARNING은 첫 호출 1번만
-        ocr_warnings = [
+        warnings = [
             r for r in caplog.records
-            if r.levelname == "WARNING" and "OCR" in r.message
+            if r.levelname == "WARNING" and "Tesseract OCR" in r.message
         ]
-        assert len(ocr_warnings) == 1
+        assert len(warnings) == 1
 
     def test_scan_pdf_metadata_set(self, parser: DocumentParser, monkeypatch):
         """텍스트 거의 없고 OCR 미가용 → scan_pdf=true 메타"""
@@ -280,11 +283,14 @@ class TestPdfParser:
         except ImportError:
             pytest.skip("PyMuPDF가 설치되지 않았습니다")
 
-        # OCR 미가용으로 캐시
-        from src.parsers.document_parser import DocumentParser
+        # OCR 엔진 싱글톤 리셋 + 가용성을 False로 강제
+        from src.parsers.ocr import reset_engine_cache
+        from src.parsers.ocr.tesseract import TesseractEngine
+        from src.parsers.ocr.paddle import PaddleEngine
 
-        monkeypatch.setattr(DocumentParser, "_ocr_available", False)
-        monkeypatch.setattr(DocumentParser, "_ocr_unavailable_reason", "test")
+        reset_engine_cache()
+        monkeypatch.setattr(TesseractEngine, "_available", False)
+        monkeypatch.setattr(PaddleEngine, "_available", False)
 
         # 빈 페이지 PDF 생성 (텍스트 없음 → 모든 페이지 sparse)
         path = TEST_DIR / "scan_like.pdf"
