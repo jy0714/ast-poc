@@ -343,8 +343,13 @@ class VectorStoreService:
         # 영구 실패 청크는 retry 큐 파일에 저장하고 본 배치에서 제외 → 데이터 유실 방지
         failed_indices = set(self._embedding_service._last_failed_indices)
         if failed_indices:
-            failed_chunks = [chunks[i] for i in sorted(failed_indices)]
-            self._save_failed_chunks(failed_chunks)
+            sorted_failed = sorted(failed_indices)
+            failed_chunks = [chunks[i] for i in sorted_failed]
+            failed_diag = [
+                self._embedding_service._last_failed_diagnostics.get(i, {})
+                for i in sorted_failed
+            ]
+            self._save_failed_chunks(failed_chunks, diagnostics=failed_diag)
             logger.warning(
                 f"임베딩 실패 청크 {len(failed_chunks)}개 → retry 큐에 저장 "
                 f"(case={self.case_id})"
@@ -645,12 +650,20 @@ class VectorStoreService:
 
         return len(embeddings[0])
 
-    def _save_failed_chunks(self, failed_chunks: list[Chunk]) -> None:
+    def _save_failed_chunks(
+        self,
+        failed_chunks: list[Chunk],
+        diagnostics: list[dict[str, object]] | None = None,
+    ) -> None:
         """임베딩이 영구 실패한 청크를 retry 큐 파일에 append
 
         파일 경로: data/failed_embeddings/{case_id or collection}.jsonl
-        한 줄당 청크 1개 (chunk_id, content, metadata, source_type, ts).
-        나중에 별도 재처리 스크립트로 다시 임베딩 가능.
+        한 줄당 청크 1개. 진단 정보(diagnostics)가 있으면 error_type, error_message,
+        text_stats를 함께 저장 → 재처리 스크립트에서 분류·우선순위 결정에 활용.
+
+        Args:
+            failed_chunks: 영구 실패 청크 리스트
+            diagnostics: chunks와 동일 순서의 진단 정보 dict 리스트 (optional)
         """
         try:
             base = Path(settings.bm25_index_dir).parent / "failed_embeddings"
@@ -659,14 +672,19 @@ class VectorStoreService:
             path = base / f"{key}.jsonl"
             ts = time.time()
             with path.open("a", encoding="utf-8") as f:
-                for c in failed_chunks:
-                    record = {
+                for i, c in enumerate(failed_chunks):
+                    record: dict[str, object] = {
                         "chunk_id": c.chunk_id,
                         "content": c.content,
                         "metadata": c.metadata,
                         "source_type": c.source_type,
                         "ts": ts,
                     }
+                    if diagnostics and i < len(diagnostics) and diagnostics[i]:
+                        diag = diagnostics[i]
+                        record["error_type"] = diag.get("error_type", "unknown")
+                        record["error_message"] = diag.get("error_message", "")
+                        record["text_stats"] = diag.get("text_stats", {})
                     f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception as e:
             # JSONL 저장이 실패하면 청크가 영구 증발 — 호출측이 인지할 수 있도록

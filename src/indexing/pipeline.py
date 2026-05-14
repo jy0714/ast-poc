@@ -262,7 +262,24 @@ class IndexingProgress:
     embed_wall_seconds: float = 0.0
     store_wall_seconds: float = 0.0
     peak_embed_chunks_per_min: float = 0.0  # 10초 슬라이딩 윈도우 기준 피크 throughput
+    last_success_at: float | None = None  # 마지막 임베딩 성공 시각 (epoch). stalled 판단용.
     _phase_start: float = field(default=0.0, repr=False)
+
+    @property
+    def stalled(self) -> bool:
+        """마지막 성공 후 indexing_stall_threshold_sec 경과하면 True
+
+        embed가 모두 실패해서 진척 없는 상태를 운영자가 progress API로 감지 가능.
+        """
+        if not self.is_running:
+            return False
+        if self.last_success_at is None:
+            # 아직 한 번도 성공 못함 + 시작한 지 threshold 경과
+            if self.started_at is None:
+                return False
+            elapsed = (datetime.now() - self.started_at).total_seconds()
+            return elapsed >= settings.indexing_stall_threshold_sec
+        return (time.time() - self.last_success_at) >= settings.indexing_stall_threshold_sec
 
     def set_phase(self, phase: IndexingPhase) -> None:
         """단계 전환 + 이전 단계 소요시간 기록"""
@@ -400,6 +417,11 @@ class IndexingProgress:
                 "embed": round(self.embed_wall_seconds, 1),
                 "store": round(self.store_wall_seconds, 1),
             },
+            "last_success_at": (
+                datetime.fromtimestamp(self.last_success_at).isoformat()
+                if self.last_success_at else None
+            ),
+            "stalled": self.stalled,
             "errors": self.errors,
         }
 
@@ -476,7 +498,7 @@ class IndexingPipeline:
             return True
         return False
 
-    def cancel_and_wait(self, case_id: str, timeout: float = 10.0) -> bool:
+    def cancel_and_wait(self, case_id: str, timeout: float | None = None) -> bool:
         """인덱싱 중단 + 워커 스레드 종료 대기
 
         삭제·재시작 등 즉시 후속 동작이 필요한 호출자가 사용. cancel()과 달리
@@ -487,11 +509,14 @@ class IndexingPipeline:
 
         Args:
             case_id: 케이스 ID
-            timeout: 종료 대기 최대 시간 (초). 기본 10초.
+            timeout: 종료 대기 최대 시간 (초). None이면 settings.indexing_shutdown_timeout.
 
         Returns:
             True: 실행 중이 아니거나 timeout 안에 정상 종료, False: timeout 초과
         """
+        if timeout is None:
+            timeout = float(settings.indexing_shutdown_timeout)
+
         if not self.is_running(case_id):
             return True
 
@@ -757,17 +782,26 @@ class IndexingPipeline:
                     # embed_texts (동기 래퍼) → 내부에서 embed_texts_async 호출.
                     # super-batch가 embed_batch_size를 초과하면 자동으로 batch_size
                     # 단위로 분할 + asyncio.Semaphore(embed_concurrent)로 동시 전송.
+                    # cancel_flag를 전달 → 임베딩 재시도/분할 루프에서도 즉시 중단됨.
                     embeddings = embedding_service.embed_texts(
-                        [c.content for c in batch]
+                        [c.content for c in batch],
+                        cancel_event=cancel_flag,
                     )
                     elapsed = time.monotonic() - t_start
                     worker_active_seconds += elapsed
 
                     failed_idx_set = set(embedding_service._last_failed_indices)
                     if failed_idx_set:
-                        failed_chunks = [batch[i] for i in sorted(failed_idx_set)]
+                        sorted_failed = sorted(failed_idx_set)
+                        failed_chunks = [batch[i] for i in sorted_failed]
+                        failed_diag = [
+                            embedding_service._last_failed_diagnostics.get(i, {})
+                            for i in sorted_failed
+                        ]
                         try:
-                            vector_store._save_failed_chunks(failed_chunks)
+                            vector_store._save_failed_chunks(
+                                failed_chunks, diagnostics=failed_diag
+                            )
                             err_msg = (
                                 f"임베딩 super-batch {batch_num} 부분 실패: "
                                 f"{len(failed_idx_set)}/{len(batch)}개 (retry 큐 저장)"
@@ -781,6 +815,12 @@ class IndexingPipeline:
                             logger.error(err_msg, exc_info=True)
                         with counter_lock:
                             state["embed_errors"].append(err_msg)
+                    # progress.last_success_at 갱신 (성공한 청크가 있으면)
+                    if len(failed_idx_set) < len(batch):
+                        with counter_lock:
+                            progress.last_success_at = (
+                                embedding_service._last_success_at or time.time()
+                            )
 
                     kept_indices = [
                         i for i in range(len(batch)) if i not in failed_idx_set
