@@ -61,6 +61,19 @@ class TestBuildMessages:
         messages = router._build_messages("질문", [])
         assert "(검색 결과 없음)" in messages[1][1]
 
+    def test_extra_system_warning_appended(self, router):
+        """extra_system_warning이 시스템 프롬프트에 삽입됨"""
+        warning = "주의: 검색 결과가 질문과 관련 없을 수 있습니다."
+        messages = router._build_messages("질문", ["내용"], extra_system_warning=warning)
+        assert warning in messages[0][1]
+        # 기존 시스템 프롬프트도 유지
+        assert "감사" in messages[0][1]
+
+    def test_no_extra_warning_by_default(self, router):
+        """extra_system_warning 미전달 시 기존 프롬프트만"""
+        messages = router._build_messages("질문", ["내용"])
+        assert "## 추가 주의" not in messages[0][1]
+
 
 class TestGenerate:
     @pytest.mark.asyncio

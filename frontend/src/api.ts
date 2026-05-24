@@ -118,6 +118,10 @@ export interface ChatResponse {
   sources: ChatSource[];
   security_mode: boolean;
   case_id: string;
+  // 출처 인용 검증 (할루시네이션 감지)
+  citation_count?: number;
+  invalid_citations?: number[];
+  uncited_response?: boolean;
 }
 
 export interface CaseInfo {

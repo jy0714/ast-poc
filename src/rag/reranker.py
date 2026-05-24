@@ -71,6 +71,7 @@ class Reranker:
         query: str,
         documents: list[dict[str, Any]],
         top_n: int | None = None,
+        min_score: float | None = None,
     ) -> list[dict[str, Any]]:
         """검색 결과를 query와의 관련성으로 재정렬
 
@@ -79,14 +80,18 @@ class Reranker:
             documents: vector_store.search 반환 형식의 dict 리스트
                        (각 dict에 "content" 키 필수)
             top_n: 반환할 최대 결과 수 (기본: settings.rerank_top_n)
+            min_score: 이 점수 이하 결과 제거 (기본: settings.rerank_min_score).
+                       top_n 선별 후 적용. 관련 없는 결과가 LLM에 들어가는 것 방지.
 
         Returns:
-            rerank_score가 추가된 dict 리스트 (점수 내림차순, top_n개)
+            rerank_score가 추가된 dict 리스트 (점수 내림차순, top_n + min_score 필터).
+            필터 후 0건이면 빈 리스트.
         """
         if not documents:
             return []
 
         top_n = top_n or settings.rerank_top_n
+        threshold = min_score if min_score is not None else settings.rerank_min_score
 
         self._load_model()
 
@@ -114,7 +119,17 @@ class Reranker:
 
         scored_docs.sort(key=lambda d: d["rerank_score"], reverse=True)
 
-        return scored_docs[:top_n]
+        # top_n 선별
+        top_docs = scored_docs[:top_n]
+
+        # min_score 필터 — 저품질 결과 제거
+        filtered = [d for d in top_docs if d["rerank_score"] >= threshold]
+        if len(filtered) < len(top_docs):
+            logger.info(
+                f"Reranker 필터링: {len(top_docs)}건 중 {len(filtered)}건 통과 "
+                f"(min_score={threshold})"
+            )
+        return filtered
 
 
 def get_reranker(model_name: str | None = None) -> Reranker:

@@ -6,6 +6,7 @@ interface Message {
   content: string;
   sources?: ChatSource[];
   loading?: boolean;
+  uncited?: boolean;  // LLM이 출처 인용 없이 답변 (할루시네이션 위험)
 }
 
 export default function AnalystPage() {
@@ -58,6 +59,7 @@ export default function AnalystPage() {
 
     let fullContent = '';
     let sources: ChatSource[] = [];
+    let uncited = false;
 
     try {
       for await (const event of chatApi.stream(selectedCase, text, secureMode, controller.signal)) {
@@ -70,6 +72,7 @@ export default function AnalystPage() {
           });
         } else if (event.type === 'sources') {
           sources = event.sources;
+          uncited = event.uncited_response === true;
         } else if (event.type === 'error') {
           setError(event.message);
         }
@@ -83,6 +86,7 @@ export default function AnalystPage() {
           content: fullContent || '응답을 생성하지 못했습니다.',
           sources,
           loading: false,
+          uncited,
         };
         return updated;
       });
@@ -119,6 +123,7 @@ export default function AnalystPage() {
               content: result.answer,
               sources: result.sources,
               loading: false,
+              uncited: result.uncited_response === true,
             };
             return updated;
           });
@@ -232,6 +237,13 @@ export default function AnalystPage() {
                 {msg.content}
                 {msg.loading && <span className="inline-block w-1.5 h-4 bg-gray-400 animate-pulse ml-0.5 align-middle" />}
               </div>
+
+              {/* 출처 인용 없음 경고 (할루시네이션 위험) */}
+              {!msg.loading && msg.uncited && (
+                <div className="mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
+                  ⚠ 이 응답에는 출처 인용이 포함되어 있지 않습니다. 내용을 직접 검증해 주세요.
+                </div>
+              )}
 
               {/* 출처 */}
               {msg.sources && msg.sources.length > 0 && (

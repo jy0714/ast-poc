@@ -73,6 +73,10 @@ class ChatResponse(BaseModel):
     sources: list[SourceReference]
     security_mode: bool
     case_id: str
+    # 출처 인용 검증 (할루시네이션 감지)
+    citation_count: int = 0
+    invalid_citations: list[int] = []
+    uncited_response: bool = False
 
 
 class CaseInfo(BaseModel):
@@ -240,6 +244,9 @@ async def chat(request: ChatRequest):
         sources=sources,
         security_mode=result.secure_mode,
         case_id=result.case_id,
+        citation_count=result.citation_count,
+        invalid_citations=result.invalid_citations,
+        uncited_response=result.uncited_response,
     )
 
 
@@ -328,7 +335,37 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                     collected_sources.append(src_ref)
                     sources_data.append(src_ref.model_dump())
 
-                yield f"data: {json.dumps({'type': 'sources', 'sources': sources_data}, ensure_ascii=False)}\n\n"
+                # 출처 인용 검증 (할루시네이션 감지) — 완성된 답변 기준
+                from src.rag.engine import validate_citations
+
+                citation_count, invalid_citations, uncited_response = validate_citations(
+                    collected_answer, len(sources)
+                )
+                if invalid_citations:
+                    logger.warning(
+                        f"가짜 인용 감지 (stream): [출처 {invalid_citations}] > 실제 "
+                        f"{len(sources)}개 (case={request.case_id})"
+                    )
+                if uncited_response:
+                    logger.warning(
+                        f"LLM이 출처 인용 없이 답변 (stream) — 할루시네이션 위험 "
+                        f"(case={request.case_id})"
+                    )
+
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "type": "sources",
+                            "sources": sources_data,
+                            "citation_count": citation_count,
+                            "invalid_citations": invalid_citations,
+                            "uncited_response": uncited_response,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n\n"
+                )
                 yield "data: [DONE]\n\n"
 
             # 정상 완료/중단 모두 히스토리 저장 (중단도 사용자에게 의미있는 부분 응답)

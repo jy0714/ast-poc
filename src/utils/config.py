@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "o3"
 
+    # === LLM 생성 파라미터 ===
+    # RAG에서 temperature가 높으면 할루시네이션 증가. 0.1로 결정적 답변 유도.
+    llm_temperature: float = 0.1
+
     # === ChromaDB ===
     chroma_persist_dir: str = "./data/vectordb"
     chroma_collection_name: str = "ast_documents"
@@ -102,6 +106,15 @@ class Settings(BaseSettings):
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
     rerank_top_k_candidates: int = 50  # reranker에 넘길 초기 후보 수
     rerank_top_n: int = 5  # reranker가 최종 선별할 결과 수
+    # reranker top_n 선별 후 이 점수 이하 결과는 제거 (관련 없는 결과가 LLM에
+    # 들어가 억지 답변을 만드는 것 방지). normalize=True 기준 0~1 점수.
+    rerank_min_score: float = 0.1
+
+    # === 할루시네이션 제어 ===
+    # LLM에 전달하기 전 content가 이 길이 미만인 소스 제거 (과도한 맥락 생성 방지).
+    min_source_length: int = 20
+    # 질의 키워드가 검색 결과에 하나도 없으면 프롬프트에 추가 경고 삽입.
+    enable_relevance_check: bool = True
 
     # === API ===
     api_host: str = "0.0.0.0"

@@ -79,7 +79,7 @@ class LLMRouter:
             self._ollama_llm = ChatOllama(
                 model=settings.ollama_llm_model,
                 base_url=settings.ollama_base_url,
-                temperature=0.1,
+                temperature=settings.llm_temperature,
             )
             logger.info(f"로컬 LLM 초기화: {settings.ollama_llm_model}")
 
@@ -99,16 +99,24 @@ class LLMRouter:
             self._openai_llm = ChatOpenAI(
                 model=settings.openai_model,
                 api_key=settings.openai_api_key,
-                temperature=0.1,
+                temperature=settings.llm_temperature,
             )
             logger.info(f"외부 LLM 초기화: {settings.openai_model}")
 
         return self._openai_llm
 
     def _build_messages(
-        self, question: str, context: list[str]
+        self,
+        question: str,
+        context: list[str],
+        extra_system_warning: str | None = None,
     ) -> list[tuple[str, str]]:
-        """RAG 프롬프트 메시지 조합"""
+        """RAG 프롬프트 메시지 조합
+
+        Args:
+            extra_system_warning: 시스템 프롬프트 뒤에 덧붙일 추가 경고
+                (관련성 낮은 검색 결과 등에 대한 방어용)
+        """
         context_text = "\n\n---\n\n".join(
             f"[출처 {i + 1}]\n{c}" for i, c in enumerate(context)
         )
@@ -120,8 +128,12 @@ class LLMRouter:
             question=question,
         )
 
+        system_prompt = _SYSTEM_PROMPT
+        if extra_system_warning:
+            system_prompt = f"{_SYSTEM_PROMPT}\n\n## 추가 주의\n\n{extra_system_warning}"
+
         return [
-            ("system", _SYSTEM_PROMPT),
+            ("system", system_prompt),
             ("human", user_prompt),
         ]
 
@@ -130,6 +142,7 @@ class LLMRouter:
         question: str,
         context: list[str],
         secure_mode: bool | None = None,
+        extra_system_warning: str | None = None,
     ) -> str:
         """RAG 프롬프트로 LLM 응답 생성
 
@@ -137,12 +150,13 @@ class LLMRouter:
             question: 사용자 질문
             context: 검색된 청크 텍스트 리스트
             secure_mode: 보안 모드 (None이면 설정값 사용)
+            extra_system_warning: 시스템 프롬프트에 삽입할 추가 경고 (선택)
 
         Returns:
             LLM 응답 텍스트
         """
         llm = self.get_llm(secure_mode)
-        messages = self._build_messages(question, context)
+        messages = self._build_messages(question, context, extra_system_warning)
 
         try:
             response = await llm.ainvoke(messages)
@@ -156,6 +170,7 @@ class LLMRouter:
         question: str,
         context: list[str],
         secure_mode: bool | None = None,
+        extra_system_warning: str | None = None,
     ) -> AsyncIterator[str]:
         """RAG 프롬프트로 LLM 스트리밍 응답 생성
 
@@ -163,12 +178,13 @@ class LLMRouter:
             question: 사용자 질문
             context: 검색된 청크 텍스트 리스트
             secure_mode: 보안 모드
+            extra_system_warning: 시스템 프롬프트에 삽입할 추가 경고 (선택)
 
         Yields:
             응답 토큰 문자열
         """
         llm = self.get_llm(secure_mode)
-        messages = self._build_messages(question, context)
+        messages = self._build_messages(question, context, extra_system_warning)
 
         try:
             async for chunk in llm.astream(messages):

@@ -4,14 +4,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.rag.engine import RAGEngine, QueryResult, SourceReference
+from src.rag.engine import RAGEngine, QueryResult, SourceReference, validate_citations
 
 
 def _mock_search_results(n: int = 3) -> list[dict]:
-    """모킹 검색 결과 생성"""
+    """모킹 검색 결과 생성 (content는 min_source_length=20자 이상)"""
     return [
         {
-            "content": f"검색 결과 {i} 내용입니다.",
+            "content": f"검색 결과 {i} 내용입니다. 충분히 긴 본문 텍스트를 포함하고 있습니다.",
             "metadata": {
                 "source_type": "email" if i % 2 == 0 else "document",
                 "filename": f"file_{i}.txt",
@@ -381,3 +381,121 @@ class TestRerankIntegration:
 
         assert len(result.sources) == 2
         mock_llm_router.generate.assert_called_once()
+
+
+# === 할루시네이션 제어 (#2~#5) ===
+
+
+class TestValidateCitations:
+    def test_valid_citations(self):
+        cc, invalid, uncited = validate_citations("비용 증가 [출처 1][출처 2].", 3)
+        assert cc == 2
+        assert invalid == []
+        assert uncited is False
+
+    def test_invalid_citation_out_of_range(self):
+        cc, invalid, uncited = validate_citations("[출처 7]에 따르면", 5)
+        assert cc == 1
+        assert invalid == [7]
+        assert uncited is False
+
+    def test_uncited_response(self):
+        cc, invalid, uncited = validate_citations("그냥 답변입니다 근거 없음.", 3)
+        assert cc == 0
+        assert uncited is True
+
+    def test_refusal_not_flagged_as_uncited(self):
+        """거절 답변은 인용 없어도 uncited 아님"""
+        cc, invalid, uncited = validate_citations(
+            "제공된 자료에서 해당 내용을 찾을 수 없습니다.", 3
+        )
+        assert cc == 0
+        assert uncited is False
+
+    def test_citation_without_space(self):
+        cc, invalid, uncited = validate_citations("내용 [출처3]", 5)
+        assert cc == 1
+        assert invalid == []
+
+
+class TestShortChunkFilter:
+    @pytest.mark.asyncio
+    async def test_short_sources_removed(self, mock_vector_store, mock_llm_router):
+        """20자 미만 소스 제거 후 LLM 호출"""
+        mock_vector_store.search.return_value = [
+            {"content": "승인", "metadata": {"source_type": "document"}, "score": 0.9},
+            {
+                "content": "이것은 충분히 긴 본문 텍스트입니다. 의미 있는 내용을 담고 있습니다.",
+                "metadata": {"source_type": "document"},
+                "score": 0.8,
+            },
+        ]
+        engine = RAGEngine(
+            case_id="test",
+            vector_store=mock_vector_store,
+            llm_router=mock_llm_router,
+        )
+        result = await engine.query("질문")
+        # 짧은 "승인"은 제거되고 1건만 남음
+        assert len(result.sources) == 1
+
+    @pytest.mark.asyncio
+    async def test_all_short_returns_no_results(self, mock_vector_store, mock_llm_router):
+        """전부 짧으면 검색 결과 없음 처리"""
+        mock_vector_store.search.return_value = [
+            {"content": "확인", "metadata": {"source_type": "document"}, "score": 0.9},
+            {"content": "승인", "metadata": {"source_type": "document"}, "score": 0.8},
+        ]
+        engine = RAGEngine(
+            case_id="test",
+            vector_store=mock_vector_store,
+            llm_router=mock_llm_router,
+        )
+        result = await engine.query("질문")
+        assert result.sources == []
+        assert "검색 결과가 없습니다" in result.answer
+        mock_llm_router.generate.assert_not_called()
+
+
+class TestCitationInQueryResult:
+    @pytest.mark.asyncio
+    async def test_query_result_has_citation_meta(self, mock_vector_store, mock_llm_router):
+        """query 결과에 citation 메타 포함"""
+        mock_llm_router.generate.return_value = "답변입니다 [출처 1]. 추가 [출처 9]."
+        engine = RAGEngine(
+            case_id="test",
+            vector_store=mock_vector_store,
+            llm_router=mock_llm_router,
+        )
+        result = await engine.query("질문")
+        assert result.citation_count == 2
+        # 출처 3개뿐인데 9 인용 → invalid
+        assert 9 in result.invalid_citations
+        assert result.uncited_response is False
+
+
+class TestRelativeScoreFilter:
+    def test_low_score_removed(self):
+        results = [
+            {"content": "a", "score": 1.0},
+            {"content": "b", "score": 0.9},
+            {"content": "c", "score": 0.05},  # 평균 대비 매우 낮음
+        ]
+        filtered = RAGEngine._apply_relative_score_filter(results)
+        contents = [r["content"] for r in filtered]
+        assert "c" not in contents
+
+    def test_single_result_not_filtered(self):
+        results = [{"content": "a", "score": 0.001}]
+        assert RAGEngine._apply_relative_score_filter(results) == results
+
+
+class TestRelevanceCheck:
+    def test_keyword_overlap_true(self):
+        sources = [SourceReference(content="비용이 15% 증가했습니다", source_type="document")]
+        assert RAGEngine._has_keyword_overlap("비용 증가", sources) is True
+
+    def test_keyword_overlap_false(self):
+        sources = [SourceReference(content="날씨가 맑고 화창합니다", source_type="document")]
+        # extract_topics는 10자 미만 질의를 무시하므로 충분히 긴 질의 사용
+        assert RAGEngine._has_keyword_overlap("비용 예산 회계 처리 내역 검토", sources) is False
