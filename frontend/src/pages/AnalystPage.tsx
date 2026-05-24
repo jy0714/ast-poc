@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { chatApi, type CaseInfo, type ChatSource } from '../api';
+import { chatApi, type CaseInfo, type ChatSource, type TokenUsage } from '../api';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -7,6 +7,7 @@ interface Message {
   sources?: ChatSource[];
   loading?: boolean;
   uncited?: boolean;  // LLM이 출처 인용 없이 답변 (할루시네이션 위험)
+  tokenUsage?: TokenUsage;  // 토큰 사용량 (비용 산정용)
 }
 
 export default function AnalystPage() {
@@ -60,6 +61,7 @@ export default function AnalystPage() {
     let fullContent = '';
     let sources: ChatSource[] = [];
     let uncited = false;
+    let tokenUsage: TokenUsage | undefined;
 
     try {
       for await (const event of chatApi.stream(selectedCase, text, secureMode, controller.signal)) {
@@ -73,6 +75,13 @@ export default function AnalystPage() {
         } else if (event.type === 'sources') {
           sources = event.sources;
           uncited = event.uncited_response === true;
+        } else if (event.type === 'token_usage') {
+          tokenUsage = {
+            input_tokens: event.input_tokens,
+            output_tokens: event.output_tokens,
+            total_tokens: event.total_tokens,
+            source: event.source,
+          };
         } else if (event.type === 'error') {
           setError(event.message);
         }
@@ -87,6 +96,7 @@ export default function AnalystPage() {
           sources,
           loading: false,
           uncited,
+          tokenUsage,
         };
         return updated;
       });
@@ -124,6 +134,7 @@ export default function AnalystPage() {
               sources: result.sources,
               loading: false,
               uncited: result.uncited_response === true,
+              tokenUsage: result.token_usage,
             };
             return updated;
           });
@@ -254,6 +265,16 @@ export default function AnalystPage() {
                       <SourceCard key={j} source={s} />
                     ))}
                   </div>
+                </div>
+              )}
+
+              {/* 토큰 사용량 (비용 산정용) */}
+              {!msg.loading && msg.tokenUsage && (
+                <div className="mt-2 text-[11px] text-gray-400">
+                  토큰: 입력 {msg.tokenUsage.input_tokens.toLocaleString()} · 출력{' '}
+                  {msg.tokenUsage.output_tokens.toLocaleString()} · 합계{' '}
+                  {msg.tokenUsage.total_tokens.toLocaleString()}
+                  {msg.tokenUsage.source === 'estimated' && ' (추정치)'}
                 </div>
               )}
             </div>

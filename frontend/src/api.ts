@@ -113,6 +113,13 @@ export interface ChatSource {
   last_modified?: string;
 }
 
+export interface TokenUsage {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  source: string; // "ollama_api" | "openai_api" | "estimated"
+}
+
 export interface ChatResponse {
   answer: string;
   sources: ChatSource[];
@@ -122,6 +129,8 @@ export interface ChatResponse {
   citation_count?: number;
   invalid_citations?: number[];
   uncited_response?: boolean;
+  // 토큰 사용량 (외부 API 비용 산정용)
+  token_usage?: TokenUsage;
 }
 
 export interface CaseInfo {

@@ -116,6 +116,14 @@ class Settings(BaseSettings):
     # 질의 키워드가 검색 결과에 하나도 없으면 프롬프트에 추가 경고 삽입.
     enable_relevance_check: bool = True
 
+    # === Token Usage Logging ===
+    # 질의 1건당 입력/출력 토큰 수를 TSV 파일에 기록 (외부 API 비용 산정 근거).
+    token_log_enabled: bool = True
+    token_log_file: str = "logs/token_usage.txt"
+    # 입력 토큰 상세 분해(system/context/question)를 JSONL로 기록 (비용 분석용, 기본 OFF).
+    token_log_detail: bool = False
+    token_log_detail_file: str = "logs/token_usage_detail.jsonl"
+
     # === API ===
     api_host: str = "0.0.0.0"
     api_port: int = 8000

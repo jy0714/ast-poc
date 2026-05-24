@@ -62,6 +62,8 @@ class QueryResult:
     citation_count: int = 0  # 응답에서 발견된 [출처 N] 개수
     invalid_citations: list[int] = field(default_factory=list)  # 존재하지 않는 출처 번호
     uncited_response: bool = False  # 인용이 전혀 없는 (거절이 아닌) 응답
+    # 토큰 사용량 (input_tokens/output_tokens/total_tokens/source). LLM 미호출 시 빈 dict.
+    token_usage: dict[str, Any] = field(default_factory=dict)
 
 
 # [출처 N] / [출처N] / [출처 1][출처 3] 모두 매칭
@@ -337,12 +339,19 @@ class RAGEngine:
         self._log_sources(question, sources, parsed.intent)
 
         # 4. LLM 응답 생성 (관련성 경고가 있으면 프롬프트에 삽입)
+        token_usage: dict[str, Any] = {}
+
+        def _capture_usage(rec: dict[str, Any]) -> None:
+            token_usage.update(_usage_subset(rec))
+
         try:
             answer = await self.llm_router.generate(
                 question=question,  # LLM에는 원본 질의 전달
                 context=context_texts,
                 secure_mode=is_secure,
                 extra_system_warning=extra_warning,
+                case_id=self.case_id,
+                on_complete=_capture_usage,
             )
         except Exception as e:
             logger.error(f"LLM 응답 생성 실패: {e}")
@@ -381,6 +390,7 @@ class RAGEngine:
             citation_count=citation_count,
             invalid_citations=invalid_citations,
             uncited_response=uncited_response,
+            token_usage=token_usage,
         )
 
     async def query_stream(
@@ -390,6 +400,7 @@ class RAGEngine:
         secure_mode: bool | None = None,
         n_results: int | None = None,
         is_disconnected: Callable[[], Awaitable[bool]] | None = None,
+        on_complete: Callable[[dict], None] | None = None,
     ) -> tuple[AsyncIterator[str], list[SourceReference]]:
         """스트리밍 RAG 질의: 검색 → LLM 스트리밍 응답
 
@@ -397,6 +408,8 @@ class RAGEngine:
             is_disconnected: 클라이언트 연결 끊김 여부를 반환하는 async 콜백 (선택).
                 검색 시작 전과 LLM 스트림 시작 직전(=reranker 완료 후)에 체크하여,
                 이미 끊겼으면 LLM을 호출하지 않고 빈 스트림을 반환한다. None이면 기존 동작.
+            on_complete: 토큰 사용량 dict를 받는 완료 콜백 (선택). 스트리밍 종료 시
+                generate_stream의 finally에서 호출된다.
 
         Returns:
             (토큰 스트림, 출처 리스트) 튜플. 중단 시 빈 토큰 스트림.
@@ -441,6 +454,8 @@ class RAGEngine:
             context=context_texts,
             secure_mode=is_secure,
             extra_system_warning=extra_warning,
+            case_id=self.case_id,
+            on_complete=on_complete,
         )
 
         return token_stream, sources
@@ -514,6 +529,16 @@ class RAGEngine:
 
         header = " | ".join(header_parts) if header_parts else "출처 불명"
         return f"[{header}]\n{source.content}"
+
+
+def _usage_subset(rec: dict[str, Any]) -> dict[str, Any]:
+    """토큰 로깅 레코드에서 API/UI 노출용 부분집합만 추출"""
+    return {
+        "input_tokens": rec.get("input_tokens", 0),
+        "output_tokens": rec.get("output_tokens", 0),
+        "total_tokens": rec.get("total_tokens", 0),
+        "source": rec.get("input_source", "estimated"),
+    }
 
 
 def _merge_filters(

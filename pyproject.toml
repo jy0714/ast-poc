@@ -70,6 +70,11 @@ ocr-paddle = [
     "paddleocr>=2.7.0",
     "paddlepaddle>=2.6.0",  # GPU 환경은 paddlepaddle-gpu로 별도 설치
 ]
+# 정확한 토큰 카운트 (OpenAI 계열 cl100k_base). 미설치 시 문자 기반 추정으로 동작.
+# pip install -e .[tokencount]
+tokencount = [
+    "tiktoken>=0.7.0",
+]
 
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]

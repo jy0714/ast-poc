@@ -66,6 +66,15 @@ class SourceReference(BaseModel):
     last_modified: str = ""
 
 
+class TokenUsage(BaseModel):
+    """질의 1건의 토큰 사용량 (외부 API 비용 산정용)"""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    source: str = "estimated"  # "ollama_api" | "openai_api" | "estimated"
+
+
 class ChatResponse(BaseModel):
     """RAG 응답"""
 
@@ -77,6 +86,8 @@ class ChatResponse(BaseModel):
     citation_count: int = 0
     invalid_citations: list[int] = []
     uncited_response: bool = False
+    # 토큰 사용량 (LLM 미호출 시 None)
+    token_usage: TokenUsage | None = None
 
 
 class CaseInfo(BaseModel):
@@ -247,6 +258,7 @@ async def chat(request: ChatRequest):
         citation_count=result.citation_count,
         invalid_citations=result.invalid_citations,
         uncited_response=result.uncited_response,
+        token_usage=TokenUsage(**result.token_usage) if result.token_usage else None,
     )
 
 
@@ -283,9 +295,14 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
         collected_answer = ""
         collected_sources: list[SourceReference] = []
         stopped = False
+        token_usage_holder: dict = {}
 
         async def check_disconnected() -> bool:
             return await raw_request.is_disconnected()
+
+        def capture_token_usage(rec: dict) -> None:
+            # generate_stream의 finally에서 호출 — 토큰 사용량 보관
+            token_usage_holder.update(rec)
 
         try:
             # 검색/reranker 단계의 조기 중단을 위해 engine에 콜백 전달
@@ -294,6 +311,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                 filters=request.filters,
                 secure_mode=request.security_mode,
                 is_disconnected=check_disconnected,
+                on_complete=capture_token_usage,
             )
 
             # 토큰 스트리밍 — 매 토큰마다 연결 상태 확인
@@ -366,6 +384,24 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                     )
                     + "\n\n"
                 )
+
+                # 토큰 사용량 이벤트 ([DONE] 직전) — 비용 산정용
+                if token_usage_holder:
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            {
+                                "type": "token_usage",
+                                "input_tokens": token_usage_holder.get("input_tokens", 0),
+                                "output_tokens": token_usage_holder.get("output_tokens", 0),
+                                "total_tokens": token_usage_holder.get("total_tokens", 0),
+                                "source": token_usage_holder.get("input_source", "estimated"),
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n\n"
+                    )
+
                 yield "data: [DONE]\n\n"
 
             # 정상 완료/중단 모두 히스토리 저장 (중단도 사용자에게 의미있는 부분 응답)
