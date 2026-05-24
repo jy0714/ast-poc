@@ -129,20 +129,37 @@ export interface CaseInfo {
 }
 
 export const chatApi = {
-  query: (caseId: string, message: string, securityMode: boolean, filters?: Record<string, unknown>) =>
+  query: (
+    caseId: string,
+    message: string,
+    securityMode: boolean,
+    filters?: Record<string, unknown>,
+    signal?: AbortSignal,
+  ) =>
     request<ChatResponse>('/api/analyst/chat/', {
       method: 'POST',
       body: JSON.stringify({ case_id: caseId, message, security_mode: securityMode, filters }),
+      signal,
     }),
 
   cases: () => request<CaseInfo[]>('/api/analyst/chat/cases'),
 
-  /** SSE 스트리밍 - EventSource 대신 fetch 사용 (POST 필요) */
-  stream: async function* (caseId: string, message: string, securityMode: boolean) {
+  /** SSE 스트리밍 - EventSource 대신 fetch 사용 (POST 필요)
+   *
+   * signal로 중단 가능. abort 시 reader.read()가 AbortError를 던지고,
+   * 서버는 연결 끊김(is_disconnected)을 감지해 토큰 생성을 멈춘다.
+   */
+  stream: async function* (
+    caseId: string,
+    message: string,
+    securityMode: boolean,
+    signal?: AbortSignal,
+  ) {
     const res = await fetch(`${BASE}/api/analyst/chat/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ case_id: caseId, message, security_mode: securityMode }),
+      signal,
     });
 
     if (!res.ok || !res.body) throw new Error(`Stream error: ${res.status}`);

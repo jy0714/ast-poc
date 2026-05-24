@@ -261,3 +261,71 @@ class TestStreamAPI:
             "message": "질문",
         })
         assert resp.status_code == 409
+
+    @patch("src.api.routes.chat.RAGEngine")
+    def test_stream_normal_saves_not_stopped(self, mock_engine_cls, client, store):
+        """정상 스트림 완료 → 히스토리에 is_stopped=0 저장"""
+        case_id = _create_ready_case(store)
+
+        async def fake_token_stream():
+            for t in ["답변 ", "내용"]:
+                yield t
+
+        mock_engine = MagicMock()
+        mock_engine.query_stream = AsyncMock(return_value=(fake_token_stream(), []))
+        mock_engine_cls.return_value = mock_engine
+
+        resp = client.post("/api/analyst/chat/stream", json={
+            "case_id": case_id,
+            "message": "질문",
+        })
+        assert resp.status_code == 200
+        assert "답변" in resp.text
+        assert "[DONE]" in resp.text
+
+        # DB에 정상(is_stopped=0)으로 저장됐는지
+        from src.db.models import ChatHistoryModel
+
+        with store._get_session() as session:
+            rows = session.query(ChatHistoryModel).filter(
+                ChatHistoryModel.case_id == case_id
+            ).all()
+            assert len(rows) == 1
+            assert rows[0].is_stopped == 0
+            assert rows[0].answer == "답변 내용"
+
+    @patch("starlette.requests.Request.is_disconnected", new_callable=AsyncMock)
+    @patch("src.api.routes.chat.RAGEngine")
+    def test_stream_disconnect_saves_stopped(
+        self, mock_engine_cls, mock_disconnect, client, store
+    ):
+        """중간에 클라이언트 끊김 → 부분 답변 + is_stopped=1 저장"""
+        case_id = _create_ready_case(store)
+
+        async def fake_token_stream():
+            for t in ["부분 ", "답변 ", "더 많은 내용"]:
+                yield t
+
+        mock_engine = MagicMock()
+        mock_engine.query_stream = AsyncMock(return_value=(fake_token_stream(), []))
+        mock_engine_cls.return_value = mock_engine
+
+        # 첫 토큰은 통과(False), 두 번째 토큰 전 끊김(True)
+        mock_disconnect.side_effect = [False, True, True, True, True]
+
+        resp = client.post("/api/analyst/chat/stream", json={
+            "case_id": case_id,
+            "message": "질문",
+        })
+        assert resp.status_code == 200
+
+        from src.db.models import ChatHistoryModel
+
+        with store._get_session() as session:
+            rows = session.query(ChatHistoryModel).filter(
+                ChatHistoryModel.case_id == case_id
+            ).all()
+            assert len(rows) == 1
+            assert rows[0].is_stopped == 1
+            # 첫 토큰까지만 모임
+            assert rows[0].answer == "부분 "

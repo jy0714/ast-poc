@@ -18,10 +18,19 @@ export default function AnalystPage() {
   const [error, setError] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // 진행 중인 스트리밍 요청의 AbortController. 매 전송마다 새로 생성.
+  const abortRef = useRef<AbortController | null>(null);
 
   // 케이스 목록 로드
   useEffect(() => {
     chatApi.cases().then(setCases).catch(() => {});
+  }, []);
+
+  // 언마운트 시 진행 중인 요청 중단 (메모리/연결 누수 방지)
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
   }, []);
 
   // 스크롤 자동 이동
@@ -42,11 +51,16 @@ export default function AnalystPage() {
     setMessages(prev => [...prev, { role: 'assistant', content: '', loading: true }]);
     setIsStreaming(true);
 
-    try {
-      let fullContent = '';
-      let sources: ChatSource[] = [];
+    // 이전 controller가 남아있으면 정리하고 항상 새로 생성 (연속 빠른 중단 대응)
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
 
-      for await (const event of chatApi.stream(selectedCase, text, secureMode)) {
+    let fullContent = '';
+    let sources: ChatSource[] = [];
+
+    try {
+      for await (const event of chatApi.stream(selectedCase, text, secureMode, controller.signal)) {
         if (event.type === 'token') {
           fullContent += event.content;
           setMessages(prev => {
@@ -61,35 +75,83 @@ export default function AnalystPage() {
         }
       }
 
-      // 스트리밍 완료
+      // 스트리밍 정상 완료
       setMessages(prev => {
         const updated = [...prev];
-        updated[assistantIdx] = { role: 'assistant', content: fullContent || '응답을 생성하지 못했습니다.', sources, loading: false };
+        updated[assistantIdx] = {
+          role: 'assistant',
+          content: fullContent || '응답을 생성하지 못했습니다.',
+          sources,
+          loading: false,
+        };
         return updated;
       });
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setError(msg);
-      // 동기 방식 fallback
-      try {
-        const result = await chatApi.query(selectedCase, text, secureMode);
+      // 의도적 중단(AbortError)과 네트워크/서버 에러를 구분
+      const aborted = e instanceof DOMException && e.name === 'AbortError';
+      if (aborted) {
+        // 현재까지 모은 내용 유지 + 중단 표시. fallback 호출 안 함.
         setMessages(prev => {
           const updated = [...prev];
-          updated[assistantIdx] = { role: 'assistant', content: result.answer, sources: result.sources, loading: false };
+          const stoppedContent = fullContent
+            ? `${fullContent}\n\n[응답이 중단되었습니다]`
+            : '[응답이 중단되었습니다]';
+          updated[assistantIdx] = {
+            role: 'assistant',
+            content: stoppedContent,
+            sources,
+            loading: false,
+          };
           return updated;
         });
-        setError('');
-      } catch (e2: unknown) {
-        setMessages(prev => {
-          const updated = [...prev];
-          updated[assistantIdx] = { role: 'assistant', content: `오류: ${e2 instanceof Error ? e2.message : String(e2)}`, loading: false };
-          return updated;
-        });
+      } else {
+        // 네트워크/스트리밍 실패 → 동기 방식 fallback (같은 signal 전달)
+        const msg = e instanceof Error ? e.message : String(e);
+        setError(msg);
+        try {
+          const result = await chatApi.query(
+            selectedCase, text, secureMode, undefined, controller.signal,
+          );
+          setMessages(prev => {
+            const updated = [...prev];
+            updated[assistantIdx] = {
+              role: 'assistant',
+              content: result.answer,
+              sources: result.sources,
+              loading: false,
+            };
+            return updated;
+          });
+          setError('');
+        } catch (e2: unknown) {
+          // fallback도 중단됐으면 중단 표시, 아니면 오류
+          const fallbackAborted = e2 instanceof DOMException && e2.name === 'AbortError';
+          setMessages(prev => {
+            const updated = [...prev];
+            updated[assistantIdx] = {
+              role: 'assistant',
+              content: fallbackAborted
+                ? '[응답이 중단되었습니다]'
+                : `오류: ${e2 instanceof Error ? e2.message : String(e2)}`,
+              loading: false,
+            };
+            return updated;
+          });
+          if (fallbackAborted) setError('');
+        }
       }
     } finally {
+      // 이 요청의 controller가 아직 현재 것이면 정리
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+      }
       setIsStreaming(false);
       inputRef.current?.focus();
     }
+  };
+
+  const handleStop = () => {
+    abortRef.current?.abort();
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -206,13 +268,22 @@ export default function AnalystPage() {
             onKeyDown={handleKeyDown}
             disabled={!selectedCase || isStreaming}
           />
-          <button
-            className="bg-blue-600 text-white px-5 py-2.5 rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-            onClick={handleSend}
-            disabled={!selectedCase || !input.trim() || isStreaming}
-          >
-            {isStreaming ? '생성중...' : '전송'}
-          </button>
+          {isStreaming ? (
+            <button
+              className="bg-red-500 text-white px-5 py-2.5 rounded-lg text-sm font-medium hover:bg-red-600"
+              onClick={handleStop}
+            >
+              답변 멈추기
+            </button>
+          ) : (
+            <button
+              className="bg-blue-600 text-white px-5 py-2.5 rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              onClick={handleSend}
+              disabled={!selectedCase || !input.trim()}
+            >
+              전송
+            </button>
+          )}
         </div>
       </div>
     </div>

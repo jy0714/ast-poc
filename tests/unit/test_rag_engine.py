@@ -133,6 +133,80 @@ class TestQuery:
         assert kwargs["filters"] == {"source_type": "email"}
 
 
+# === 스트리밍 중단 (query_stream is_disconnected) ===
+
+
+async def _collect_stream(agen) -> list[str]:
+    """async generator의 모든 토큰을 리스트로 수집"""
+    out = []
+    async for t in agen:
+        out.append(t)
+    return out
+
+
+class TestQueryStreamDisconnect:
+    def _stream_engine(self, mock_vector_store):
+        """generate_stream이 async generator를 반환하는 엔진"""
+        router = MagicMock()
+
+        async def fake_stream(**kwargs):
+            for tok in ["토큰1 ", "토큰2 ", "토큰3"]:
+                yield tok
+
+        router.generate_stream = fake_stream
+        return RAGEngine(
+            case_id="test_case",
+            vector_store=mock_vector_store,
+            llm_router=router,
+        )
+
+    @pytest.mark.asyncio
+    async def test_normal_stream_without_callback(self, mock_vector_store):
+        """is_disconnected 미전달 시 기존 동작 — 토큰 정상 생성"""
+        engine = self._stream_engine(mock_vector_store)
+        token_stream, sources = await engine.query_stream("질문")
+        tokens = await _collect_stream(token_stream)
+        assert "".join(tokens) == "토큰1 토큰2 토큰3"
+        assert len(sources) == 3
+
+    @pytest.mark.asyncio
+    async def test_disconnect_before_search(self, mock_vector_store):
+        """검색 전에 이미 끊김 → 빈 스트림 + 빈 sources, LLM 호출 안 함"""
+        engine = self._stream_engine(mock_vector_store)
+
+        async def always_disconnected() -> bool:
+            return True
+
+        token_stream, sources = await engine.query_stream(
+            "질문", is_disconnected=always_disconnected
+        )
+        tokens = await _collect_stream(token_stream)
+        assert tokens == []
+        assert sources == []
+        # 검색조차 호출 안 됨
+        mock_vector_store.search.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_disconnect_after_search_before_llm(self, mock_vector_store):
+        """검색 후 LLM 직전 끊김 → 빈 스트림 + sources는 반환"""
+        engine = self._stream_engine(mock_vector_store)
+
+        calls = {"n": 0}
+
+        async def disconnect_second_call() -> bool:
+            # 첫 체크(검색 전)는 False, 두 번째(LLM 전)는 True
+            calls["n"] += 1
+            return calls["n"] >= 2
+
+        token_stream, sources = await engine.query_stream(
+            "질문", is_disconnected=disconnect_second_call
+        )
+        tokens = await _collect_stream(token_stream)
+        assert tokens == []  # LLM 스트림 시작 안 함
+        assert len(sources) == 3  # 검색은 완료됐으므로 sources 있음
+        mock_vector_store.search.assert_called_once()
+
+
 # === 컨텍스트 포맷 테스트 ===
 
 

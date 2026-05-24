@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -94,6 +94,7 @@ class ChatHistoryItem(BaseModel):
     security_mode: bool
     created_at: str
     sources_count: int
+    is_stopped: bool = False
 
 
 # === 채팅 히스토리 저장 ===
@@ -106,8 +107,13 @@ def _save_chat_history(
     security_mode: bool,
     filters: dict | None,
     sources: list[SourceReference],
+    is_stopped: bool = False,
 ) -> None:
-    """채팅 히스토리를 DB에 저장"""
+    """채팅 히스토리를 DB에 저장
+
+    Args:
+        is_stopped: 사용자가 중단한 응답이면 True (지금까지 모은 answer를 그대로 저장).
+    """
     try:
         from src.db.database import get_session
         from src.db.models import ChatHistoryModel, ChatSourceModel
@@ -118,6 +124,7 @@ def _save_chat_history(
             answer=answer,
             security_mode=1 if security_mode else 0,
             filters=json.dumps(filters or {}, ensure_ascii=False),
+            is_stopped=1 if is_stopped else 0,
         )
 
         with get_session() as session:
@@ -237,8 +244,13 @@ async def chat(request: ChatRequest):
 
 
 @router.post("/stream")
-async def chat_stream(request: ChatRequest):
-    """RAG 기반 스트리밍 채팅 질의 (SSE)"""
+async def chat_stream(request: ChatRequest, raw_request: Request):
+    """RAG 기반 스트리밍 채팅 질의 (SSE)
+
+    클라이언트가 연결을 끊으면(AbortController.abort 또는 네트워크 단절)
+    raw_request.is_disconnected()가 True가 되어 토큰 생성을 멈추고 리소스를 해제한다.
+    중단 시점까지 모은 답변은 is_stopped=True로 히스토리에 저장된다.
+    """
     store = get_case_store()
 
     try:
@@ -263,49 +275,63 @@ async def chat_stream(request: ChatRequest):
     async def event_generator():
         collected_answer = ""
         collected_sources: list[SourceReference] = []
+        stopped = False
+
+        async def check_disconnected() -> bool:
+            return await raw_request.is_disconnected()
 
         try:
+            # 검색/reranker 단계의 조기 중단을 위해 engine에 콜백 전달
             token_stream, sources = await engine.query_stream(
                 question=request.message.strip(),
                 filters=request.filters,
                 secure_mode=request.security_mode,
+                is_disconnected=check_disconnected,
             )
 
-            # 토큰 스트리밍
+            # 토큰 스트리밍 — 매 토큰마다 연결 상태 확인
             async for token in token_stream:
+                if await raw_request.is_disconnected():
+                    stopped = True
+                    logger.info(
+                        f"스트리밍 중단 감지 (client disconnect): case={request.case_id}, "
+                        f"지금까지 {len(collected_answer)}자"
+                    )
+                    break
                 collected_answer += token
                 yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
 
-            # 출처 정보 전송
-            sources_data = []
-            for s in sources:
-                src_ref = SourceReference(
-                    content=s.content[:500],
-                    source_type=s.source_type,
-                    filename=s.filename,
-                    date=s.date,
-                    participants=s.participants[:10],
-                    subject=s.subject,
-                    relevance_score=round(s.score, 4),
-                    search_method=s.search_method,
-                    sender=s.sender,
-                    recipients=s.recipients[:10],
-                    cc=s.cc[:10],
-                    attachments=s.attachments[:10],
-                    message_id=s.message_id,
-                    in_reply_to=s.in_reply_to,
-                    author=s.author,
-                    last_modified_by=s.last_modified_by,
-                    created_date=s.created_date,
-                    last_modified=s.last_modified,
-                )
-                collected_sources.append(src_ref)
-                sources_data.append(src_ref.model_dump())
+            if not stopped:
+                # 출처 정보 전송 (정상 완료 시에만)
+                sources_data = []
+                for s in sources:
+                    src_ref = SourceReference(
+                        content=s.content[:500],
+                        source_type=s.source_type,
+                        filename=s.filename,
+                        date=s.date,
+                        participants=s.participants[:10],
+                        subject=s.subject,
+                        relevance_score=round(s.score, 4),
+                        search_method=s.search_method,
+                        sender=s.sender,
+                        recipients=s.recipients[:10],
+                        cc=s.cc[:10],
+                        attachments=s.attachments[:10],
+                        message_id=s.message_id,
+                        in_reply_to=s.in_reply_to,
+                        author=s.author,
+                        last_modified_by=s.last_modified_by,
+                        created_date=s.created_date,
+                        last_modified=s.last_modified,
+                    )
+                    collected_sources.append(src_ref)
+                    sources_data.append(src_ref.model_dump())
 
-            yield f"data: {json.dumps({'type': 'sources', 'sources': sources_data}, ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
+                yield f"data: {json.dumps({'type': 'sources', 'sources': sources_data}, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
 
-            # 스트리밍 완료 후 채팅 히스토리 저장
+            # 정상 완료/중단 모두 히스토리 저장 (중단도 사용자에게 의미있는 부분 응답)
             _save_chat_history(
                 case_id=request.case_id,
                 question=request.message.strip(),
@@ -313,6 +339,7 @@ async def chat_stream(request: ChatRequest):
                 security_mode=request.security_mode,
                 filters=request.filters,
                 sources=collected_sources,
+                is_stopped=stopped,
             )
 
         except Exception as e:
@@ -381,6 +408,7 @@ async def get_chat_history(case_id: str, limit: int = 50):
                     security_mode=bool(r.security_mode),
                     created_at=r.created_at.isoformat(),
                     sources_count=len(r.sources),
+                    is_stopped=bool(getattr(r, "is_stopped", 0)),
                 )
                 for r in rows
             ]

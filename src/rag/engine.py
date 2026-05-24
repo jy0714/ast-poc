@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from src.llm.router import LLMRouter
 from src.rag.query_parser import ParsedQuery, parse_query
@@ -250,24 +250,45 @@ class RAGEngine:
         filters: dict[str, Any] | None = None,
         secure_mode: bool | None = None,
         n_results: int | None = None,
+        is_disconnected: Callable[[], Awaitable[bool]] | None = None,
     ) -> tuple[AsyncIterator[str], list[SourceReference]]:
         """스트리밍 RAG 질의: 검색 → LLM 스트리밍 응답
 
+        Args:
+            is_disconnected: 클라이언트 연결 끊김 여부를 반환하는 async 콜백 (선택).
+                검색 시작 전과 LLM 스트림 시작 직전(=reranker 완료 후)에 체크하여,
+                이미 끊겼으면 LLM을 호출하지 않고 빈 스트림을 반환한다. None이면 기존 동작.
+
         Returns:
-            (토큰 스트림, 출처 리스트) 튜플
+            (토큰 스트림, 출처 리스트) 튜플. 중단 시 빈 토큰 스트림.
         """
         is_secure = secure_mode if secure_mode is not None else settings.is_secure_mode
+
+        async def _empty_stream() -> AsyncIterator[str]:
+            return
+            yield  # noqa — async generator로 만들기 위한 unreachable yield
+
+        # 검색 시작 전 체크 — 사용자가 전송 직후 바로 멈춘 경우
+        if is_disconnected is not None and await is_disconnected():
+            logger.info(f"query_stream 중단 (검색 전): case={self.case_id}")
+            return _empty_stream(), []
 
         # 0. 질의 파싱
         parsed = parse_query(question)
         search_query = parsed.cleaned
         merged_filters = _merge_filters(parsed.filters, filters)
 
-        # 1. 하이브리드 검색
+        # 1. 하이브리드 검색 (+ reranker가 활성화면 search 내부에서 수행)
         sources = self.search(query=search_query, filters=merged_filters, n_results=n_results)
 
         # 검색 결과 (LLM에 전달되는 context) 로깅
         self._log_sources(question, sources, parsed.intent)
+
+        # LLM 스트림 시작 직전 체크 — 검색/reranker가 느려 그 사이 사용자가 멈춘 경우.
+        # 비싼 LLM 호출 전에 끊어 GPU 자원을 아낀다.
+        if is_disconnected is not None and await is_disconnected():
+            logger.info(f"query_stream 중단 (LLM 전): case={self.case_id}")
+            return _empty_stream(), sources
 
         # 2. 컨텍스트 조합
         context_texts = [self._format_source_context(s) for s in sources]

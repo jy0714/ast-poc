@@ -81,6 +81,8 @@ class ChatHistoryModel(Base):
     security_mode: Mapped[int] = mapped_column(Integer, default=1)  # 1=on, 0=off
     filters: Mapped[str] = mapped_column(Text, default="{}")  # JSON 직렬화
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    # 사용자가 "답변 멈추기"로 중단한 응답이면 1. 기존 DB는 init_db 마이그레이션이 추가.
+    is_stopped: Mapped[int] = mapped_column(Integer, default=0)
 
     # Relationships
     case: Mapped[CaseModel] = relationship(back_populates="chat_histories")

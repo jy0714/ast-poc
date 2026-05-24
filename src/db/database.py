@@ -124,6 +124,7 @@ def _apply_lightweight_migrations(engine: Engine) -> None:
         ("chat_sources", "last_modified_by", "VARCHAR(500) DEFAULT ''"),
         ("chat_sources", "created_date", "VARCHAR(50) DEFAULT ''"),
         ("chat_sources", "last_modified", "VARCHAR(50) DEFAULT ''"),
+        ("chat_history", "is_stopped", "INTEGER DEFAULT 0"),
     ]
 
     inspector = inspect(engine)
