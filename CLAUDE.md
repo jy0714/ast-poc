@@ -3,8 +3,8 @@
 ## 프로젝트 개요
 
 **AST (Audit Support Tool) PoC**
-내부 이메일(PST), Teams 채팅(PST), 문서(PDF/DOCX/PPTX/XLSX)를 통합 검색하는 로컬 RAG 시스템.
-1TB PoC 규모 · 테스트: NVIDIA RTX 3060 12GB · 운영: NVIDIA A5000 24GB · 케이스 기반 운영
+내부 이메일(PST), Teams 채팅(PST), 문서(PDF/DOCX/PPTX/XLSX/EML/MSG)를 통합 검색하는 로컬 RAG 시스템.
+1TB PoC 규모 · 개발: NVIDIA RTX 3060 12GB · 운영: NVIDIA A5000 24GB · 케이스 기반 운영
 
 ## 아키텍처 v5 요약
 
@@ -15,9 +15,12 @@
                   └── 추가 자료 유입 ──┘
 ```
 
-### GPU 자원 분배 (테스트: 3060 12GB / 운영: A5000 24GB — 순차 전용)
-- Phase A: 임베딩 모델이 VRAM 24GB 전체 사용 (LLM 언로드)
-- Phase B: LLM이 VRAM 24GB 전체 사용 (임베딩 언로드)
+상태 머신 (`src/cases/case_store.py` `_VALID_TRANSITIONS`):
+`CREATED → INDEXING → READY → ARCHIVED`, 각 상태에서 `ERROR` 전이 가능, `ARCHIVED → CREATED` 복구 가능.
+
+### GPU 자원 분배 (개발 3060 12GB / 운영 A5000 24GB — 순차 전용)
+- Phase A: 임베딩 모델이 VRAM 전체 사용 (LLM 언로드)
+- Phase B: LLM이 VRAM 전체 사용 (임베딩 언로드)
 - 동시 사용 없음 — 각 Phase에서 GPU 100% 활용
 
 ### 데이터 파이프라인 (Phase A)
@@ -27,9 +30,9 @@ PST 파일 / 내부 문서
   → 자동 분류 (이메일 본문 / Teams 대화 / 첨부파일)
   → 스마트 청킹 (문서: 문자수, 채팅: 시간윈도우, 이메일: 스레드, 첨부: 타입별)
   → 메타데이터 부착 (participants, date_range, source_type, topics, case_id, file_name)
-  → 로컬 임베딩 (Ollama nomic-embed-text, A5000 전용)
-  → 하이브리드 저장소 (ChromaDB 벡터 + BM25 키워드 인덱스)
-  → 케이스별 독립 컬렉션 생성
+  → 로컬 임베딩 (Ollama bge-m3, 1024-dim, 4096 토큰; 배치 실패 시 binary subdivide + retry 큐)
+  → 단일 공유 ChromaDB 컬렉션 + BM25 키워드 인덱스 (케이스별 pickle)
+  → case_id 메타필터로 케이스 격리
 ```
 
 ### RAG 질의 (Phase B)
@@ -37,19 +40,20 @@ PST 파일 / 내부 문서
 사용자 질의
   → 질의 파서 (의도 분석 + 필터 추출)
   → 하이브리드 검색 (벡터 유사도 + BM25 키워드 매칭)
-  → Rank Fusion (결과 통합)
-  → LLM 응답 생성 (보안 ON: Ollama gpt-oss:20b / OFF: 외부 API)
+  → RRF (Reciprocal Rank Fusion)
+  → 선택적 Reranker (BAAI/bge-reranker-v2-m3)
+  → LLM 응답 생성 (보안 ON: Ollama gemma4:e4b/gpt-oss:20b / OFF: 외부 API)
   → 스트리밍 응답 + 출처 표시
 ```
 
 ### 보안 모드
 - **ON**: 임베딩 + 벡터DB + LLM 전체 로컬. 데이터 외부 전송 차단
-- **OFF**: 임베딩/벡터DB는 로컬 유지. LLM만 외부 API로 라우팅 (ChatGPT 5.4 / Gemini / Opus 4.6 등 미정). 검색된 청크만 외부 전송
+- **OFF**: 임베딩/벡터DB는 로컬 유지. LLM만 외부 API로 라우팅 (OpenAI 등). 검색된 청크만 외부 전송
 
 ## 영구 저장소 구조
 
 ### SQLite (`data/ast.db`)
-- ORM: SQLAlchemy (향후 PostgreSQL 전환 대비)
+- ORM: SQLAlchemy (sync + async via aiosqlite, 향후 PostgreSQL 전환 대비)
 - 테이블:
   - `cases` — 케이스 메타데이터 (이름, 상태, 생성일, 데이터소스 경로 등)
   - `indexing_logs` — 인덱싱 실행 이력 (시작/종료 시간, 처리 건수, 에러)
@@ -58,17 +62,34 @@ PST 파일 / 내부 문서
 
 ### ChromaDB (`data/vectordb/`)
 - `persist_directory`로 디스크 영구 저장
-- 케이스별 독립 컬렉션 (`case_{id}`)
-- 벡터 유사도 검색용
+- **단일 공유 컬렉션** (`ast_chunks`) + `case_id` 메타필터로 케이스 격리
+- 벡터 유사도 검색용 (1024-dim bge-m3)
+- **무결성 자동 체크**: `VectorStoreService._get_client()`가 PersistentClient 생성 직전에 HNSW 세그먼트 디렉토리를 스캔. `data_level0.bin / header.bin / length.bin / link_lists.bin` 중 0바이트나 누락 파일 발견 시 (강제 종료 후 흔한 패턴) → `CHROMA_AUTO_QUARANTINE=1`(기본)이면 persist_dir 전체를 `vectordb.quarantine_<ts>`로 이동하고 빈 디렉토리 재생성. `=0`이면 `ChromaIntegrityError` raise. 격리 후 BM25 인덱스와 SQLite 케이스 상태도 stale이므로 케이스 재생성 또는 status 리셋 필요.
 
-### BM25 (`data/bm25/`)
+### BM25 (`data/bm25_index/`)
 - pickle 직렬화로 키워드 인덱스 저장
-- 케이스별 독립 인덱스 파일
-- 하이브리드 검색의 키워드 매칭 담당
+- 케이스별 독립 인덱스 파일 (`{case_id}.pkl`)
+- 하이브리드 검색의 키워드 매칭 담당 (kiwipiepy 한국어 형태소 토크나이저)
 
 ### Processed (`data/processed/`)
 - 파싱/청킹 결과 JSONL 캐시
 - 증분 인덱싱 시 재파싱 방지 (파일 해시 기반 중복 체크)
+
+### Failed embeddings (`data/failed_embeddings/`)
+- 케이스별 JSONL (`{case_id}.jsonl`)에 영구 임베딩 실패 청크 보존
+- `vector_store._save_failed_chunks()`가 binary subdivide 후에도 실패한 청크를 append
+- BM25 corpus에는 성공한 청크만 들어가 벡터 DB와 키워드 인덱스 간 일관성 유지
+- 운영 시 별도 스크립트로 재처리하여 데이터 손실 방지 (현재 재처리 스크립트는 미구현)
+
+### Error logs (`error_logs/`)
+- `src/utils/logger.py`가 component별 RotatingFileHandler를 자동 부착
+- WARNING 이상(INFO 초과)만 기록 — 일상 로그는 콘솔에만 남고 파일은 분석용 시그널만 유지
+- component는 모듈 경로의 두 번째 세그먼트:
+  - `embeddings.log` — Ollama 임베딩 timeout/실패
+  - `llm.log` — LLM 응답 생성/스트리밍 실패
+  - `vectorstore.log` — ChromaDB 저장/실패 청크 JSONL 저장 실패
+  - `indexing.log` — 파이프라인 실패, 파일 처리 실패, 배치 저장 실패
+- RotatingFileHandler 100MB × 5 회전 — 사후 분석용으로만 사용하고 인덱싱 중에는 콘솔로 모니터링
 
 ## 프론트엔드 구조
 
@@ -84,6 +105,7 @@ PST 파일 / 내부 문서
 - **검색 결과**: 출처 문서/이메일/채팅 참조 표시
 - **필터**: 날짜 범위, 참여자, 소스 타입 등 수동 필터
 - **케이스 선택**: 분석할 케이스 선택 (인덱싱 완료된 케이스만)
+- **대시보드**: 커뮤니케이션 분석 (참여자/토픽/타임라인)
 
 ## 핵심 규칙
 
@@ -103,40 +125,39 @@ PST 파일 / 내부 문서
 ast-poc/
 ├── src/                        # 백엔드 소스
 │   ├── api/                    # FastAPI 엔드포인트
+│   │   ├── main.py
 │   │   └── routes/
 │   │       ├── health.py       # 헬스체크
 │   │       ├── cases.py        # 케이스 CRUD (Admin)
 │   │       ├── indexing.py     # 인덱싱 관리 (Admin)
+│   │       ├── documents.py    # 문서 업로드 (Admin)
+│   │       ├── settings.py     # 설정/모델 (Admin)
 │   │       ├── chat.py         # RAG 질의 (Analyst)
-│   │       ├── documents.py    # 문서 업로드
-│   │       └── settings.py     # 보안 모드 등 설정
+│   │       └── dashboard.py    # 커뮤니케이션 분석 (Analyst)
 │   ├── parsers/                # PST, PDF, DOCX 등 파서
-│   ├── chunkers/               # 텍스트 청킹 (문서/채팅/이메일/첨부)
-│   ├── embeddings/             # Ollama 임베딩
+│   ├── chunkers/               # 텍스트 청킹 + 메타데이터 보강
+│   ├── embeddings/             # Ollama 임베딩 클라이언트
 │   ├── vectorstore/            # ChromaDB + BM25 하이브리드 저장소
-│   ├── rag/                    # RAG 엔진, 질의 파서, Rank Fusion
+│   ├── rag/                    # 질의 파서, 검색, RAG 엔진, Reranker
 │   ├── llm/                    # LLM 라우터 (로컬/외부 분기)
-│   └── utils/                  # 설정, 로깅, 공통 유틸
-├── frontend/
+│   ├── cases/                  # 케이스 메타데이터 + 라이프사이클
+│   ├── indexing/               # 인덱싱 파이프라인 오케스트레이터
+│   ├── db/                     # SQLAlchemy 엔진/세션 (sync + async)
+│   └── utils/                  # 설정, 로깅
+├── frontend/                   # React + TypeScript + Vite
 │   └── src/
 │       ├── components/
-│       │   ├── admin/          # Admin UI 컴포넌트
-│       │   │   ├── CaseManager/
-│       │   │   ├── DataSourceConfig/
-│       │   │   ├── IndexingMonitor/
-│       │   │   └── SystemSettings/
-│       │   ├── analyst/        # Analyst UI 컴포넌트
-│       │   │   ├── ChatInterface/
-│       │   │   ├── SecurityToggle/
-│       │   │   ├── SearchResults/
-│       │   │   └── CaseSelector/
+│       │   ├── admin/          # CaseManager / DataSourceConfig / IndexingMonitor / SystemSettings
+│       │   ├── analyst/        # ChatInterface / SecurityToggle / SearchResults / CaseSelector / Dashboard
 │       │   └── shared/         # 공통 컴포넌트
 │       ├── hooks/
 │       ├── styles/
 │       └── utils/
 ├── tests/
-├── docs/
-├── scripts/
+│   ├── unit/                   # 유닛 테스트 (~340)
+│   └── integration/            # E2E 통합 테스트 (~14)
+├── docs/                       # 아키텍처/가이드/개선 항목
+├── scripts/                    # docker-init.sh, run_indexing.py, run_benchmark.py
 ├── docker/
 │   ├── Dockerfile.backend      # Python 3.11 + uvicorn
 │   ├── Dockerfile.frontend     # Node build → nginx 서빙
@@ -144,21 +165,29 @@ ast-poc/
 ├── docker-compose.yml          # backend + frontend + chromadb + ollama
 ├── .dockerignore
 └── data/                       # gitignore됨
-    ├── ast.db                  # SQLite (케이스/인덱싱로그/채팅이력)
-    ├── input/{pst,documents}/
+    ├── ast.db                  # SQLite (cases, indexing_logs, chat_history, chat_sources)
+    ├── input/{pst,documents}/  # 원본 데이터
     ├── processed/              # 파싱/청킹 JSONL 캐시
-    ├── bm25/                   # BM25 키워드 인덱스 (pickle)
+    ├── bm25_index/             # BM25 케이스별 pickle
+    ├── failed_embeddings/      # 임베딩 영구 실패 청크 (case_id별 JSONL, 재처리용)
     └── vectordb/               # ChromaDB 영구 저장
+└── error_logs/                 # WARNING+ 로그 (component별 .log, gitignore됨)
+    ├── embeddings.log
+    ├── llm.log
+    ├── vectorstore.log
+    └── indexing.log
 ```
 
 ### 주요 의존성
-- **백엔드**: Python 3.11+, FastAPI, LangChain, ChromaDB, Ollama, SQLAlchemy + SQLite
-- **프론트엔드**: React + TypeScript
-- **검색**: ChromaDB (벡터) + BM25 (키워드) + Rank Fusion
-- **LLM 로컬**: Ollama gpt-oss:20b
-- **LLM 외부**: ChatGPT 5.4 / Gemini / Opus 4.6 등 (미정)
-- **임베딩**: Ollama nomic-embed-text
-- **PST 파싱**: libpff / pypff / libratom
+- **백엔드**: Python 3.11+, FastAPI, ChromaDB, Ollama (langchain-ollama), SQLAlchemy + SQLite (aiosqlite)
+- **프론트엔드**: React + TypeScript + Vite
+- **검색**: ChromaDB (벡터) + rank-bm25 + kiwipiepy (한국어 형태소) + RRF
+- **Reranker**: BAAI/bge-reranker-v2-m3 (FlagEmbedding) — 선택적
+- **LLM 로컬**: 개발 `gemma4:e4b`, 운영 `gpt-oss:20b` (Ollama)
+- **LLM 외부**: OpenAI (langchain-openai)
+- **임베딩**: Ollama `bge-m3` (1024-dim, 4096 토큰; 배치 실패 시 binary subdivide + retry 큐)
+- **PST 파싱**: libpff / pypff (옵션)
+- **문서 파싱**: PyMuPDF, python-docx, python-pptx, openpyxl, extract-msg
 
 ## 자주 쓰는 명령어
 
@@ -175,6 +204,9 @@ ruff format src/
 
 # 테스트
 pytest tests/ -v
+
+# 인덱싱 CLI (API 대신 직접 실행)
+python -m scripts.run_indexing <case_id>
 
 # Docker (전체 스택)
 docker compose up --build
@@ -198,33 +230,45 @@ docker compose logs -f backend  # 로그 확인
 4. ~~문서 파서 구현 (PDF, DOCX, PPTX, XLSX, EML, MSG)~~ ✅
 5. ~~스마트 청킹 엔진 (문서/채팅/이메일스레드/첨부)~~ ✅
 6. ~~메타데이터 부착 + 토픽 태깅~~ ✅
-7. ~~Ollama 임베딩 연동~~ ✅
-8. ~~ChromaDB 벡터 저장 + BM25 인덱스~~ ✅
+7. ~~Ollama 임베딩 연동 (bge-m3)~~ ✅
+8. ~~ChromaDB 단일 공유 컬렉션 + BM25 인덱스~~ ✅
 9. ~~케이스 관리 API (CRUD + 라이프사이클)~~ ✅
 10. ~~인덱싱 파이프라인 오케스트레이터~~ ✅
 
 ### Phase 3 — RAG 질의 (Phase B) ✅
 11. ~~질의 파서 (의도 분석 + 필터 추출)~~ ✅ — 규칙 기반, 향후 LLM 기반으로 튜닝 예정
-12. ~~하이브리드 검색 (벡터 + BM25 + Rank Fusion)~~ ✅
-13. ~~LLM 라우터 (보안 모드 분기)~~ ✅
-14. ~~스트리밍 응답 + 출처 표시~~ ✅
+12. ~~하이브리드 검색 (벡터 + BM25 + RRF)~~ ✅
+13. ~~Reranker (BAAI/bge-reranker-v2-m3, 선택적)~~ ✅
+14. ~~LLM 라우터 (보안 모드 분기)~~ ✅
+15. ~~스트리밍 응답 + 출처 표시~~ ✅
 
 ### Phase 4 — 프론트엔드 ✅
-15. ~~Admin UI (케이스 관리, 데이터 소스 설정, 인덱싱 모니터)~~ ✅
-16. ~~Analyst UI (채팅 인터페이스, 보안 토글, 검색 결과)~~ ✅
+16. ~~Admin UI (케이스 관리, 데이터 소스 설정, 인덱싱 모니터, 시스템 설정)~~ ✅
+17. ~~Analyst UI (채팅 인터페이스, 보안 토글, 검색 결과, 대시보드)~~ ✅
 
 ### Phase 5 — 통합 & 배포 ✅
-17. ~~Docker 컨테이너화~~ ✅
-18. ~~통합 테스트~~ ✅
-19. 성능 튜닝 (1TB 데이터 기준) — PoC 이후 실데이터 투입 시 진행
+18. ~~Docker 컨테이너화~~ ✅
+19. ~~통합 테스트~~ ✅
+20. 성능 튜닝 (1TB 데이터 기준) — PoC 이후 실데이터 투입 시 진행
 
-## 현재 상태 (2026-03-24 기준)
+## 현재 상태 (2026-04-19 기준)
 
-- **최신 커밋**: `e588717` (main) — Phase 4 프론트엔드 + E2E 통합 테스트
-- **테스트**: 291 passed (단위 277 + 통합 14), 0 skipped
-- **환경**: Python 3.14.2, Windows 11, VS 2026 Community (C++ 빌드 도구 설치됨)
+- **최신 커밋**: `8c43691` (main) — Prevent embedding timeout cascade with binary subdivide and retry queue
+- **테스트**: ~356 (unit ~342 + integration ~14)
+- **환경**: Python 3.11+, Windows 11, VS 2026 Community (C++ 빌드 도구 설치됨)
 - **chroma-hnswlib**: 0.7.6 (C++ 빌드 완료 — 한글 Windows에서 DISTUTILS_USE_SDK=1 필요)
 - **Phase 5 Docker**: 완료 (backend + frontend/nginx + ChromaDB + Ollama GPU)
+
+### 인덱싱 안정화 (2026-04-19)
+
+기존: `EMBED_BATCH_SIZE=64` × `_MAX_CHARS_PER_TEXT=6000` 조합으로 bge-m3 4096 토큰 컨텍스트를 초과 → Ollama가 600s × 3 retry 동안 막혀 GPU consumer 스레드 정지 → producer 큐 정지 → CPU 워커 정지 (30분간 58 파일만 처리되는 증상).
+
+해결:
+- `_REQUEST_TIMEOUT`: 600s → 60s (빨리 실패하고 작은 배치로 재시도)
+- `_MAX_CHARS_PER_TEXT`: 6000 → 2500 (4096 토큰 안전 마진)
+- 배치 실패 시 binary subdivide로 절반씩 재시도 → 거대 텍스트 1개만 고립
+- 영구 실패 청크는 `data/failed_embeddings/{case_id}.jsonl`로 보존 (데이터 손실 방지)
+- BM25 corpus에는 성공한 청크만 추가 → 벡터 DB와 키워드 인덱스 일관성
 
 ### 환경 이슈 (chroma-hnswlib 빌드)
 
@@ -254,15 +298,17 @@ subprocess.run(['pip', 'install', 'chroma-hnswlib', '--no-build-isolation'], env
 | PST 파서 | `src/parsers/pst_parser.py` | PST 이메일/채팅/첨부 파싱 |
 | 청킹 | `src/chunkers/chunker.py` | 문서/채팅/이메일/첨부 4종 청커 |
 | 메타데이터 | `src/chunkers/metadata_enricher.py` | 토픽 추출 + case_id 부착 |
-| 임베딩 | `src/embeddings/embedding_service.py` | Ollama nomic-embed-text |
-| 벡터 저장소 | `src/vectorstore/vector_store.py` | ChromaDB + BM25 + RRF 하이브리드 |
-| 케이스 관리 | `src/cases/case_store.py` | JSON 파일 기반 CRUD + 라이프사이클 |
-| 인덱싱 | `src/indexing/pipeline.py` | 파이프라인 오케스트레이터 (백그라운드 실행) |
+| 임베딩 | `src/embeddings/embedding_service.py` | Ollama bge-m3 (1024-dim) + binary subdivide 재시도 |
+| 벡터 저장소 | `src/vectorstore/vector_store.py` | ChromaDB 단일 공유 컬렉션 + BM25 + RRF + 실패 청크 retry 큐 |
+| 케이스 관리 | `src/cases/case_store.py` | SQLAlchemy CRUD + 라이프사이클 상태 머신 |
+| DB 엔진 | `src/db/database.py`, `db/models.py` | SQLAlchemy sync + async (aiosqlite) |
+| 인덱싱 | `src/indexing/pipeline.py` | 파이프라인 오케스트레이터 (백그라운드 + Producer-Consumer) |
 | 질의 파서 | `src/rag/query_parser.py` | 규칙 기반 (소스타입/날짜/참여자/의도) |
 | RAG 엔진 | `src/rag/engine.py` | 검색→컨텍스트→LLM 응답 생성 |
+| Reranker | `src/rag/reranker.py` | BAAI/bge-reranker-v2-m3 (FlagEmbedding) |
 | LLM 라우터 | `src/llm/router.py` | 보안 ON=Ollama, OFF=OpenAI |
-| Admin API | `src/api/routes/cases.py`, `indexing.py` | 케이스 CRUD + 인덱싱 관리 |
-| Analyst API | `src/api/routes/chat.py` | RAG 질의 (동기+스트리밍+케이스목록) |
+| Admin API | `src/api/routes/cases.py`, `indexing.py`, `documents.py`, `settings.py` | 케이스 CRUD + 인덱싱 + 업로드 + 설정 |
+| Analyst API | `src/api/routes/chat.py`, `dashboard.py` | RAG 질의 + 커뮤니케이션 분석 |
 | Docker | `docker/Dockerfile.backend` | Python 3.11 + uvicorn |
 | Docker | `docker/Dockerfile.frontend` | Node build → nginx SPA 서빙 |
 | Docker | `docker/nginx.conf` | API 프록시 + SSE 스트리밍 + SPA fallback |
@@ -283,28 +329,43 @@ subprocess.run(['pip', 'install', 'chroma-hnswlib', '--no-build-isolation'], env
 | Admin | `/api/admin/indexing/stop/{id}` | POST | 인덱싱 중단 |
 | Admin | `/api/admin/indexing/progress/{id}` | GET | 진행률 조회 |
 | Admin | `/api/admin/indexing/increment/{id}` | POST | 증분 인덱싱 |
+| Admin | `/api/admin/documents/upload/{id}` | POST | 문서 업로드 |
+| Admin | `/api/admin/settings/...` | GET/PATCH | 보안 모드, 모델, reranker 설정 |
 | Analyst | `/api/analyst/chat/` | POST | RAG 동기 질의 |
 | Analyst | `/api/analyst/chat/stream` | POST | SSE 스트리밍 질의 |
 | Analyst | `/api/analyst/chat/cases` | GET | 분석 가능 케이스 목록 |
+| Analyst | `/api/analyst/dashboard/...` | GET | 커뮤니케이션 분석 (참여자/토픽/타임라인) |
 | 공통 | `/health` | GET | 헬스체크 |
 
 ### 테스트 구조
 
-| 경로 | 테스트 수 | 설명 |
-|---|---|---|
-| `tests/unit/test_pst_parser.py` | 15 | PST 파서 |
-| `tests/unit/test_document_parser.py` | 30 | 문서 파서 (PDF/DOCX/PPTX/XLSX/EML/MSG) |
-| `tests/unit/test_chunker.py` | 21 | 4종 청커 |
-| `tests/unit/test_metadata_enricher.py` | 16 | 메타데이터 + 토픽 추출 |
-| `tests/unit/test_embedding_service.py` | 9 | Ollama 임베딩 |
-| `tests/unit/test_vector_store.py` | 12 | ChromaDB + BM25 + RRF |
-| `tests/unit/test_config.py` | 3 | 설정 |
-| `tests/unit/test_case_store.py` | 30 | 케이스 CRUD + 라이프사이클 |
-| `tests/unit/test_cases_api.py` | 16 | 케이스 API |
-| `tests/unit/test_indexing_pipeline.py` | 25 | 인덱싱 파이프라인 |
-| `tests/unit/test_indexing_api.py` | 9 | 인덱싱 API |
-| `tests/unit/test_query_parser.py` | 30 | 질의 파서 |
-| `tests/unit/test_llm_router.py` | 8 | LLM 라우터 |
-| `tests/unit/test_rag_engine.py` | 11 | RAG 엔진 |
-| `tests/unit/test_chat_api.py` | 11 | 채팅 API |
-| `tests/integration/test_e2e_pipeline.py` | 14 | E2E 통합 (생성→인덱싱→질의→보관→삭제) |
+| 경로 | 설명 |
+|---|---|
+| `tests/unit/test_pst_parser.py` | PST 파서 |
+| `tests/unit/test_document_parser.py` | 문서 파서 (PDF/DOCX/PPTX/XLSX/EML/MSG) |
+| `tests/unit/test_chunker.py` | 4종 청커 |
+| `tests/unit/test_metadata_enricher.py` | 메타데이터 + 토픽 추출 |
+| `tests/unit/test_embedding_service.py` | Ollama 임베딩 |
+| `tests/unit/test_vector_store.py` | ChromaDB + BM25 + RRF |
+| `tests/unit/test_config.py` | 설정 |
+| `tests/unit/test_case_store.py` | 케이스 CRUD + 라이프사이클 |
+| `tests/unit/test_cases_api.py` | 케이스 API |
+| `tests/unit/test_indexing_pipeline.py` | 인덱싱 파이프라인 |
+| `tests/unit/test_indexing_api.py` | 인덱싱 API |
+| `tests/unit/test_query_parser.py` | 질의 파서 |
+| `tests/unit/test_llm_router.py` | LLM 라우터 |
+| `tests/unit/test_rag_engine.py` | RAG 엔진 |
+| `tests/unit/test_reranker.py` | Reranker |
+| `tests/unit/test_chat_api.py` | 채팅 API |
+| `tests/unit/test_dashboard_api.py` | 대시보드 API |
+| `tests/integration/test_e2e_pipeline.py` | E2E 통합 (생성→인덱싱→질의→보관→삭제) |
+
+### 환경 설정 파일
+
+환경별 `.env` 예시 파일을 사용:
+- `.env.dev.example` — 개발 환경 (3060 12GB, gemma4:e4b, EMBED_BATCH_SIZE=8, INDEXING_STORE_BATCH_SIZE=64, RERANK_ENABLED=false)
+- `.env.prod.example` — 운영 환경 (A5000 24GB, gpt-oss:20b, EMBED_BATCH_SIZE=16, INDEXING_STORE_BATCH_SIZE=128, RERANK_ENABLED=true)
+
+대상 환경 파일을 `.env`로 복사하여 사용. 개별 변수는 환경 변수로 오버라이드 가능.
+
+> **임베딩 배치 크기 주의**: 위 값은 보수적 기본값입니다. bge-m3 4096 토큰 컨텍스트와 Ollama 큐 동작상 큰 배치는 timeout 캐스케이드를 유발해 인덱싱이 멈춥니다. 안정 동작 확인 후 단계적으로(8→16→32) 상향하고 로그를 모니터링하세요.

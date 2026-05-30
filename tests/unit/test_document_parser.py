@@ -180,6 +180,30 @@ class TestPdfParser:
         assert result.metadata["author"] == "Test Author"
         assert result.metadata["title"] == "Test Title"
 
+    def test_parse_pdf_creator_producer(self, parser: DocumentParser):
+        """PDF creator/producer/modDate 메타데이터 추출 (작성자 추적용)"""
+        try:
+            import fitz
+        except ImportError:
+            pytest.skip("PyMuPDF가 설치되지 않았습니다")
+
+        path = TEST_DIR / "test_creator.pdf"
+        doc = fitz.open()
+        doc.set_metadata({
+            "author": "Original Author",
+            "creator": "Microsoft Word",
+            "producer": "Adobe PDF Library 21.0",
+        })
+        page = doc.new_page()
+        page.insert_text((72, 72), "Content", fontsize=12)
+        doc.save(str(path))
+        doc.close()
+
+        result = parser.parse(path)
+        assert result.metadata["author"] == "Original Author"
+        assert result.metadata["creator"] == "Microsoft Word"
+        assert result.metadata["producer"] == "Adobe PDF Library 21.0"
+
     def test_parse_pdf_bytes(self, parser: DocumentParser):
         """PDF 바이트 파싱 테스트"""
         try:
@@ -196,6 +220,124 @@ class TestPdfParser:
         result = parser.parse_bytes(pdf_bytes, "test.pdf")
         assert "Byte content test" in result.content
         assert result.metadata["file_size"] == len(pdf_bytes)
+
+    def test_encrypted_pdf_returns_empty_with_flag(self, parser: DocumentParser):
+        """암호화된 PDF → 빈 본문 + is_encrypted=True"""
+        try:
+            import fitz
+        except ImportError:
+            pytest.skip("PyMuPDF가 설치되지 않았습니다")
+
+        # 암호 설정한 PDF 생성
+        path = TEST_DIR / "encrypted.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Secret content", fontsize=12)
+        doc.save(
+            str(path),
+            encryption=fitz.PDF_ENCRYPT_AES_256,
+            owner_pw="ownerpw",
+            user_pw="userpw",
+        )
+        doc.close()
+
+        result = parser.parse(path)
+        assert result.content == ""
+        assert result.metadata.get("is_encrypted") is True
+
+    def test_ocr_check_cached_one_warning(self, monkeypatch, caplog):
+        """OCR 엔진 가용성 체크는 1회만 — 매 호출마다 WARNING이 누적되지 않음"""
+        import logging
+
+        from src.parsers.ocr import reset_engine_cache
+        from src.parsers.ocr.tesseract import TesseractEngine
+
+        # 엔진 싱글톤 + 가용성 캐시 리셋
+        reset_engine_cache()
+        TesseractEngine._available = None
+        TesseractEngine._unavailable_reason = ""
+
+        # pytesseract import 실패하도록 sys.modules에 None 주입
+        import sys
+
+        monkeypatch.setitem(sys.modules, "pytesseract", None)
+
+        engine = TesseractEngine()
+        with caplog.at_level(logging.WARNING):
+            r1 = engine.is_available()
+            r2 = engine.is_available()
+            r3 = engine.is_available()
+
+        assert r1 is False and r2 is False and r3 is False
+        # WARNING은 첫 호출 1번만
+        warnings = [
+            r for r in caplog.records
+            if r.levelname == "WARNING" and "Tesseract OCR" in r.message
+        ]
+        assert len(warnings) == 1
+
+    def test_scan_pdf_metadata_set(self, parser: DocumentParser, monkeypatch):
+        """텍스트 거의 없고 OCR 미가용 → scan_pdf=true 메타"""
+        try:
+            import fitz
+        except ImportError:
+            pytest.skip("PyMuPDF가 설치되지 않았습니다")
+
+        # OCR 엔진 싱글톤 리셋 + 가용성을 False로 강제
+        from src.parsers.ocr import reset_engine_cache
+        from src.parsers.ocr.tesseract import TesseractEngine
+        from src.parsers.ocr.paddle import PaddleEngine
+
+        reset_engine_cache()
+        monkeypatch.setattr(TesseractEngine, "_available", False)
+        monkeypatch.setattr(PaddleEngine, "_available", False)
+
+        # 빈 페이지 PDF 생성 (텍스트 없음 → 모든 페이지 sparse)
+        path = TEST_DIR / "scan_like.pdf"
+        doc = fitz.open()
+        for _ in range(3):
+            doc.new_page()  # 빈 페이지
+        doc.save(str(path))
+        doc.close()
+
+        result = parser.parse(path)
+        assert result.metadata["scan_pdf"] is True
+        assert result.metadata["sparse_pages"] == 3
+        assert result.metadata["is_ocr"] is False
+
+    def test_pdf_page_failure_isolated(self, parser: DocumentParser, monkeypatch):
+        """한 페이지의 텍스트 추출이 실패해도 나머지 페이지는 추출"""
+        try:
+            import fitz
+        except ImportError:
+            pytest.skip("PyMuPDF가 설치되지 않았습니다")
+
+        path = TEST_DIR / "multi_page.pdf"
+        doc = fitz.open()
+        for i in range(3):
+            p = doc.new_page()
+            p.insert_text((72, 72), f"Page {i} content text body.", fontsize=12)
+        doc.save(str(path))
+        doc.close()
+
+        # 페이지 1번에서 get_text 호출 시 강제 예외
+        original_get_text = fitz.Page.get_text
+        call_count = {"n": 0}
+
+        def faulty_get_text(self, *args, **kwargs):
+            call_count["n"] += 1
+            # 페이지 인덱스 1을 처음 호출할 때만 예외 (page.number == 1)
+            if self.number == 1 and call_count["n"] <= 4:
+                raise RuntimeError("simulated page corruption")
+            return original_get_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(fitz.Page, "get_text", faulty_get_text)
+
+        result = parser.parse(path)
+        assert "Page 0" in result.content
+        assert "Page 2" in result.content
+        # 페이지 실패가 메타데이터에 기록됨
+        assert result.metadata.get("page_failures", 0) >= 1
 
     def test_ocr_fallback_graceful(self, parser: DocumentParser):
         """OCR 라이브러리 없을 때 graceful 폴백"""
@@ -418,6 +560,25 @@ class TestPptxParser:
         assert sections[1]["title"] == "예산 현황"
         assert sections[1]["slide_num"] == 2
 
+    def test_parse_pptx_author_modifier(self, parser: DocumentParser):
+        """PPTX author + last_modified_by 메타데이터 추출 (작성자 추적용)"""
+        try:
+            from pptx import Presentation
+        except ImportError:
+            pytest.skip("python-pptx가 설치되지 않았습니다")
+
+        path = TEST_DIR / "test_author_pptx.pptx"
+        prs = Presentation()
+        prs.core_properties.author = "원작성자"
+        prs.core_properties.last_modified_by = "수정자"
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = "프레젠테이션"
+        prs.save(str(path))
+
+        result = parser.parse(path)
+        assert result.metadata["author"] == "원작성자"
+        assert result.metadata["last_modified_by"] == "수정자"
+
 
 # === XLSX 파서 테스트 ===
 
@@ -484,6 +645,36 @@ class TestXlsxParser:
         assert "sheet_names" in doc.metadata
         assert "file_hash" in doc.metadata
         assert "file_size" in doc.metadata
+
+    def test_parse_xlsx_author_modifier(self, parser: DocumentParser):
+        """XLSX author + last_modified_by 메타데이터 추출 (작성자 추적용)
+
+        모든 시트가 동일한 워크북 author/last_modified_by를 공유해야 함.
+        """
+        try:
+            from openpyxl import Workbook
+        except ImportError:
+            pytest.skip("openpyxl이 설치되지 않았습니다")
+
+        path = TEST_DIR / "test_xlsx_author.xlsx"
+        wb = Workbook()
+        wb.properties.creator = "견적서작성자"
+        wb.properties.lastModifiedBy = "수정한사람"
+        wb.properties.title = "견적서 v3"
+        ws = wb.active
+        ws.title = "견적"
+        ws.append(["품목", "금액"])
+        ws.append(["서버", 1000])
+        wb.create_sheet("부록").append(["부록 내용"])
+        wb.save(str(path))
+        wb.close()
+
+        result = parser.parse(path)
+        assert isinstance(result, list)
+        for doc in result:
+            assert doc.metadata["author"] == "견적서작성자"
+            assert doc.metadata["last_modified_by"] == "수정한사람"
+            assert doc.metadata["title"] == "견적서 v3"
 
     def test_parse_xlsx_bytes(self, parser: DocumentParser):
         """XLSX 바이트 파싱 테스트"""
@@ -580,10 +771,12 @@ def _make_eml(
     subject: str = "테스트 메일",
     sender: str = "sender@example.com",
     to: str = "recipient@example.com",
+    recipient: str | None = None,  # to 별칭
     cc: str = "",
     body: str = "이것은 테스트 이메일 본문입니다.",
     html_body: str = "",
     attachments: list[tuple[str, bytes]] | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> bytes:
     """테스트용 EML 바이트 생성"""
     from email.mime.multipart import MIMEMultipart
@@ -609,11 +802,15 @@ def _make_eml(
 
     msg["Subject"] = subject
     msg["From"] = sender
-    msg["To"] = to
+    msg["To"] = recipient if recipient is not None else to
     if cc:
         msg["Cc"] = cc
     msg["Date"] = "Mon, 23 Mar 2026 10:30:00 +0900"
     msg["Message-ID"] = "<test-123@example.com>"
+
+    if extra_headers:
+        for k, v in extra_headers.items():
+            msg[k] = v
 
     return msg.as_bytes()
 
@@ -700,6 +897,63 @@ class TestEmlParser:
         assert result.metadata["char_count"] > 0
         assert result.metadata["file_hash"]
         assert result.metadata["filename"].endswith(".eml")
+
+    def test_parse_eml_participants_merged(self, parser: DocumentParser):
+        """EML participants는 sender+recipients+cc 통합 (중복 제거)"""
+        eml_bytes = _make_eml(
+            sender="alice@example.com",
+            recipient="bob@example.com",
+            cc="carol@example.com, alice@example.com",  # alice 중복
+        )
+        result = parser.parse_bytes(eml_bytes, "merge.eml")
+
+        participants = result.metadata["participants"]
+        # 중복 제거된 상태로 3명
+        emails = {p.lower() for p in participants}
+        assert "alice@example.com" in emails
+        assert "bob@example.com" in emails
+        assert "carol@example.com" in emails
+        assert len(participants) == 3
+
+    def test_parse_eml_threading_headers(self, parser: DocumentParser):
+        """EML In-Reply-To / References / Reply-To 헤더 추출"""
+        eml_bytes = _make_eml(
+            extra_headers={
+                "In-Reply-To": "<parent-msg-1@example.com>",
+                "References": "<root-msg@example.com> <parent-msg-1@example.com>",
+                "Reply-To": "noreply@example.com",
+            },
+        )
+        result = parser.parse_bytes(eml_bytes, "threading.eml")
+
+        assert result.metadata["in_reply_to"] == "<parent-msg-1@example.com>"
+        assert result.metadata["reply_to"] == "noreply@example.com"
+        assert "<root-msg@example.com>" in result.metadata["references"]
+        assert "<parent-msg-1@example.com>" in result.metadata["references"]
+
+    def test_parse_eml_attachments_in_header_block(self, parser: DocumentParser):
+        """EML 본문 헤더 블록에 첨부파일 목록도 포함"""
+        eml_bytes = _make_eml(
+            attachments=[("report.pdf", b"x"), ("budget.xlsx", b"y")],
+        )
+        result = parser.parse_bytes(eml_bytes, "att_header.eml")
+
+        assert "Attachments: report.pdf, budget.xlsx" in result.content
+
+    def test_parse_eml_corrupt_mime_returns_empty_doc(self, parser: DocumentParser):
+        """손상된 MIME → 빈 본문 + parse_error 메타로 반환 (raise 하지 않음)"""
+        # MIME 헤더가 깨진 바이트 — 실제로는 message_from_bytes가 관대해서
+        # 거의 모든 경우 파싱하므로, 강제로 None을 반환하도록 monkey patch
+        from unittest.mock import patch
+
+        with patch("email.message_from_bytes", side_effect=Exception("boom")):
+            result = parser.parse_bytes(b"garbage", "broken.eml")
+
+        assert result.content == ""
+        assert result.metadata.get("parse_error")
+        # source 메타 부착(부재) 없이도 안전하게 반환
+        assert result.metadata["subject"] == ""
+        assert result.metadata["recipients"] == []
 
 
 # === MSG 파서 테스트 ===

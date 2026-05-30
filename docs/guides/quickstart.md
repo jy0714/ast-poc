@@ -18,15 +18,15 @@
 Ollama 모델 다운로드 (최초 1회):
 
 ```powershell
-ollama pull nomic-embed-text     # 임베딩 모델 (~274MB)
-ollama pull gpt-oss:20b          # LLM 모델 (~12GB)
+ollama pull bge-m3               # 임베딩 모델 (~1.2GB, 1024-dim, 4096 토큰)
+ollama pull gemma4:e4b           # 개발용 LLM (가벼움)
+# 운영 환경에서는
+ollama pull gpt-oss:20b          # 운영 LLM (~12GB)
 ```
 
-> GPU VRAM이 부족하면 가벼운 모델로 대체 가능:
-> ```powershell
-> ollama pull llama3.2:3b         # LLM 대체 (~2GB)
-> ```
-> `.env`에서 `OLLAMA_LLM_MODEL=llama3.2:3b`로 변경
+> 개발 환경(RTX 3060 12GB) 기본값: `gemma4:e4b`
+> 운영 환경(A5000 24GB) 기본값: `gpt-oss:20b`
+> `.env`에서 `OLLAMA_LLM_MODEL`로 변경 가능
 
 ---
 
@@ -54,8 +54,10 @@ python -m venv .venv
 pip install --upgrade pip
 pip install -e ".[dev]"
 
-# 환경변수 파일 생성
-copy .env.example .env
+# 환경변수 파일 생성 (개발/운영 중 선택)
+copy .env.dev.example .env       # 개발 환경 (3060 12GB)
+# 또는
+copy .env.prod.example .env      # 운영 환경 (A5000 24GB)
 ```
 
 `.env` 파일을 열어 필요시 수정:
@@ -136,7 +138,9 @@ npm run dev
 
 ```powershell
 cd ast-poc
-copy .env.example .env
+copy .env.prod.example .env      # 운영 (Docker 권장)
+# 또는
+copy .env.dev.example .env       # 개발
 ```
 
 ### Step 2. 데이터 디렉토리 생성
@@ -163,8 +167,16 @@ docker compose up --build -d
 ### Step 4. Ollama 모델 다운로드 (최초 1회)
 
 ```powershell
-docker compose exec ollama ollama pull nomic-embed-text
-docker compose exec ollama ollama pull gpt-oss:20b
+docker compose exec ollama ollama pull bge-m3
+docker compose exec ollama ollama pull gpt-oss:20b   # 운영
+# 개발 환경
+docker compose exec ollama ollama pull gemma4:e4b
+```
+
+또는 한 번에 (디렉토리 생성 + 모델 풀):
+
+```bash
+bash scripts/docker-init.sh
 ```
 
 ### Step 5. 접속

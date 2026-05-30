@@ -61,6 +61,19 @@ class TestBuildMessages:
         messages = router._build_messages("질문", [])
         assert "(검색 결과 없음)" in messages[1][1]
 
+    def test_extra_system_warning_appended(self, router):
+        """extra_system_warning이 시스템 프롬프트에 삽입됨"""
+        warning = "주의: 검색 결과가 질문과 관련 없을 수 있습니다."
+        messages = router._build_messages("질문", ["내용"], extra_system_warning=warning)
+        assert warning in messages[0][1]
+        # 기존 시스템 프롬프트도 유지
+        assert "감사" in messages[0][1]
+
+    def test_no_extra_warning_by_default(self, router):
+        """extra_system_warning 미전달 시 기존 프롬프트만"""
+        messages = router._build_messages("질문", ["내용"])
+        assert "## 추가 주의" not in messages[0][1]
+
 
 class TestGenerate:
     @pytest.mark.asyncio
@@ -74,6 +87,32 @@ class TestGenerate:
 
         assert answer == "테스트 답변입니다."
         mock_llm.ainvoke.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_generate_invokes_on_complete_with_token_usage(self, router):
+        """generate 완료 시 on_complete 콜백으로 토큰 사용량 전달"""
+        response = MagicMock(
+            content="답변",
+            usage_metadata={"input_tokens": 200, "output_tokens": 30, "total_tokens": 230},
+            response_metadata={},
+        )
+        mock_llm = AsyncMock()
+        mock_llm.ainvoke.return_value = response
+
+        captured: dict = {}
+        with patch.object(router, "get_llm", return_value=mock_llm):
+            with patch("src.llm.router.log_token_usage"), patch(
+                "src.llm.router.log_token_usage_detail"
+            ):
+                await router.generate(
+                    "질문", ["컨텍스트"], secure_mode=False,
+                    case_id="case1", on_complete=captured.update,
+                )
+
+        assert captured["input_tokens"] == 200
+        assert captured["output_tokens"] == 30
+        assert captured["case_id"] == "case1"
+        assert captured["input_source"] == "openai_api"
 
     @pytest.mark.asyncio
     async def test_generate_error_raises(self, router):
@@ -111,3 +150,34 @@ class TestGenerateStream:
                 tokens.append(token)
 
         assert tokens == ["안녕", "하세요", "!"]
+
+    @pytest.mark.asyncio
+    async def test_stream_logs_token_usage_on_complete(self, router):
+        """스트리밍 완료 시 finally에서 on_complete 호출 (추정 경로)"""
+        mock_chunks = [MagicMock(content="안녕"), MagicMock(content="하세요")]
+        # 마지막 chunk에 usage 메타데이터 없음 → 추정 경로
+        for ch in mock_chunks:
+            ch.usage_metadata = None
+            ch.response_metadata = {}
+
+        mock_llm = MagicMock()
+
+        async def mock_astream(messages):
+            for chunk in mock_chunks:
+                yield chunk
+
+        mock_llm.astream = mock_astream
+
+        captured: dict = {}
+        with patch.object(router, "get_llm", return_value=mock_llm):
+            with patch("src.llm.router.log_token_usage"), patch(
+                "src.llm.router.log_token_usage_detail"
+            ):
+                async for _ in router.generate_stream(
+                    "질문", ["컨텍스트"], case_id="c2", on_complete=captured.update
+                ):
+                    pass
+
+        assert captured["case_id"] == "c2"
+        assert captured["input_source"] == "estimated"
+        assert captured["output_tokens"] > 0  # "안녕하세요" 추정

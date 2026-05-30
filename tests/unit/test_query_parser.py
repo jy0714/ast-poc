@@ -159,6 +159,87 @@ class TestIntent:
         assert result.intent == "timeline"
 
 
+# === 작성자/수정자 필터 ===
+
+
+class TestAuthorFilter:
+    def test_korean_author_with_particle(self):
+        """한국어 동사 — '홍길동이 만든 견적서'"""
+        result = parse_query("홍길동이 만든 견적서 보여줘")
+        assert result.filters.get("author") == "홍길동"
+
+    def test_korean_author_variant_verbs(self):
+        """다양한 작성 동사 — 만든/작성한/생성한/쓴/기안한"""
+        for verb in ("만든", "작성한", "생성한", "쓴", "기안한"):
+            result = parse_query(f"김철수가 {verb} 보고서")
+            assert result.filters.get("author") == "김철수", f"verb={verb}"
+
+    def test_english_name_no_particle(self):
+        """영문 이름 — 'alice가 작성한 보고서'"""
+        result = parse_query("alice가 작성한 보고서")
+        assert result.filters.get("author") == "alice"
+
+    def test_email_address_as_author(self):
+        """이메일 주소도 author로 매칭"""
+        result = parse_query("alice@co.kr가 만든 견적서")
+        assert result.filters.get("author") == "alice@co.kr"
+
+    def test_english_by_pattern(self):
+        """영어 'created by alice' 패턴"""
+        for verb in ("created", "written", "authored", "made", "drafted"):
+            result = parse_query(f"{verb} by alice")
+            assert result.filters.get("author") == "alice", f"verb={verb}"
+
+    def test_author_label(self):
+        """라벨 형식 — '작성자: 김철수', 'author: alice'"""
+        assert parse_query("작성자: 김철수").filters.get("author") == "김철수"
+        assert parse_query("author: alice").filters.get("author") == "alice"
+
+    def test_no_author_in_plain_query(self):
+        """작성자 표현 없으면 author 필터 없음"""
+        result = parse_query("회의록 보여줘")
+        assert "author" not in result.filters
+
+
+class TestModifierFilter:
+    def test_korean_modifier(self):
+        """한국어 동사 — 'bob이 마지막으로 수정한 문서'"""
+        result = parse_query("bob이 마지막으로 수정한 문서")
+        assert result.filters.get("last_modified_by") == "bob"
+
+    def test_korean_modifier_variant_verbs(self):
+        """다양한 수정 동사 — 수정한/편집한/업데이트한"""
+        for verb in ("수정한", "편집한", "업데이트한"):
+            result = parse_query(f"김철수가 {verb} 문서")
+            assert result.filters.get("last_modified_by") == "김철수", f"verb={verb}"
+
+    def test_english_modifier_pattern(self):
+        """영어 'modified by', 'last modified by' 패턴"""
+        for prefix in ("modified", "edited", "revised", "updated", "last modified"):
+            result = parse_query(f"{prefix} by bob")
+            assert result.filters.get("last_modified_by") == "bob", f"prefix={prefix}"
+
+    def test_modifier_label(self):
+        """라벨 형식 — '수정자: 김철수'"""
+        assert parse_query("수정자: 김철수").filters.get("last_modified_by") == "김철수"
+        assert parse_query("마지막 수정자: bob").filters.get("last_modified_by") == "bob"
+
+
+class TestAuthorModifierCombined:
+    def test_author_and_modifier_in_one_query(self):
+        """alice가 만들고 bob이 수정한 — 둘 다 추출"""
+        result = parse_query("alice가 만들고 bob이 수정한 견적서")
+        assert result.filters.get("author") == "alice"
+        assert result.filters.get("last_modified_by") == "bob"
+
+    def test_multiple_authors_as_list(self):
+        """여러 작성자 — list로 반환"""
+        result = parse_query("alice가 만들고 bob이 작성한 보고서")
+        authors = result.filters.get("author")
+        assert isinstance(authors, list)
+        assert "alice" in authors and "bob" in authors
+
+
 # === 복합 질의 ===
 
 

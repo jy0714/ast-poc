@@ -262,6 +262,54 @@ class CaseStore:
         logger.info(f"케이스 상태 변경: {case_id} → {new_status.value}")
         return meta
 
+    def recover_if_stuck(
+        self, case_id: str, timeout_min: int = 30
+    ) -> CaseMetadata | None:
+        """INDEXING 상태에서 멈춰있는 케이스를 ERROR로 강제 복구
+
+        프로세스 kill / OOM / 정전 등으로 인덱싱이 비정상 종료된 후 케이스 상태가
+        INDEXING으로 영구 고착되는 것을 방지. updated_at이 timeout_min 이상 갱신
+        없으면 비정상 종료로 판정하고 ERROR로 전이 (라이프사이클 검증 우회).
+
+        Args:
+            case_id: 케이스 ID
+            timeout_min: stuck 판정 임계값 (분)
+
+        Returns:
+            복구된 CaseMetadata. 복구 대상이 아니면 None.
+        """
+        from src.db.models import CaseModel
+
+        with self._get_session() as session:
+            row = session.get(CaseModel, case_id)
+            if row is None:
+                return None
+
+            if CaseStatus(row.status) != CaseStatus.INDEXING:
+                return None
+
+            # updated_at 이후 경과 시간 체크
+            elapsed_sec = (datetime.now() - row.updated_at).total_seconds()
+            if elapsed_sec < timeout_min * 60:
+                return None
+
+            # 비정상 종료 판정 → 전이 검증 우회하고 ERROR로 강제
+            row.status = CaseStatus.ERROR.value
+            row.updated_at = datetime.now()
+            row.error_message = (
+                f"비정상 종료로 자동 복구됨 (INDEXING 상태에서 "
+                f"{elapsed_sec / 60:.0f}분 멈춤)"
+            )
+            session.commit()
+            session.refresh(row)
+            meta = _model_to_metadata(row)
+
+        logger.warning(
+            f"stuck indexing 자동 복구: {case_id} "
+            f"(updated_at 이후 {elapsed_sec / 60:.0f}분 경과 → ERROR)"
+        )
+        return meta
+
     def update_data_sources(
         self,
         case_id: str,

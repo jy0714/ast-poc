@@ -1,14 +1,26 @@
 """벡터 저장소 — ChromaDB + BM25 하이브리드 검색
 
-ChromaDB: 벡터 유사도 검색 + 메타데이터 필터
-BM25: 키워드 매칭 검색
+ChromaDB: 벡터 유사도 검색 + 메타데이터 필터 (단일 컬렉션 + case_id 필터)
+BM25: 케이스별 키워드 인덱스 (per-case pickle)
 RRF (Reciprocal Rank Fusion): 두 검색 결과를 통합 순위로 결합
+
+설계 변경 (2026-04-18):
+- 케이스별 컬렉션(`case_{id}`) → 단일 공유 컬렉션 + 메타데이터 case_id 필터.
+  이유: 케이스 수가 많아질 때 ChromaDB 컬렉션당 HNSW 인덱스 부담 누적 회피.
+- BM25는 케이스별 파일 유지 (IDF 분리로 검색 품질 보존).
+- 중복 체크: collection.upsert()로 위임 (인메모리 _known_ids 캐시 제거).
+- BM25 토큰화: 신규 텍스트만 증분 토큰화 (전체 재토큰화 O(N²) 제거).
+- get_stats(): 메타데이터 전체 로드 대신 source_type별 where 카운트.
+- BM25 검색: 인메모리 corpus + metadata 캐시로 ChromaDB 조회 제거.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import pickle
+import shutil
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -26,6 +38,40 @@ from src.utils.config import settings
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# get_stats()에서 카운트하는 known source_type — 신규 타입은 여기 추가
+_KNOWN_SOURCE_TYPES = ("email", "teams_chat", "document", "attachment")
+
+# HNSW 세그먼트가 정상이라면 모두 0바이트 초과여야 하는 필수 파일.
+# 하나라도 누락되거나 0바이트면 ChromaDB가 'unsupported opcode \0' 등으로 deserialize 실패.
+_CHROMA_REQUIRED_SEGMENT_FILES = (
+    "data_level0.bin",
+    "header.bin",
+    "length.bin",
+    "link_lists.bin",
+)
+
+# 무결성 체크는 같은 persist_dir에 대해 프로세스당 1회만 수행 (불필요한 fs 스캔 방지)
+_integrity_checked: set[str] = set()
+
+
+class ChromaIntegrityError(RuntimeError):
+    """ChromaDB persist 디렉토리의 HNSW 세그먼트가 손상된 상태로 감지됨"""
+
+
+def _is_chroma_segment_dir(name: str) -> bool:
+    """ChromaDB 세그먼트 디렉토리 이름은 UUID4 형식 (8-4-4-4-12 hex)"""
+    if len(name) != 36:
+        return False
+    parts = name.split("-")
+    if tuple(len(p) for p in parts) != (8, 4, 4, 4, 12):
+        return False
+    return all(c in "0123456789abcdef-" for c in name.lower())
+
+
+def _auto_quarantine_enabled() -> bool:
+    """CHROMA_AUTO_QUARANTINE — 손상 감지 시 persist_dir 자동 격리 여부 (기본 ON)"""
+    return os.environ.get("CHROMA_AUTO_QUARANTINE", "1").lower() in ("1", "true", "yes", "on")
 
 # --- BM25 토크나이저 (kiwipiepy 우선, 정규식 fallback) ---
 
@@ -84,16 +130,23 @@ def _kiwi_tokenize(text: str) -> list[str]:
 class VectorStoreService:
     """ChromaDB + BM25 하이브리드 벡터 저장소
 
-    사용법:
-        store = VectorStoreService(collection_name="case_001")
-        store.add_chunks(chunks)
+    두 가지 모드 지원:
+        1) 멀티-케이스 모드 (case_id 지정): 단일 공유 컬렉션 + case_id 메타 필터
+        2) 단일-컬렉션 모드 (collection_name 지정): 컬렉션 자체로 격리 (테스트/레거시)
 
-        results = store.search("감사 보고서 비용 분석")
-        # [{"content": ..., "metadata": ..., "score": ..., "search_method": "hybrid"}, ...]
+    사용법 (운영):
+        store = VectorStoreService(case_id="abc123")
+        store.add_chunks(chunks)
+        results = store.search("감사 보고서")  # 자동으로 case_id 필터 적용
+
+    사용법 (테스트/레거시):
+        store = VectorStoreService(collection_name="test_col", ephemeral=True)
+        store.add_chunks(chunks)
     """
 
     def __init__(
         self,
+        case_id: str | None = None,
         collection_name: str | None = None,
         persist_dir: str | None = None,
         ephemeral: bool = False,
@@ -101,24 +154,37 @@ class VectorStoreService:
         """VectorStoreService 초기화
 
         Args:
-            collection_name: ChromaDB 컬렉션명 (기본: settings.chroma_collection_name)
+            case_id: 케이스 ID (지정 시 단일 공유 컬렉션 + 자동 필터 모드)
+            collection_name: ChromaDB 컬렉션명 (case_id가 없을 때 사용; 기본=settings)
             persist_dir: ChromaDB 저장 경로 (기본: settings.chroma_persist_dir)
             ephemeral: True이면 인메모리 모드 (테스트용)
         """
-        self.collection_name = collection_name or settings.chroma_collection_name
+        self.case_id = case_id
+        if case_id:
+            # 멀티-케이스 모드: 단일 공유 컬렉션
+            self.collection_name = collection_name or settings.chroma_collection_name
+            self._bm25_key = f"case_{case_id}"
+        else:
+            # 단일-컬렉션 모드 (테스트/레거시)
+            self.collection_name = collection_name or settings.chroma_collection_name
+            self._bm25_key = self.collection_name
+
         self.persist_dir = persist_dir or settings.chroma_persist_dir
         self.ephemeral = ephemeral
         self._client: chromadb.ClientAPI | None = None
         self._collection: chromadb.Collection | None = None
         self._embedding_service = EmbeddingService()
 
-        # BM25 인덱스 상태
+        # BM25 인덱스 상태 (case_id 모드에서는 케이스별 corpus만 보유)
         self._bm25_index: BM25Okapi | None = None
-        self._bm25_corpus: list[str] = []  # 원본 텍스트
-        self._bm25_ids: list[str] = []  # chunk_id 매핑
+        self._bm25_corpus: list[str] = []
+        self._bm25_ids: list[str] = []
+        self._bm25_tokenized: list[list[str]] = []  # 신규 텍스트만 증분 토큰화
+        # BM25 검색 결과를 ChromaDB 재조회 없이 반환하기 위한 메타데이터 캐시
+        self._bm25_metadata: dict[str, dict[str, Any]] = {}
 
-        # 중복 체크용 인메모리 ID 캐시 (대량 인덱싱 시 ChromaDB 조회 제거)
-        self._known_ids: set[str] | None = None
+        # 차원 검증 1회만 수행 (대량 인덱싱 시 매 배치 collection.count()/peek() 회피)
+        self._dim_validated: bool = False
 
     def _get_client(self) -> chromadb.ClientAPI:
         """ChromaDB 클라이언트 초기화 (지연 생성)"""
@@ -127,8 +193,89 @@ class VectorStoreService:
                 self._client = chromadb.EphemeralClient()
             else:
                 Path(self.persist_dir).mkdir(parents=True, exist_ok=True)
+                self._check_chroma_integrity()
                 self._client = chromadb.PersistentClient(path=self.persist_dir)
         return self._client
+
+    def _check_chroma_integrity(self) -> None:
+        """ChromaDB persist_dir의 HNSW 세그먼트 무결성 검증.
+
+        강제 종료(process kill) 시 `link_lists.bin` 등이 0바이트로 남아
+        다음 write 시 `unsupported opcode '\\0'` pickle deserialize 에러로
+        모든 저장이 실패하는 케이스를 사전 차단.
+
+        - 손상 감지 + `CHROMA_AUTO_QUARANTINE=1`(기본): persist_dir 전체를
+          `vectordb.quarantine_<ts>`로 이동하고 빈 디렉토리 새로 생성.
+          기존 데이터는 보존되어 사후 분석 가능.
+        - 손상 감지 + `CHROMA_AUTO_QUARANTINE=0`: ChromaIntegrityError 발생.
+        """
+        persist_path = Path(self.persist_dir).resolve()
+        key = str(persist_path)
+        if key in _integrity_checked:
+            return
+
+        if not persist_path.exists():
+            _integrity_checked.add(key)
+            return
+
+        corrupted: list[tuple[str, list[str]]] = []
+        for entry in persist_path.iterdir():
+            if not entry.is_dir() or not _is_chroma_segment_dir(entry.name):
+                continue
+            problems: list[str] = []
+            for fname in _CHROMA_REQUIRED_SEGMENT_FILES:
+                fpath = entry / fname
+                if not fpath.exists():
+                    problems.append(f"{fname} 누락")
+                elif fpath.stat().st_size == 0:
+                    problems.append(f"{fname} 0바이트")
+            if problems:
+                corrupted.append((entry.name, problems))
+
+        if not corrupted:
+            _integrity_checked.add(key)
+            return
+
+        details = "\n".join(
+            f"  - {seg_id}: {', '.join(probs)}" for seg_id, probs in corrupted
+        )
+        diagnosis = (
+            f"ChromaDB HNSW 세그먼트 손상 감지 ({len(corrupted)}개, "
+            f"persist_dir={persist_path}):\n{details}\n"
+            f"원인: 인덱싱 도중 강제 종료로 세그먼트 write가 끊겨 필수 파일이 "
+            f"0바이트로 남음. 그대로 진행하면 모든 벡터 저장이 "
+            f"'unsupported opcode \\0' 에러로 실패함."
+        )
+
+        if not _auto_quarantine_enabled():
+            logger.error(diagnosis)
+            raise ChromaIntegrityError(
+                diagnosis
+                + "\n복구: CHROMA_AUTO_QUARANTINE=1로 자동 격리하거나 "
+                "persist_dir을 백업 후 삭제하고 케이스를 재인덱싱."
+            )
+
+        quarantine = self._quarantine_persist_dir(persist_path)
+        logger.warning(
+            f"{diagnosis}\n→ 자동 격리: {persist_path} → {quarantine}\n"
+            f"주의: 이 케이스의 BM25 인덱스(data/bm25_index/)와 SQLite 케이스 상태도 "
+            f"stale 상태이므로 케이스를 삭제 후 재생성하거나 status를 created로 되돌려 "
+            f"재인덱싱 필요."
+        )
+        _integrity_checked.add(key)
+
+    def _quarantine_persist_dir(self, persist_path: Path) -> Path:
+        """persist_dir 전체를 형제 디렉토리 `vectordb.quarantine_<ts>`로 이동 후 빈 디렉토리 재생성"""
+        ts = int(time.time())
+        quarantine = persist_path.parent / f"{persist_path.name}.quarantine_{ts}"
+        # 동일 timestamp 충돌 방지
+        suffix = 0
+        while quarantine.exists():
+            suffix += 1
+            quarantine = persist_path.parent / f"{persist_path.name}.quarantine_{ts}_{suffix}"
+        shutil.move(str(persist_path), str(quarantine))
+        persist_path.mkdir(parents=True, exist_ok=True)
+        return quarantine
 
     def _get_collection(self) -> chromadb.Collection:
         """ChromaDB 컬렉션 가져오기/생성"""
@@ -140,111 +287,207 @@ class VectorStoreService:
             )
         return self._collection
 
-    def _load_known_ids(self) -> set[str]:
-        """ChromaDB에 이미 저장된 ID를 인메모리 캐시로 로드
+    def _case_filter(self) -> dict[str, Any] | None:
+        """case_id 모드일 때 자동 부착되는 ChromaDB where 필터"""
+        if self.case_id:
+            return {"case_id": self.case_id}
+        return None
 
-        최초 1회만 ChromaDB를 조회하고, 이후에는 캐시에서 O(1) 중복 체크.
-        대량 인덱싱 시 매 배치마다 collection.get() 호출을 제거.
-        """
-        if self._known_ids is not None:
-            return self._known_ids
-
-        collection = self._get_collection()
-        total = collection.count()
-        if total == 0:
-            self._known_ids = set()
-        else:
-            result = collection.get(include=[])
-            self._known_ids = set(result["ids"]) if result["ids"] else set()
-            logger.info(f"기존 ID 캐시 로드: {len(self._known_ids)}개 ({self.collection_name})")
-
-        return self._known_ids
+    def _merge_filter(self, user_filter: dict[str, Any] | None) -> dict[str, Any] | None:
+        """사용자 필터에 case_id 필터를 안전하게 병합"""
+        case_filter = self._case_filter()
+        if not case_filter:
+            return user_filter or None
+        if not user_filter:
+            return case_filter
+        # 사용자 필터가 case_id를 명시했더라도 케이스 격리 우선
+        merged = {**user_filter, **case_filter}
+        return merged
 
     def add_chunks(self, chunks: list[Chunk], rebuild_bm25: bool = True) -> int:
-        """청크를 벡터 저장소에 추가
+        """청크를 벡터 저장소에 추가 (collection.upsert로 멱등 보장)
 
-        1. 인메모리 ID 캐시로 O(1) 중복 체크
+        1. 빈 content 필터링
         2. EmbeddingService로 임베딩 생성
-        3. ChromaDB에 벡터 + 메타데이터 저장
-        4. BM25 인덱스 갱신 (rebuild_bm25=True일 때만)
+        3. ChromaDB upsert (중복 체크 자체를 DB에 위임)
+        4. BM25 corpus/메타데이터 캐시 갱신
+        5. BM25 인덱스 재구축 (rebuild_bm25=True일 때만)
 
         Args:
             chunks: 저장할 청크 리스트
             rebuild_bm25: BM25 인덱스 재구축 여부 (대량 배치 시 False로 두고 마지막에 1회 호출)
 
         Returns:
-            추가된 청크 수
+            업서트된 청크 수
         """
         if not chunks:
             return 0
 
         # 빈 content 청크 제거 (임베딩 400 에러 방지)
         chunks = [c for c in chunks if c.content and c.content.strip()]
-
         if not chunks:
             return 0
 
         collection = self._get_collection()
 
-        # 기존 컬렉션에 데이터가 있으면 벡터 차원 호환성 검증
-        if collection.count() > 0:
-            self._validate_embedding_dimension(collection)
-
-        # 인메모리 캐시로 중복 체크 (최초 1회 로드 → 이후 O(1))
-        known_ids = self._load_known_ids()
-        new_chunks = [c for c in chunks if c.chunk_id not in known_ids]
-        skipped = len(chunks) - len(new_chunks)
-
-        if not new_chunks:
-            logger.info("모든 청크가 이미 저장되어 있습니다.")
-            return 0
+        # 차원 검증 — 인스턴스당 1회만 (단일 공유 컬렉션에서 매 배치 count()/peek() 누적 회피)
+        if not self._dim_validated:
+            if collection.count() > 0:
+                self._validate_embedding_dimension(collection)
+            self._dim_validated = True
 
         # 임베딩 생성
-        texts = [c.content for c in new_chunks]
+        texts = [c.content for c in chunks]
         embeddings = self._embedding_service.embed_texts(texts)
 
-        # ChromaDB에 저장
-        ids = [c.chunk_id for c in new_chunks]
-        metadatas = [serialize_metadata_for_chroma(c.metadata) for c in new_chunks]
-        # source_type을 메타데이터에 포함
-        for i, chunk in enumerate(new_chunks):
-            metadatas[i]["source_type"] = chunk.source_type
+        # 영구 실패 청크는 retry 큐 파일에 저장하고 본 배치에서 제외 → 데이터 유실 방지
+        failed_indices = set(self._embedding_service._last_failed_indices)
+        if failed_indices:
+            sorted_failed = sorted(failed_indices)
+            failed_chunks = [chunks[i] for i in sorted_failed]
+            failed_diag = [
+                self._embedding_service._last_failed_diagnostics.get(i, {})
+                for i in sorted_failed
+            ]
+            self._save_failed_chunks(failed_chunks, diagnostics=failed_diag)
+            logger.warning(
+                f"임베딩 실패 청크 {len(failed_chunks)}개 → retry 큐에 저장 "
+                f"(case={self.case_id})"
+            )
+            kept_indices = [i for i in range(len(chunks)) if i not in failed_indices]
+            chunks = [chunks[i] for i in kept_indices]
+            texts = [texts[i] for i in kept_indices]
+            embeddings = [embeddings[i] for i in kept_indices]
 
-        collection.add(
+        if not chunks:
+            return 0
+
+        # 메타데이터 직렬화 + source_type / case_id 자동 부착
+        ids = [c.chunk_id for c in chunks]
+        metadatas = []
+        for c in chunks:
+            meta = serialize_metadata_for_chroma(c.metadata)
+            meta["source_type"] = c.source_type
+            if self.case_id:
+                meta["case_id"] = self.case_id
+            metadatas.append(meta)
+
+        # upsert로 중복 체크/덮어쓰기 위임 (인메모리 _known_ids 불필요)
+        collection.upsert(
             ids=ids,
             embeddings=embeddings,
             documents=texts,
             metadatas=metadatas,
         )
 
-        # 캐시에 새 ID 등록
-        known_ids.update(ids)
-
-        # BM25 인덱스 갱신
+        # BM25 캐시 갱신 + 인덱스 재구축은 rebuild_bm25=True일 때만.
+        # 대량 인덱싱(rebuild_bm25=False)에서는 GPU 컨슈머 critical path에서 형태소 분석 회피 —
+        # 마지막에 rebuild_bm25(corpus=..., ids=...) 호출로 일괄 토큰화.
         if rebuild_bm25:
-            self._rebuild_bm25_index()
+            existing_id_set = set(self._bm25_ids)
+            for cid, text, meta in zip(ids, texts, metadatas):
+                if cid in existing_id_set:
+                    continue
+                self._bm25_corpus.append(text)
+                self._bm25_ids.append(cid)
+                self._bm25_tokenized.append(self._tokenize(text))
+                self._bm25_metadata[cid] = meta
+            self._rebuild_bm25_from_cache()
 
         logger.info(
-            f"벡터 저장 완료: {len(new_chunks)}개 청크 추가 "
-            f"(중복 {skipped}개 스킵), 컬렉션={self.collection_name}"
+            f"벡터 저장 완료: {len(chunks)}개 청크 upsert, 컬렉션={self.collection_name}"
+            + (f", case={self.case_id}" if self.case_id else "")
         )
-        return len(new_chunks)
+        return len(chunks)
+
+    def add_chunks_with_embeddings(
+        self,
+        chunks: list[Chunk],
+        embeddings: list[list[float]],
+        rebuild_bm25: bool = False,
+    ) -> int:
+        """이미 임베딩이 계산된 청크를 벡터 저장소에 저장 (임베딩 호출 생략)
+
+        파이프라인의 임베딩 단계와 저장 단계를 분리할 때 사용.
+        호출자가 EmbeddingService.embed_texts()를 직접 호출하고 실패 청크를
+        retry 큐로 처리한 뒤, 성공한 (chunk, embedding) 쌍만 이 메서드에 전달한다.
+
+        Args:
+            chunks: 저장할 청크 리스트 (임베딩 성공한 것만)
+            embeddings: chunks와 동일 순서의 임베딩 벡터 리스트
+            rebuild_bm25: BM25 인덱스 즉시 재구축 여부 (대량 처리 시 False)
+
+        Returns:
+            업서트된 청크 수
+        """
+        if not chunks:
+            return 0
+        if len(chunks) != len(embeddings):
+            raise ValueError(
+                f"chunks({len(chunks)})와 embeddings({len(embeddings)}) 길이가 다릅니다"
+            )
+
+        collection = self._get_collection()
+
+        # 차원 검증 — 인스턴스당 1회만
+        if not self._dim_validated:
+            if collection.count() > 0:
+                self._validate_embedding_dimension(collection)
+            self._dim_validated = True
+
+        # 메타데이터 직렬화 + source_type / case_id 자동 부착
+        ids = [c.chunk_id for c in chunks]
+        texts = [c.content for c in chunks]
+        metadatas = []
+        for c in chunks:
+            meta = serialize_metadata_for_chroma(c.metadata)
+            meta["source_type"] = c.source_type
+            if self.case_id:
+                meta["case_id"] = self.case_id
+            metadatas.append(meta)
+
+        collection.upsert(
+            ids=ids,
+            embeddings=embeddings,
+            documents=texts,
+            metadatas=metadatas,
+        )
+
+        if rebuild_bm25:
+            existing_id_set = set(self._bm25_ids)
+            for cid, text, meta in zip(ids, texts, metadatas):
+                if cid in existing_id_set:
+                    continue
+                self._bm25_corpus.append(text)
+                self._bm25_ids.append(cid)
+                self._bm25_tokenized.append(self._tokenize(text))
+                self._bm25_metadata[cid] = meta
+            self._rebuild_bm25_from_cache()
+
+        logger.info(
+            f"벡터 저장 완료(pre-embedded): {len(chunks)}개 청크 upsert, "
+            f"컬렉션={self.collection_name}"
+            + (f", case={self.case_id}" if self.case_id else "")
+        )
+        return len(chunks)
 
     def rebuild_bm25(
         self,
         corpus: list[str] | None = None,
         ids: list[str] | None = None,
+        metadatas: list[dict[str, Any]] | None = None,
     ) -> None:
         """BM25 인덱스를 수동으로 재구축 (대량 인덱싱 후 1회 호출용)
 
         Args:
-            corpus: 직접 전달할 문서 텍스트 리스트 (None이면 ChromaDB에서 로드)
+            corpus: 직접 전달할 문서 텍스트 리스트
             ids: corpus에 대응하는 chunk_id 리스트
+            metadatas: corpus에 대응하는 메타데이터 리스트 (선택, BM25 검색 캐시용)
         """
         if corpus is not None and ids is not None:
-            self._build_bm25_from_corpus(corpus, ids)
+            self._build_bm25_from_corpus(corpus, ids, metadatas)
         else:
-            self._rebuild_bm25_index()
+            self._rebuild_bm25_from_chroma()
         self._save_bm25_index()
 
     def search(
@@ -259,12 +502,8 @@ class VectorStoreService:
         Args:
             query: 검색 쿼리
             n_results: 반환할 최종 결과 수
-            filters: ChromaDB 메타데이터 필터
+            filters: ChromaDB 메타데이터 필터 (case_id는 자동 병합됨)
             search_method: "hybrid" | "vector" | "bm25"
-
-        Returns:
-            [{"content": str, "metadata": dict, "score": float,
-              "search_method": str, "chunk_id": str}, ...]
         """
         if search_method == "vector":
             return self._search_vector(query, n_results, filters)
@@ -279,63 +518,50 @@ class VectorStoreService:
         n_results: int,
         filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """ChromaDB 벡터 유사도 검색"""
+        """ChromaDB 벡터 유사도 검색 (case_id 필터 자동 적용)"""
         collection = self._get_collection()
         query_embedding = self._embedding_service.embed_text(query)
 
+        merged = self._merge_filter(filters)
         query_params: dict[str, Any] = {
             "query_embeddings": [query_embedding],
             "n_results": n_results,
             "include": ["documents", "metadatas", "distances"],
         }
-        if filters:
-            query_params["where"] = self._build_chroma_filter(filters)
+        if merged:
+            query_params["where"] = self._build_chroma_filter(merged)
 
         results = collection.query(**query_params)
-
         return self._format_chroma_results(results, "vector")
 
     def _search_bm25(self, query: str, n_results: int) -> list[dict[str, Any]]:
-        """BM25 키워드 검색"""
+        """BM25 키워드 검색 — 인메모리 corpus/메타 캐시에서 직접 반환"""
         if not self._bm25_index:
-            self._rebuild_bm25_index()
+            self._rebuild_bm25_from_chroma()
         if not self._bm25_index:
             return []
 
         tokenized_query = self._tokenize(query)
         scores = self._bm25_index.get_scores(tokenized_query)
 
-        # 상위 n_results 추출
+        # 상위 후보 추출 (score > 0)
         scored_indices = sorted(
             enumerate(scores), key=lambda x: x[1], reverse=True
         )[:n_results]
 
-        # ChromaDB에서 해당 청크 정보 조회
-        collection = self._get_collection()
-        result_ids = [self._bm25_ids[idx] for idx, score in scored_indices if score > 0]
-
-        if not result_ids:
-            return []
-
-        chroma_results = collection.get(
-            ids=result_ids[:n_results],
-            include=["documents", "metadatas"],
-        )
-
-        # 스코어 매핑
-        score_map = {
-            self._bm25_ids[idx]: score for idx, score in scored_indices if score > 0
-        }
-
         results: list[dict[str, Any]] = []
-        for i, doc_id in enumerate(chroma_results["ids"]):
-            metadata = chroma_results["metadatas"][i] if chroma_results["metadatas"] else {}
+        for idx, score in scored_indices:
+            if score <= 0:
+                continue
+            cid = self._bm25_ids[idx]
+            content = self._bm25_corpus[idx]
+            meta = self._bm25_metadata.get(cid, {})
             results.append({
-                "content": chroma_results["documents"][i] if chroma_results["documents"] else "",
-                "metadata": deserialize_metadata_from_chroma(metadata),
-                "score": score_map.get(doc_id, 0.0),
+                "content": content,
+                "metadata": deserialize_metadata_from_chroma(meta),
+                "score": float(score),
                 "search_method": "bm25",
-                "chunk_id": doc_id,
+                "chunk_id": cid,
             })
 
         return results
@@ -353,6 +579,14 @@ class VectorStoreService:
         # 두 검색을 각각 실행
         vector_results = self._search_vector(query, top_k, filters)
         bm25_results = self._search_bm25(query, top_k)
+
+        # case_id 모드: BM25는 already 케이스별 corpus, 벡터는 필터 적용됨
+        # 단, BM25에 case_id 필터링이 없으므로 명시적으로 제거
+        if self.case_id:
+            bm25_results = [
+                r for r in bm25_results
+                if r["metadata"].get("case_id", self.case_id) == self.case_id
+            ]
 
         # RRF (Reciprocal Rank Fusion) 스코어 계산
         rrf_scores: dict[str, float] = defaultdict(float)
@@ -395,11 +629,7 @@ class VectorStoreService:
         return results
 
     def get_collection_dimension(self) -> int | None:
-        """기존 컬렉션의 벡터 차원을 조회
-
-        Returns:
-            벡터 차원 수, 비어 있으면 None
-        """
+        """기존 컬렉션의 벡터 차원을 조회"""
         collection = self._get_collection()
         if collection.count() == 0:
             return None
@@ -420,6 +650,51 @@ class VectorStoreService:
 
         return len(embeddings[0])
 
+    def _save_failed_chunks(
+        self,
+        failed_chunks: list[Chunk],
+        diagnostics: list[dict[str, object]] | None = None,
+    ) -> None:
+        """임베딩이 영구 실패한 청크를 retry 큐 파일에 append
+
+        파일 경로: data/failed_embeddings/{case_id or collection}.jsonl
+        한 줄당 청크 1개. 진단 정보(diagnostics)가 있으면 error_type, error_message,
+        text_stats를 함께 저장 → 재처리 스크립트에서 분류·우선순위 결정에 활용.
+
+        Args:
+            failed_chunks: 영구 실패 청크 리스트
+            diagnostics: chunks와 동일 순서의 진단 정보 dict 리스트 (optional)
+        """
+        try:
+            base = Path(settings.bm25_index_dir).parent / "failed_embeddings"
+            base.mkdir(parents=True, exist_ok=True)
+            key = self.case_id or self.collection_name
+            path = base / f"{key}.jsonl"
+            ts = time.time()
+            with path.open("a", encoding="utf-8") as f:
+                for i, c in enumerate(failed_chunks):
+                    record: dict[str, object] = {
+                        "chunk_id": c.chunk_id,
+                        "content": c.content,
+                        "metadata": c.metadata,
+                        "source_type": c.source_type,
+                        "ts": ts,
+                    }
+                    if diagnostics and i < len(diagnostics) and diagnostics[i]:
+                        diag = diagnostics[i]
+                        record["error_type"] = diag.get("error_type", "unknown")
+                        record["error_message"] = diag.get("error_message", "")
+                        record["text_stats"] = diag.get("text_stats", {})
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as e:
+            # JSONL 저장이 실패하면 청크가 영구 증발 — 호출측이 인지할 수 있도록
+            # error 로그 + raise 로 데이터 손실을 가시화.
+            logger.error(
+                f"실패 청크 JSONL 저장 실패 (DATA LOSS, {len(failed_chunks)}개): {e}",
+                exc_info=True,
+            )
+            raise
+
     def _validate_embedding_dimension(self, collection: chromadb.Collection) -> None:
         """현재 임베딩 모델과 기존 컬렉션의 벡터 차원이 일치하는지 검증
 
@@ -434,7 +709,6 @@ class VectorStoreService:
         if embeddings is None:
             return
 
-        # ChromaDB peek()은 numpy array를 반환할 수 있음
         try:
             if len(embeddings) == 0 or len(embeddings[0]) == 0:
                 return
@@ -444,8 +718,47 @@ class VectorStoreService:
         existing_dim = len(embeddings[0])
         self._embedding_service.validate_dimension(existing_dim)
 
+    def delete_case_data(self) -> int:
+        """현재 case_id에 해당하는 청크만 삭제 (단일 컬렉션 모드)
+
+        Returns:
+            삭제된 청크 수
+        """
+        if not self.case_id:
+            raise ValueError(
+                "delete_case_data()는 case_id 모드에서만 사용 가능합니다. "
+                "단일-컬렉션 모드는 delete_collection()을 사용하세요."
+            )
+
+        collection = self._get_collection()
+        before = collection.count()
+        collection.delete(where={"case_id": self.case_id})
+        after = collection.count()
+
+        # BM25 캐시도 비우기 (이 케이스의 in-memory 상태)
+        self._bm25_index = None
+        self._bm25_corpus = []
+        self._bm25_ids = []
+        self._bm25_tokenized = []
+        self._bm25_metadata = {}
+
+        # BM25 pickle 파일 삭제
+        bm25_path = Path(settings.bm25_index_dir) / f"{self._bm25_key}.pkl"
+        if bm25_path.exists():
+            try:
+                bm25_path.unlink()
+            except OSError as e:
+                logger.warning(f"BM25 인덱스 파일 삭제 실패: {bm25_path} — {e}")
+
+        deleted = before - after
+        logger.info(f"케이스 데이터 삭제: case_id={self.case_id}, {deleted}개 청크 제거")
+        return deleted
+
     def delete_collection(self) -> None:
-        """현재 컬렉션 삭제"""
+        """현재 컬렉션 전체 삭제 (단일-컬렉션 모드 전용)
+
+        ⚠️ 멀티-케이스 모드(case_id 지정)에서는 delete_case_data()를 사용해야 함.
+        """
         client = self._get_client()
         try:
             client.delete_collection(self.collection_name)
@@ -453,103 +766,152 @@ class VectorStoreService:
             self._bm25_index = None
             self._bm25_corpus = []
             self._bm25_ids = []
-            self._known_ids = None
+            self._bm25_tokenized = []
+            self._bm25_metadata = {}
             logger.info(f"컬렉션 삭제 완료: {self.collection_name}")
-        except ValueError:
+        except (ValueError, chromadb.errors.NotFoundError):
             logger.warning(f"컬렉션이 존재하지 않습니다: {self.collection_name}")
 
     def get_stats(self) -> dict[str, Any]:
-        """저장소 통계 조회
+        """저장소 통계 조회 — 메타데이터 전체 로드 대신 source_type별 카운트
 
-        Returns:
-            {"collection_name": str, "total_chunks": int,
-             "source_type_counts": dict, ...}
+        case_id 모드: 해당 케이스만 카운트.
+        단일-컬렉션 모드: 컬렉션 전체 카운트.
         """
         collection = self._get_collection()
-        total = collection.count()
 
-        # source_type별 카운트
+        # 전체 카운트 (case_id 모드는 where로 한정)
+        case_filter = self._case_filter()
+        if case_filter:
+            total_result = collection.get(where=case_filter, include=[])
+            total = len(total_result["ids"]) if total_result.get("ids") else 0
+        else:
+            total = collection.count()
+
+        # source_type별 카운트 — 알려진 타입만 분할 카운트
         source_counts: dict[str, int] = {}
         if total > 0:
-            all_meta = collection.get(include=["metadatas"])
-            if all_meta["metadatas"]:
-                for meta in all_meta["metadatas"]:
-                    st = meta.get("source_type", "unknown")
-                    source_counts[st] = source_counts.get(st, 0) + 1
+            for st in _KNOWN_SOURCE_TYPES:
+                where: dict[str, Any] = {"source_type": st}
+                if case_filter:
+                    where = {"$and": [where, case_filter]}
+                try:
+                    res = collection.get(where=where, include=[])
+                    n = len(res["ids"]) if res.get("ids") else 0
+                except Exception as e:
+                    logger.warning(f"source_type={st} 카운트 실패: {e}")
+                    n = 0
+                if n > 0:
+                    source_counts[st] = n
 
         return {
             "collection_name": self.collection_name,
+            "case_id": self.case_id,
             "total_chunks": total,
             "source_type_counts": source_counts,
         }
 
     # === BM25 인덱스 관리 ===
 
-    def _build_bm25_from_corpus(self, corpus: list[str], ids: list[str]) -> None:
-        """직접 전달받은 corpus로 BM25 인덱스 구축 (ChromaDB 재로드 불필요)
+    def _rebuild_bm25_from_cache(self) -> None:
+        """인메모리 _bm25_tokenized 캐시로부터 BM25 인덱스 재구축 (전체 재토큰화 없음)"""
+        if not self._bm25_tokenized:
+            self._bm25_index = None
+            return
+        self._bm25_index = BM25Okapi(self._bm25_tokenized)
+        logger.info(f"BM25 인덱스 구축 완료: {len(self._bm25_tokenized)}개 문서 (캐시)")
+
+    def _build_bm25_from_corpus(
+        self,
+        corpus: list[str],
+        ids: list[str],
+        metadatas: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """직접 전달받은 corpus로 BM25 인덱스 구축
 
         대량 인덱싱 파이프라인에서 이미 보유한 텍스트를 그대로 활용하여
-        ChromaDB 전체 문서 로드를 건너뜀.
-
-        Args:
-            corpus: 문서 텍스트 리스트
-            ids: 대응하는 chunk_id 리스트
+        ChromaDB 전체 문서 로드를 건너뜀. 신규 텍스트만 증분 토큰화.
         """
         if not corpus:
             self._bm25_index = None
             self._bm25_corpus = []
             self._bm25_ids = []
+            self._bm25_tokenized = []
+            self._bm25_metadata = {}
             return
 
-        # 기존 데이터가 있으면 병합
+        # 기존 데이터가 있으면 신규만 추가 (증분)
         existing_id_set = set(self._bm25_ids)
-        new_texts = []
-        new_ids = []
-        for text, cid in zip(corpus, ids):
-            if cid not in existing_id_set:
-                new_texts.append(text)
-                new_ids.append(cid)
+        for i, (text, cid) in enumerate(zip(corpus, ids)):
+            if cid in existing_id_set:
+                continue
+            self._bm25_corpus.append(text)
+            self._bm25_ids.append(cid)
+            self._bm25_tokenized.append(self._tokenize(text))
+            if metadatas and i < len(metadatas):
+                self._bm25_metadata[cid] = metadatas[i]
 
-        self._bm25_corpus.extend(new_texts)
-        self._bm25_ids.extend(new_ids)
-
-        tokenized_corpus = [self._tokenize(doc) for doc in self._bm25_corpus]
-        self._bm25_index = BM25Okapi(tokenized_corpus)
-
+        self._bm25_index = BM25Okapi(self._bm25_tokenized)
         logger.info(
             f"BM25 인덱스 구축 완료: {len(self._bm25_corpus)}개 문서 "
-            f"(신규 {len(new_texts)}개)"
+            f"(신규 {len(self._bm25_corpus) - len(existing_id_set)}개)"
         )
 
-    def _rebuild_bm25_index(self) -> None:
-        """ChromaDB 전체 문서로 BM25 인덱스 재구축"""
+    def _rebuild_bm25_from_chroma(self) -> None:
+        """ChromaDB에서 케이스별 corpus를 로드하여 BM25 재구축
+
+        case_id 모드: 해당 케이스만 로드. 단일-컬렉션 모드: 전체 로드.
+        디스크 pickle 캐시가 있으면 우선 시도.
+        """
+        # 디스크 캐시 우선 시도
+        if self._load_bm25_index():
+            return
+
         collection = self._get_collection()
-        total = collection.count()
-        if total == 0:
+        case_filter = self._case_filter()
+
+        if case_filter:
+            res = collection.get(
+                where=case_filter,
+                include=["documents", "metadatas"],
+            )
+        else:
+            res = collection.get(include=["documents", "metadatas"])
+
+        ids = res.get("ids") or []
+        if not ids:
             self._bm25_index = None
             self._bm25_corpus = []
             self._bm25_ids = []
+            self._bm25_tokenized = []
+            self._bm25_metadata = {}
             return
 
-        all_docs = collection.get(include=["documents"])
-        self._bm25_ids = all_docs["ids"]
-        self._bm25_corpus = all_docs["documents"] or []
+        documents = res.get("documents") or []
+        metadatas = res.get("metadatas") or []
 
-        tokenized_corpus = [self._tokenize(doc) for doc in self._bm25_corpus]
-        self._bm25_index = BM25Okapi(tokenized_corpus)
+        self._bm25_ids = list(ids)
+        self._bm25_corpus = list(documents)
+        self._bm25_tokenized = [self._tokenize(doc) for doc in self._bm25_corpus]
+        self._bm25_metadata = {
+            cid: (meta or {}) for cid, meta in zip(ids, metadatas)
+        }
+        self._bm25_index = BM25Okapi(self._bm25_tokenized)
 
-        logger.info(f"BM25 인덱스 구축 완료: {total}개 문서")
+        logger.info(f"BM25 인덱스 구축 완료: {len(ids)}개 문서 (ChromaDB 로드)")
 
     def _save_bm25_index(self) -> None:
-        """BM25 인덱스를 디스크에 저장"""
+        """BM25 인덱스를 디스크에 저장 (케이스별 별도 파일)"""
         bm25_dir = Path(settings.bm25_index_dir)
         bm25_dir.mkdir(parents=True, exist_ok=True)
 
-        index_path = bm25_dir / f"{self.collection_name}.pkl"
+        index_path = bm25_dir / f"{self._bm25_key}.pkl"
         data = {
             "bm25_index": self._bm25_index,
             "corpus": self._bm25_corpus,
             "ids": self._bm25_ids,
+            "tokenized": self._bm25_tokenized,
+            "metadata": self._bm25_metadata,
         }
         with open(index_path, "wb") as f:
             pickle.dump(data, f)
@@ -557,12 +919,8 @@ class VectorStoreService:
         logger.info(f"BM25 인덱스 저장: {index_path}")
 
     def _load_bm25_index(self) -> bool:
-        """디스크에서 BM25 인덱스 로드
-
-        Returns:
-            로드 성공 여부
-        """
-        index_path = Path(settings.bm25_index_dir) / f"{self.collection_name}.pkl"
+        """디스크에서 BM25 인덱스 로드"""
+        index_path = Path(settings.bm25_index_dir) / f"{self._bm25_key}.pkl"
         if not index_path.exists():
             return False
 
@@ -572,6 +930,10 @@ class VectorStoreService:
             self._bm25_index = data["bm25_index"]
             self._bm25_corpus = data["corpus"]
             self._bm25_ids = data["ids"]
+            self._bm25_tokenized = data.get("tokenized") or [
+                self._tokenize(doc) for doc in self._bm25_corpus
+            ]
+            self._bm25_metadata = data.get("metadata") or {}
             logger.info(f"BM25 인덱스 로드: {index_path}")
             return True
         except Exception as e:
@@ -582,25 +944,21 @@ class VectorStoreService:
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
-        """텍스트를 토큰으로 분할 (BM25용)
-
-        kiwipiepy 형태소 분석기를 사용하여 명사/동사/형용사 등
-        의미 있는 형태소를 추출. kiwipiepy가 없으면 정규식 fallback.
-        """
+        """텍스트를 토큰으로 분할 (BM25용)"""
         return _kiwi_tokenize(text)
 
     @staticmethod
     def _build_chroma_filter(filters: dict[str, Any]) -> dict[str, Any]:
         """사용자 필터를 ChromaDB where 절로 변환
 
-        Args:
-            filters: {"source_type": "email", "case_id": "C001", ...}
-
-        Returns:
-            ChromaDB where 딕셔너리
+        이미 $and/$or 등 ChromaDB 연산자가 들어있으면 그대로 반환.
         """
         if not filters:
             return {}
+
+        # 이미 ChromaDB 연산자 형태면 그대로 사용
+        if any(k.startswith("$") for k in filters.keys()):
+            return filters
 
         conditions: list[dict] = []
         for key, value in filters.items():

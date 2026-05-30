@@ -289,3 +289,64 @@ class TestSerialization:
         assert loaded.total_documents == 10
         assert loaded.total_chunks == 500
         assert loaded.indexed_at is not None
+
+
+class TestRecoverIfStuck:
+    """stuck indexing 자동 복구 — INDEXING 상태에서 N분 멈춰있으면 ERROR로 강제 전이"""
+
+    def test_not_stuck_returns_none(self, store):
+        """방금 indexing 시작한 케이스는 복구 대상 아님"""
+        meta = store.create(name="stuck-test")
+        store.update_status(meta.case_id, CaseStatus.INDEXING)
+        # 방금 갱신됨 → timeout 미경과
+        result = store.recover_if_stuck(meta.case_id, timeout_min=30)
+        assert result is None
+        # 상태는 그대로 INDEXING
+        assert store.get(meta.case_id).status == CaseStatus.INDEXING
+
+    def test_stuck_recovers_to_error(self, store):
+        """timeout_min 경과 후 INDEXING이면 ERROR로 전이"""
+        from datetime import datetime, timedelta
+
+        from src.db.models import CaseModel
+
+        meta = store.create(name="stuck-old")
+        store.update_status(meta.case_id, CaseStatus.INDEXING)
+        # updated_at을 강제로 1시간 전으로 변경
+        with store._get_session() as session:
+            row = session.get(CaseModel, meta.case_id)
+            row.updated_at = datetime.now() - timedelta(hours=1)
+            session.commit()
+
+        result = store.recover_if_stuck(meta.case_id, timeout_min=30)
+        assert result is not None
+        assert result.status == CaseStatus.ERROR
+        assert "비정상 종료" in result.error_message
+
+        # DB에도 반영
+        loaded = store.get(meta.case_id)
+        assert loaded.status == CaseStatus.ERROR
+
+    def test_non_indexing_state_returns_none(self, store):
+        """READY 등 INDEXING이 아닌 상태는 복구 대상 아님"""
+        from datetime import datetime, timedelta
+
+        from src.db.models import CaseModel
+
+        meta = store.create(name="ready-old")
+        store.update_status(meta.case_id, CaseStatus.INDEXING)
+        store.update_status(meta.case_id, CaseStatus.READY)
+        # 오래된 케이스로 위장
+        with store._get_session() as session:
+            row = session.get(CaseModel, meta.case_id)
+            row.updated_at = datetime.now() - timedelta(hours=2)
+            session.commit()
+
+        # READY 상태 → 복구 대상 아님
+        result = store.recover_if_stuck(meta.case_id, timeout_min=30)
+        assert result is None
+
+    def test_nonexistent_case_returns_none(self, store):
+        """존재하지 않는 케이스는 None 반환 (예외 X)"""
+        result = store.recover_if_stuck("nonexistent_id", timeout_min=30)
+        assert result is None

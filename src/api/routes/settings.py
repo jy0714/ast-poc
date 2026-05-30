@@ -116,18 +116,17 @@ async def set_embed_model(request: EmbedModelRequest):
             case_store = CaseStore()
             all_cases = case_store.list_all()
 
-            for case in all_cases:
-                if case.status not in (CaseStatus.READY, CaseStatus.ARCHIVED):
-                    continue
-
-                collection_name = f"case_{case.case_id}"
-                try:
-                    vs = VectorStoreService(collection_name=collection_name)
-                    existing_dim = vs.get_collection_dimension()
-                    if existing_dim is not None and existing_dim != new_dim:
-                        reindex_required.append(case.case_id)
-                except Exception:
-                    pass
+            # 단일 공유 컬렉션이므로 컬렉션 차원만 1회 확인
+            try:
+                vs = VectorStoreService()
+                existing_dim = vs.get_collection_dimension()
+                if existing_dim is not None and existing_dim != new_dim:
+                    # 모든 ready/archived 케이스가 재인덱싱 필요
+                    for case in all_cases:
+                        if case.status in (CaseStatus.READY, CaseStatus.ARCHIVED):
+                            reindex_required.append(case.case_id)
+            except Exception:
+                pass
         except Exception as e:
             logger.warning(f"케이스 호환성 확인 실패 (무시): {e}")
 
@@ -177,16 +176,16 @@ async def get_embed_model():
             from src.cases.case_store import CaseStatus, CaseStore
 
             case_store = CaseStore()
-            for case in case_store.list_all():
-                if case.status not in (CaseStatus.READY, CaseStatus.ARCHIVED):
-                    continue
-                try:
-                    vs = VectorStoreService(collection_name=f"case_{case.case_id}")
-                    existing_dim = vs.get_collection_dimension()
-                    if existing_dim is not None and existing_dim != dim:
-                        mismatched.append(case.case_id)
-                except Exception:
-                    pass
+            # 단일 공유 컬렉션 — 한 번만 차원 확인
+            try:
+                vs = VectorStoreService()
+                existing_dim = vs.get_collection_dimension()
+                if existing_dim is not None and existing_dim != dim:
+                    for case in case_store.list_all():
+                        if case.status in (CaseStatus.READY, CaseStatus.ARCHIVED):
+                            mismatched.append(case.case_id)
+            except Exception:
+                pass
         except Exception:
             pass
 

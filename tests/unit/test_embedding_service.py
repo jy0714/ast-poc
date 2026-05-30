@@ -169,3 +169,278 @@ class TestEmbeddingServiceErrors:
         service = EmbeddingService(base_url="http://localhost:19876")
         with pytest.raises(ConnectionError):
             service.embed_text("테스트")
+
+
+# === 신규: 시간 제한 / 에러 분기 / 분할 깊이 / cancel / 진단 ===
+
+
+class TestTextStats:
+    """진단 헬퍼 — 길이/바이트/유니코드 분포"""
+
+    def test_text_stats_basic(self):
+        from src.embeddings.embedding_service import text_stats
+
+        s = text_stats("안녕 abc 漢字")
+        assert s["char_count"] == 9
+        assert s["byte_count"] > 9  # 한글/한자가 멀티바이트
+        assert s["est_tokens"] > 0
+        assert s["hangul_pct"] > 0
+        assert s["ascii_pct"] > 0
+        assert s["cjk_pct"] > 0
+
+    def test_text_stats_empty(self):
+        from src.embeddings.embedding_service import text_stats
+
+        s = text_stats("")
+        assert s["char_count"] == 0
+        assert s["byte_count"] == 0
+        assert s["preview"] == ""
+
+    def test_text_stats_preview_capped(self):
+        from src.embeddings.embedding_service import text_stats
+
+        long_text = "x" * 1000
+        s = text_stats(long_text)
+        assert len(s["preview"]) == 200
+
+
+class TestPrepareTexts:
+    """전처리 — sanitize + 빈 텍스트 제외 + 문자/바이트 truncate"""
+
+    def test_byte_truncation_kicks_in(self, monkeypatch):
+        """문자 수 한도 미만이지만 바이트 한도 초과 시 truncate"""
+        from src.embeddings.embedding_service import EmbeddingService
+        from src.utils.config import settings
+
+        # 한자 1자 = 3바이트. 1000자 = 3000바이트지만 byte 한도 1000으로 낮추면 truncate
+        monkeypatch.setattr(settings, "embed_max_bytes", 1000)
+        service = EmbeddingService()
+        text = "漢" * 1000  # 1000자, 3000바이트
+        cleaned, skipped, truncated = service._prepare_texts([text])
+        assert len(cleaned) == 1
+        assert truncated == 1
+        # 바이트 한도 안에 들어와야 함
+        assert len(cleaned[0][1].encode("utf-8")) <= 1000
+
+    def test_empty_skipped(self):
+        from src.embeddings.embedding_service import EmbeddingService
+
+        service = EmbeddingService()
+        cleaned, skipped, truncated = service._prepare_texts(["hi", "", "  ", "world"])
+        assert len(cleaned) == 2
+        assert skipped == 2
+
+
+class TestSplitIntoBatches:
+    """배치 분할 — 짧은/긴 텍스트 분리 + 길이 정렬"""
+
+    def test_short_and_long_separated(self, monkeypatch):
+        from src.embeddings.embedding_service import EmbeddingService
+        from src.utils.config import settings
+
+        monkeypatch.setattr(settings, "embed_short_text_threshold", 5)
+        service = EmbeddingService()
+        texts = ["abc", "x", "long text 12345", "another long one"]
+        batches = service._split_into_batches(texts, batch_size=10)
+        # 짧은 그룹 1개 + 긴 그룹 1개 = 2개 배치
+        assert len(batches) == 2
+        # 첫 배치는 짧은 텍스트만 (인덱스 0=abc, 1=x)
+        first_indices = batches[0][1]
+        assert all(len(texts[i]) < 5 for i in first_indices)
+        # 두 번째 배치는 긴 텍스트만 (인덱스 2,3)
+        second_indices = batches[1][1]
+        assert all(len(texts[i]) >= 5 for i in second_indices)
+
+    def test_indices_preserve_original_position(self):
+        """정렬 후에도 indices는 원래 위치를 가리켜야 함"""
+        from src.embeddings.embedding_service import EmbeddingService
+
+        service = EmbeddingService()
+        texts = ["medium text", "short", "very very very long text " * 10]
+        batches = service._split_into_batches(texts, batch_size=10)
+        # 모든 batch의 indices 합집합이 원본 인덱스 전체를 커버
+        all_indices = sorted(idx for _, idxs, _ in batches for idx in idxs)
+        assert all_indices == list(range(len(texts)))
+
+
+class TestEmbedAsyncControl:
+    """embed_texts_async 제어 흐름 — Ollama 호출 mock"""
+
+    @pytest.mark.asyncio
+    async def test_total_timeout_triggers_failure(self, monkeypatch):
+        """전체 시간 제한 초과 시 부분 결과 반환 + 나머지 영구 실패"""
+        from src.embeddings.embedding_service import EmbeddingService
+        from src.utils.config import settings
+
+        monkeypatch.setattr(settings, "embed_total_timeout_sec", 0)  # 즉시 timeout
+        monkeypatch.setattr(settings, "embed_batch_size", 2)
+
+        service = EmbeddingService()
+        result = await service.embed_texts_async(["a", "b", "c"])
+        # 모든 텍스트가 시간 초과로 실패해야 함
+        assert all(v == [] for v in result)
+        assert len(service._last_failed_indices) == 3
+        for idx in service._last_failed_indices:
+            assert service._last_failed_diagnostics[idx]["error_type"] == "total_timeout"
+
+    @pytest.mark.asyncio
+    async def test_cancel_event_triggers_failure(self, monkeypatch):
+        """cancel_event set 시 즉시 중단"""
+        import threading
+
+        from src.embeddings.embedding_service import EmbeddingService
+        from src.utils.config import settings
+
+        monkeypatch.setattr(settings, "embed_total_timeout_sec", 60)
+        monkeypatch.setattr(settings, "embed_batch_size", 2)
+
+        cancel = threading.Event()
+        cancel.set()  # 시작 전에 set → 모든 배치가 cancel로 처리됨
+
+        service = EmbeddingService()
+        result = await service.embed_texts_async(
+            ["a", "b", "c"], cancel_event=cancel
+        )
+        assert all(v == [] for v in result)
+        for idx in service._last_failed_indices:
+            assert service._last_failed_diagnostics[idx]["error_type"] == "cancelled"
+
+
+class TestRetryPolicy:
+    """에러 유형별 재시도 정책 — _embed_batch_with_retry_async를 직접 호출"""
+
+    @pytest.mark.asyncio
+    async def test_timeout_immediate_failure_no_wait(self, monkeypatch):
+        """timeout은 재시도 없이 즉시 실패 (subdivide로 넘어감)"""
+        import time
+
+        import httpx
+
+        from src.embeddings.embedding_service import EmbeddingService
+
+        service = EmbeddingService()
+
+        async def fake_post(*args, **kwargs):
+            raise httpx.TimeoutException("simulated timeout")
+
+        async with httpx.AsyncClient() as client:
+            monkeypatch.setattr(client, "post", fake_post)
+            t_start = time.monotonic()
+            with pytest.raises(ConnectionError) as exc:
+                await service._embed_batch_with_retry_async(
+                    client, "http://x/api/embed", ["text"], 1,
+                    deadline=t_start + 60, cancel_event=None,
+                )
+            elapsed = time.monotonic() - t_start
+            # timeout은 재시도 0회 → 1초 미만에 실패해야 함
+            assert elapsed < 1.0
+            assert exc.value._embed_error_type == "timeout"
+
+    @pytest.mark.asyncio
+    async def test_http_500_one_retry_only(self, monkeypatch):
+        """5xx는 1회만 재시도 (총 2회 호출, 약 2초)"""
+        import time
+
+        import httpx
+
+        from src.embeddings.embedding_service import EmbeddingService
+
+        service = EmbeddingService()
+        call_count = {"n": 0}
+
+        async def fake_post(*args, **kwargs):
+            call_count["n"] += 1
+            req = httpx.Request("POST", "http://x")
+            raise httpx.HTTPStatusError(
+                "500", request=req,
+                response=httpx.Response(500, request=req),
+            )
+
+        async with httpx.AsyncClient() as client:
+            monkeypatch.setattr(client, "post", fake_post)
+            t_start = time.monotonic()
+            with pytest.raises(ConnectionError) as exc:
+                await service._embed_batch_with_retry_async(
+                    client, "http://x/api/embed", ["text"], 1,
+                    deadline=t_start + 60, cancel_event=None,
+                )
+            elapsed = time.monotonic() - t_start
+            # 5xx 1회 재시도 + 2초 대기 → 2~3초 사이
+            assert call_count["n"] == 2
+            assert 1.5 < elapsed < 4.0
+            assert exc.value._embed_error_type == "http_500"
+
+    @pytest.mark.asyncio
+    async def test_http_4xx_immediate_failure(self, monkeypatch):
+        """4xx는 재시도 없이 즉시 실패"""
+        import httpx
+
+        from src.embeddings.embedding_service import EmbeddingService
+
+        service = EmbeddingService()
+        call_count = {"n": 0}
+
+        async def fake_post(*args, **kwargs):
+            call_count["n"] += 1
+            req = httpx.Request("POST", "http://x")
+            raise httpx.HTTPStatusError(
+                "400", request=req,
+                response=httpx.Response(400, request=req),
+            )
+
+        async with httpx.AsyncClient() as client:
+            monkeypatch.setattr(client, "post", fake_post)
+            with pytest.raises(ConnectionError) as exc:
+                await service._embed_batch_with_retry_async(
+                    client, "http://x/api/embed", ["text"], 1,
+                    deadline=999999999, cancel_event=None,
+                )
+            assert call_count["n"] == 1
+            assert exc.value._embed_error_type == "http_4xx"
+
+
+class TestSubdivideDepthLimit:
+    """분할 깊이 제한 — embed_max_subdivide_depth 도달 시 영구 실패"""
+
+    @pytest.mark.asyncio
+    async def test_depth_limit_marks_permanent_failure(self, monkeypatch):
+        """모든 호출이 timeout이면 깊이 N에서 멈추고 모든 청크가 영구 실패로"""
+        import httpx
+
+        from src.embeddings.embedding_service import EmbeddingService
+        from src.utils.config import settings
+
+        monkeypatch.setattr(settings, "embed_max_subdivide_depth", 2)
+
+        service = EmbeddingService()
+
+        async def always_timeout(*args, **kwargs):
+            raise httpx.TimeoutException("always")
+
+        results: list = [None] * 4
+        failed: list[int] = []
+        diag: dict = {}
+
+        async with httpx.AsyncClient() as client:
+            monkeypatch.setattr(client, "post", always_timeout)
+            await service._embed_with_subdivide_async(
+                client, "http://x/api/embed",
+                indices=[0, 1, 2, 3],
+                batch=["a", "b", "c", "d"],
+                batch_num=1,
+                results=results,
+                failed_local_indices=failed,
+                failure_diag=diag,
+                depth=0,
+                deadline=99999999,
+                cancel_event=None,
+            )
+
+        # 4개 모두 실패, 결과는 None
+        assert all(r is None for r in results)
+        assert sorted(failed) == [0, 1, 2, 3]
+        # 진단: depth 도달 또는 timeout으로 분류
+        for i in failed:
+            assert diag[i]["error_type"] in (
+                "subdivide_exhausted", "timeout"
+            )

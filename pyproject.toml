@@ -16,14 +16,14 @@ dependencies = [
     "python-pptx>=0.6.23",
     "openpyxl>=3.1.2",
     "pytesseract>=0.3.10",
+    "opencv-python-headless>=4.10.0",  # OCR 이미지 전처리 (deskew/denoise/contrast)
     "langdetect>=1.0.9",
     "extract-msg>=0.48.0",
 
     # === LLM & RAG ===
-    "langchain>=0.3.0",
-    "langchain-community>=0.3.0",
     "langchain-ollama>=0.3.0",
-    "langchain-chroma>=0.2.0",
+    "langchain-openai>=0.2.0",
+    "langchain-text-splitters>=0.3.0",
     "chromadb>=0.5.0",
     "rank-bm25>=0.2.2",
     "ollama>=0.3.0",
@@ -62,6 +62,18 @@ dev = [
     "mypy>=1.11.0",
     "pre-commit>=3.8.0",
     "httpx>=0.27.0",
+]
+# 한국어 OCR 정확도 95%+ — paddleocr는 4GB+ 의존성이라 기본 install 제외.
+# pip install -e .[ocr-paddle]  또는 pip install paddleocr paddlepaddle 후
+# settings.ocr_engine="auto"|"paddle" 로 활성화.
+ocr-paddle = [
+    "paddleocr>=2.7.0",
+    "paddlepaddle>=2.6.0",  # GPU 환경은 paddlepaddle-gpu로 별도 설치
+]
+# 정확한 토큰 카운트 (OpenAI 계열 cl100k_base). 미설치 시 문자 기반 추정으로 동작.
+# pip install -e .[tokencount]
+tokencount = [
+    "tiktoken>=0.7.0",
 ]
 
 [build-system]

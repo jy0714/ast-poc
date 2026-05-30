@@ -3,20 +3,33 @@ FROM python:3.11-slim AS base
 WORKDIR /app
 
 # System dependencies
+# - build-essential: 일부 wheel 빌드용
+# - tesseract-ocr + 한국어/영어/중국어(간체) 모델: 스캔 PDF 기본 OCR 엔진
+# - libgl1 / libglib2.0-0: opencv-python-headless 런타임 의존
+# 운영 시 PaddleOCR 추가하려면 컨테이너 내에서:
+#   pip install paddlepaddle paddleocr  (또는 paddlepaddle-gpu — CUDA 환경)
+# 그러면 settings.ocr_engine="auto"가 자동으로 paddle을 우선 사용.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    tesseract-ocr \
+    tesseract-ocr-kor \
+    tesseract-ocr-eng \
+    tesseract-ocr-chi-sim \
+    libgl1 \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Python dependencies (install first for layer caching)
 COPY pyproject.toml .
 RUN pip install --no-cache-dir . && \
-    pip install --no-cache-dir httpx
+    pip install --no-cache-dir httpx opencv-python-headless
 
 # Application code
 COPY src/ src/
 
-# Data directories
-RUN mkdir -p data/input/pst data/input/documents data/processed data/vectordb data/cases data/bm25_index
+# Data directories (ocr_cache 포함 — 페이지 hash → 인식 텍스트 디스크 캐시)
+RUN mkdir -p data/input/pst data/input/documents data/processed data/vectordb \
+    data/cases data/bm25_index data/ocr_cache
 
 EXPOSE 8000
 

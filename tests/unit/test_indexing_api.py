@@ -33,7 +33,8 @@ def setup(tmpdir):
 
     def mock_vs_factory(case_id):
         vs = MagicMock()
-        vs.add_chunks.side_effect = lambda chunks: len(chunks)
+        # add_chunks(chunks, rebuild_bm25=True) 시그니처 지원
+        vs.add_chunks.side_effect = lambda chunks, rebuild_bm25=True: len(chunks)
         return vs
 
     pipeline = IndexingPipeline(

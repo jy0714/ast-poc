@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -52,6 +52,27 @@ class SourceReference(BaseModel):
     subject: str = ""
     relevance_score: float = 0.0
     search_method: str = ""
+    # 이메일 전용 필드 (다른 source_type은 빈 값)
+    sender: str = ""
+    recipients: list[str] = []
+    cc: list[str] = []
+    attachments: list[str] = []
+    message_id: str = ""
+    in_reply_to: str = ""
+    # Office/PDF 작성자·수정자 추적
+    author: str = ""
+    last_modified_by: str = ""
+    created_date: str = ""
+    last_modified: str = ""
+
+
+class TokenUsage(BaseModel):
+    """질의 1건의 토큰 사용량 (외부 API 비용 산정용)"""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    source: str = "estimated"  # "ollama_api" | "openai_api" | "estimated"
 
 
 class ChatResponse(BaseModel):
@@ -61,6 +82,12 @@ class ChatResponse(BaseModel):
     sources: list[SourceReference]
     security_mode: bool
     case_id: str
+    # 출처 인용 검증 (할루시네이션 감지)
+    citation_count: int = 0
+    invalid_citations: list[int] = []
+    uncited_response: bool = False
+    # 토큰 사용량 (LLM 미호출 시 None)
+    token_usage: TokenUsage | None = None
 
 
 class CaseInfo(BaseModel):
@@ -82,6 +109,7 @@ class ChatHistoryItem(BaseModel):
     security_mode: bool
     created_at: str
     sources_count: int
+    is_stopped: bool = False
 
 
 # === 채팅 히스토리 저장 ===
@@ -94,8 +122,13 @@ def _save_chat_history(
     security_mode: bool,
     filters: dict | None,
     sources: list[SourceReference],
+    is_stopped: bool = False,
 ) -> None:
-    """채팅 히스토리를 DB에 저장"""
+    """채팅 히스토리를 DB에 저장
+
+    Args:
+        is_stopped: 사용자가 중단한 응답이면 True (지금까지 모은 answer를 그대로 저장).
+    """
     try:
         from src.db.database import get_session
         from src.db.models import ChatHistoryModel, ChatSourceModel
@@ -106,6 +139,7 @@ def _save_chat_history(
             answer=answer,
             security_mode=1 if security_mode else 0,
             filters=json.dumps(filters or {}, ensure_ascii=False),
+            is_stopped=1 if is_stopped else 0,
         )
 
         with get_session() as session:
@@ -123,13 +157,28 @@ def _save_chat_history(
                     subject=src.subject,
                     relevance_score=src.relevance_score,
                     search_method=src.search_method,
+                    sender=src.sender,
+                    recipients=json.dumps(src.recipients[:10], ensure_ascii=False),
+                    cc=json.dumps(src.cc[:10], ensure_ascii=False),
+                    attachments=json.dumps(src.attachments[:10], ensure_ascii=False),
+                    message_id=src.message_id,
+                    in_reply_to=src.in_reply_to,
+                    author=src.author,
+                    last_modified_by=src.last_modified_by,
+                    created_date=src.created_date,
+                    last_modified=src.last_modified,
                 )
                 session.add(source_record)
 
             session.commit()
 
     except Exception as e:
-        logger.warning(f"채팅 히스토리 저장 실패 (무시): {e}")
+        # 응답 품질에는 영향 없으나 데이터 유실이므로 ERROR로 기록
+        # (운영 단계에서 메트릭 카운터로 알람 연동 예정)
+        logger.error(
+            f"채팅 히스토리 저장 실패 — case={case_id}, q='{question[:80]}': {e}",
+            exc_info=True,
+        )
 
 
 # === 엔드포인트 ===
@@ -177,6 +226,16 @@ async def chat(request: ChatRequest):
             subject=s.subject,
             relevance_score=round(s.score, 4),
             search_method=s.search_method,
+            sender=s.sender,
+            recipients=s.recipients[:10],
+            cc=s.cc[:10],
+            attachments=s.attachments[:10],
+            message_id=s.message_id,
+            in_reply_to=s.in_reply_to,
+            author=s.author,
+            last_modified_by=s.last_modified_by,
+            created_date=s.created_date,
+            last_modified=s.last_modified,
         )
         for s in result.sources
     ]
@@ -196,12 +255,21 @@ async def chat(request: ChatRequest):
         sources=sources,
         security_mode=result.secure_mode,
         case_id=result.case_id,
+        citation_count=result.citation_count,
+        invalid_citations=result.invalid_citations,
+        uncited_response=result.uncited_response,
+        token_usage=TokenUsage(**result.token_usage) if result.token_usage else None,
     )
 
 
 @router.post("/stream")
-async def chat_stream(request: ChatRequest):
-    """RAG 기반 스트리밍 채팅 질의 (SSE)"""
+async def chat_stream(request: ChatRequest, raw_request: Request):
+    """RAG 기반 스트리밍 채팅 질의 (SSE)
+
+    클라이언트가 연결을 끊으면(AbortController.abort 또는 네트워크 단절)
+    raw_request.is_disconnected()가 True가 되어 토큰 생성을 멈추고 리소스를 해제한다.
+    중단 시점까지 모은 답변은 is_stopped=True로 히스토리에 저장된다.
+    """
     store = get_case_store()
 
     try:
@@ -226,39 +294,117 @@ async def chat_stream(request: ChatRequest):
     async def event_generator():
         collected_answer = ""
         collected_sources: list[SourceReference] = []
+        stopped = False
+        token_usage_holder: dict = {}
+
+        async def check_disconnected() -> bool:
+            return await raw_request.is_disconnected()
+
+        def capture_token_usage(rec: dict) -> None:
+            # generate_stream의 finally에서 호출 — 토큰 사용량 보관
+            token_usage_holder.update(rec)
 
         try:
+            # 검색/reranker 단계의 조기 중단을 위해 engine에 콜백 전달
             token_stream, sources = await engine.query_stream(
                 question=request.message.strip(),
                 filters=request.filters,
                 secure_mode=request.security_mode,
+                is_disconnected=check_disconnected,
+                on_complete=capture_token_usage,
             )
 
-            # 토큰 스트리밍
+            # 토큰 스트리밍 — 매 토큰마다 연결 상태 확인
             async for token in token_stream:
+                if await raw_request.is_disconnected():
+                    stopped = True
+                    logger.info(
+                        f"스트리밍 중단 감지 (client disconnect): case={request.case_id}, "
+                        f"지금까지 {len(collected_answer)}자"
+                    )
+                    break
                 collected_answer += token
                 yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
 
-            # 출처 정보 전송
-            sources_data = []
-            for s in sources:
-                src_ref = SourceReference(
-                    content=s.content[:500],
-                    source_type=s.source_type,
-                    filename=s.filename,
-                    date=s.date,
-                    participants=s.participants[:10],
-                    subject=s.subject,
-                    relevance_score=round(s.score, 4),
-                    search_method=s.search_method,
+            if not stopped:
+                # 출처 정보 전송 (정상 완료 시에만)
+                sources_data = []
+                for s in sources:
+                    src_ref = SourceReference(
+                        content=s.content[:500],
+                        source_type=s.source_type,
+                        filename=s.filename,
+                        date=s.date,
+                        participants=s.participants[:10],
+                        subject=s.subject,
+                        relevance_score=round(s.score, 4),
+                        search_method=s.search_method,
+                        sender=s.sender,
+                        recipients=s.recipients[:10],
+                        cc=s.cc[:10],
+                        attachments=s.attachments[:10],
+                        message_id=s.message_id,
+                        in_reply_to=s.in_reply_to,
+                        author=s.author,
+                        last_modified_by=s.last_modified_by,
+                        created_date=s.created_date,
+                        last_modified=s.last_modified,
+                    )
+                    collected_sources.append(src_ref)
+                    sources_data.append(src_ref.model_dump())
+
+                # 출처 인용 검증 (할루시네이션 감지) — 완성된 답변 기준
+                from src.rag.engine import validate_citations
+
+                citation_count, invalid_citations, uncited_response = validate_citations(
+                    collected_answer, len(sources)
                 )
-                collected_sources.append(src_ref)
-                sources_data.append(src_ref.model_dump())
+                if invalid_citations:
+                    logger.warning(
+                        f"가짜 인용 감지 (stream): [출처 {invalid_citations}] > 실제 "
+                        f"{len(sources)}개 (case={request.case_id})"
+                    )
+                if uncited_response:
+                    logger.warning(
+                        f"LLM이 출처 인용 없이 답변 (stream) — 할루시네이션 위험 "
+                        f"(case={request.case_id})"
+                    )
 
-            yield f"data: {json.dumps({'type': 'sources', 'sources': sources_data}, ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "type": "sources",
+                            "sources": sources_data,
+                            "citation_count": citation_count,
+                            "invalid_citations": invalid_citations,
+                            "uncited_response": uncited_response,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n\n"
+                )
 
-            # 스트리밍 완료 후 채팅 히스토리 저장
+                # 토큰 사용량 이벤트 ([DONE] 직전) — 비용 산정용
+                if token_usage_holder:
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            {
+                                "type": "token_usage",
+                                "input_tokens": token_usage_holder.get("input_tokens", 0),
+                                "output_tokens": token_usage_holder.get("output_tokens", 0),
+                                "total_tokens": token_usage_holder.get("total_tokens", 0),
+                                "source": token_usage_holder.get("input_source", "estimated"),
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n\n"
+                    )
+
+                yield "data: [DONE]\n\n"
+
+            # 정상 완료/중단 모두 히스토리 저장 (중단도 사용자에게 의미있는 부분 응답)
             _save_chat_history(
                 case_id=request.case_id,
                 question=request.message.strip(),
@@ -266,6 +412,7 @@ async def chat_stream(request: ChatRequest):
                 security_mode=request.security_mode,
                 filters=request.filters,
                 sources=collected_sources,
+                is_stopped=stopped,
             )
 
         except Exception as e:
@@ -334,6 +481,7 @@ async def get_chat_history(case_id: str, limit: int = 50):
                     security_mode=bool(r.security_mode),
                     created_at=r.created_at.isoformat(),
                     sources_count=len(r.sources),
+                    is_stopped=bool(getattr(r, "is_stopped", 0)),
                 )
                 for r in rows
             ]

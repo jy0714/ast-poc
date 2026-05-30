@@ -19,6 +19,7 @@ env/
 data/input/
 data/processed/
 data/vectordb/
+data/ocr_cache/
 
 # === IDE ===
 .idea/
@@ -41,6 +42,7 @@ docker/volumes/
 # === Logs ===
 *.log
 logs/
+error_logs/
 
 # === Test ===
 .coverage

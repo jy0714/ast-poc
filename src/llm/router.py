@@ -10,10 +10,17 @@ RAG 프롬프트 템플릿을 사용하여 검색 결과 컨텍스트와
 
 from __future__ import annotations
 
-from typing import AsyncIterator
+import time
+from typing import AsyncIterator, Callable
 
 from src.utils.config import settings
 from src.utils.logger import get_logger
+from src.utils.token_counter import (
+    build_usage_record,
+    get_token_counter,
+    log_token_usage,
+    log_token_usage_detail,
+)
 
 logger = get_logger(__name__)
 
@@ -79,7 +86,7 @@ class LLMRouter:
             self._ollama_llm = ChatOllama(
                 model=settings.ollama_llm_model,
                 base_url=settings.ollama_base_url,
-                temperature=0.1,
+                temperature=settings.llm_temperature,
             )
             logger.info(f"로컬 LLM 초기화: {settings.ollama_llm_model}")
 
@@ -99,16 +106,24 @@ class LLMRouter:
             self._openai_llm = ChatOpenAI(
                 model=settings.openai_model,
                 api_key=settings.openai_api_key,
-                temperature=0.1,
+                temperature=settings.llm_temperature,
             )
             logger.info(f"외부 LLM 초기화: {settings.openai_model}")
 
         return self._openai_llm
 
     def _build_messages(
-        self, question: str, context: list[str]
+        self,
+        question: str,
+        context: list[str],
+        extra_system_warning: str | None = None,
     ) -> list[tuple[str, str]]:
-        """RAG 프롬프트 메시지 조합"""
+        """RAG 프롬프트 메시지 조합
+
+        Args:
+            extra_system_warning: 시스템 프롬프트 뒤에 덧붙일 추가 경고
+                (관련성 낮은 검색 결과 등에 대한 방어용)
+        """
         context_text = "\n\n---\n\n".join(
             f"[출처 {i + 1}]\n{c}" for i, c in enumerate(context)
         )
@@ -120,8 +135,12 @@ class LLMRouter:
             question=question,
         )
 
+        system_prompt = _SYSTEM_PROMPT
+        if extra_system_warning:
+            system_prompt = f"{_SYSTEM_PROMPT}\n\n## 추가 주의\n\n{extra_system_warning}"
+
         return [
-            ("system", _SYSTEM_PROMPT),
+            ("system", system_prompt),
             ("human", user_prompt),
         ]
 
@@ -130,6 +149,9 @@ class LLMRouter:
         question: str,
         context: list[str],
         secure_mode: bool | None = None,
+        extra_system_warning: str | None = None,
+        case_id: str = "",
+        on_complete: Callable[[dict], None] | None = None,
     ) -> str:
         """RAG 프롬프트로 LLM 응답 생성
 
@@ -137,43 +159,136 @@ class LLMRouter:
             question: 사용자 질문
             context: 검색된 청크 텍스트 리스트
             secure_mode: 보안 모드 (None이면 설정값 사용)
+            extra_system_warning: 시스템 프롬프트에 삽입할 추가 경고 (선택)
+            case_id: 토큰 로깅에 기록할 케이스 ID (선택)
+            on_complete: 토큰 사용량 dict를 받는 완료 콜백 (선택)
 
         Returns:
             LLM 응답 텍스트
         """
         llm = self.get_llm(secure_mode)
-        messages = self._build_messages(question, context)
+        messages = self._build_messages(question, context, extra_system_warning)
 
+        start = time.perf_counter()
         try:
             response = await llm.ainvoke(messages)
-            return response.content
         except Exception as e:
             logger.error(f"LLM 응답 생성 실패: {e}")
             raise ConnectionError(f"LLM 응답 생성 실패: {e}") from e
+
+        latency = time.perf_counter() - start
+        self._record_token_usage(
+            question=question,
+            context=context,
+            messages=messages,
+            output_text=response.content or "",
+            response=response,
+            secure_mode=secure_mode,
+            case_id=case_id,
+            latency=latency,
+            on_complete=on_complete,
+        )
+        return response.content
 
     async def generate_stream(
         self,
         question: str,
         context: list[str],
         secure_mode: bool | None = None,
+        extra_system_warning: str | None = None,
+        case_id: str = "",
+        on_complete: Callable[[dict], None] | None = None,
     ) -> AsyncIterator[str]:
         """RAG 프롬프트로 LLM 스트리밍 응답 생성
+
+        스트리밍 완료(또는 중단) 시 finally에서 토큰 사용량을 집계해 로깅하고
+        on_complete 콜백을 호출한다. usage 정보는 마지막 chunk에 있으면 사용하고,
+        없으면 누적된 출력 텍스트로 추정한다.
 
         Args:
             question: 사용자 질문
             context: 검색된 청크 텍스트 리스트
             secure_mode: 보안 모드
+            extra_system_warning: 시스템 프롬프트에 삽입할 추가 경고 (선택)
+            case_id: 토큰 로깅에 기록할 케이스 ID (선택)
+            on_complete: 토큰 사용량 dict를 받는 완료 콜백 (선택)
 
         Yields:
             응답 토큰 문자열
         """
         llm = self.get_llm(secure_mode)
-        messages = self._build_messages(question, context)
+        messages = self._build_messages(question, context, extra_system_warning)
 
+        start = time.perf_counter()
+        collected: list[str] = []
+        last_chunk = None
         try:
             async for chunk in llm.astream(messages):
+                last_chunk = chunk
                 if chunk.content:
+                    collected.append(chunk.content)
                     yield chunk.content
         except Exception as e:
             logger.error(f"LLM 스트리밍 실패: {e}")
             raise ConnectionError(f"LLM 스트리밍 실패: {e}") from e
+        finally:
+            latency = time.perf_counter() - start
+            self._record_token_usage(
+                question=question,
+                context=context,
+                messages=messages,
+                output_text="".join(collected),
+                response=last_chunk,
+                secure_mode=secure_mode,
+                case_id=case_id,
+                latency=latency,
+                on_complete=on_complete,
+            )
+
+    def _record_token_usage(
+        self,
+        *,
+        question: str,
+        context: list[str],
+        messages: list[tuple[str, str]],
+        output_text: str,
+        response,
+        secure_mode: bool | None,
+        case_id: str,
+        latency: float,
+        on_complete: Callable[[dict], None] | None,
+    ) -> None:
+        """토큰 사용량을 집계해 파일에 로깅하고 콜백을 호출 (실패해도 무해)"""
+        try:
+            is_secure = secure_mode if secure_mode is not None else settings.is_secure_mode
+            model = settings.ollama_llm_model if is_secure else settings.openai_model
+            usage = get_token_counter().extract_usage_from_response(response)
+            system_prompt = messages[0][1] if messages else ""
+
+            tsv_record, detail_record = build_usage_record(
+                question=question,
+                context=context,
+                output_text=output_text,
+                model=model,
+                secure_mode=is_secure,
+                latency_sec=latency,
+                usage=usage,
+                system_prompt=system_prompt,
+            )
+            tsv_record["case_id"] = case_id
+            detail_record["case_id"] = case_id
+
+            log_token_usage(tsv_record)
+            log_token_usage_detail(detail_record)
+
+            logger.info(
+                f"토큰 사용량: case={case_id or '-'}, model={model}, "
+                f"in={tsv_record['input_tokens']}, out={tsv_record['output_tokens']}, "
+                f"total={tsv_record['total_tokens']}, source={tsv_record['input_source']}, "
+                f"latency={tsv_record['latency_sec']}s"
+            )
+
+            if on_complete is not None:
+                on_complete(tsv_record)
+        except Exception as e:
+            logger.warning(f"토큰 사용량 수집 실패 (질의는 정상 처리됨): {e}")

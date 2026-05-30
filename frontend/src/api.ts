@@ -99,6 +99,25 @@ export interface ChatSource {
   subject: string;
   relevance_score: number;
   search_method: string;
+  // 이메일 전용 — 비-이메일에서는 빈 값
+  sender?: string;
+  recipients?: string[];
+  cc?: string[];
+  attachments?: string[];
+  message_id?: string;
+  in_reply_to?: string;
+  // Office/PDF 작성자·수정자 추적
+  author?: string;
+  last_modified_by?: string;
+  created_date?: string;
+  last_modified?: string;
+}
+
+export interface TokenUsage {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  source: string; // "ollama_api" | "openai_api" | "estimated"
 }
 
 export interface ChatResponse {
@@ -106,6 +125,12 @@ export interface ChatResponse {
   sources: ChatSource[];
   security_mode: boolean;
   case_id: string;
+  // 출처 인용 검증 (할루시네이션 감지)
+  citation_count?: number;
+  invalid_citations?: number[];
+  uncited_response?: boolean;
+  // 토큰 사용량 (외부 API 비용 산정용)
+  token_usage?: TokenUsage;
 }
 
 export interface CaseInfo {
@@ -117,20 +142,37 @@ export interface CaseInfo {
 }
 
 export const chatApi = {
-  query: (caseId: string, message: string, securityMode: boolean, filters?: Record<string, unknown>) =>
+  query: (
+    caseId: string,
+    message: string,
+    securityMode: boolean,
+    filters?: Record<string, unknown>,
+    signal?: AbortSignal,
+  ) =>
     request<ChatResponse>('/api/analyst/chat/', {
       method: 'POST',
       body: JSON.stringify({ case_id: caseId, message, security_mode: securityMode, filters }),
+      signal,
     }),
 
   cases: () => request<CaseInfo[]>('/api/analyst/chat/cases'),
 
-  /** SSE 스트리밍 - EventSource 대신 fetch 사용 (POST 필요) */
-  stream: async function* (caseId: string, message: string, securityMode: boolean) {
+  /** SSE 스트리밍 - EventSource 대신 fetch 사용 (POST 필요)
+   *
+   * signal로 중단 가능. abort 시 reader.read()가 AbortError를 던지고,
+   * 서버는 연결 끊김(is_disconnected)을 감지해 토큰 생성을 멈춘다.
+   */
+  stream: async function* (
+    caseId: string,
+    message: string,
+    securityMode: boolean,
+    signal?: AbortSignal,
+  ) {
     const res = await fetch(`${BASE}/api/analyst/chat/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ case_id: caseId, message, security_mode: securityMode }),
+      signal,
     });
 
     if (!res.ok || !res.body) throw new Error(`Stream error: ${res.status}`);
