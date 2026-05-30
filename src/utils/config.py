@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     chunk_overlap_docs: int = 200
     chat_window_minutes: int = 30
     email_thread_max_chars: int = 2000  # 스레드 청크 최대 문자 수
+    # 이메일 본문에서 인용 답장 체인, 서명, 법적 면책고지를 제거하여
+    # 임베딩 벡터가 보일러플레이트에 오염되는 것을 방지. EmailChunker에만 적용,
+    # FixedSizeChunker(벤치마크 baseline)에는 영향 없음.
+    # False로 설정 시 기존 동작과 동일 (벤치마크 공정 비교·롤백용).
+    email_clean_enabled: bool = True
 
     # === BM25 ===
     bm25_index_dir: str = "./data/bm25_index"

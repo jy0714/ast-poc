@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from unittest.mock import patch
+
 from src.chunkers.chunker import (
     AttachmentChunker,
     ChatChunker,
@@ -14,6 +16,7 @@ from src.chunkers.chunker import (
     DocumentChunker,
     EmailChunker,
     FixedSizeChunker,
+    clean_email_body,
 )
 from src.parsers.pst_parser import Attachment, ChatMessage, EmailMessage
 
@@ -475,6 +478,180 @@ class TestEmailChunker:
         content = chunks[0].content
         # "첫번째"가 "두번째"보다 먼저 나와야 함
         assert content.index("첫번째") < content.index("두번째")
+
+
+# === clean_email_body 테스트 ===
+
+
+class TestCleanEmailBody:
+    """이메일 본문 정제 함수 (인용 답장, 서명, 면책고지 제거) 검증"""
+
+    def test_outlook_quoted_reply_en(self):
+        """Outlook 영어 인용 답장 체인 제거"""
+        body = (
+            "안녕하세요, 내일 회의에서 논의합시다.\n\n"
+            "On Mon, Jan 6, 2025 at 10:00 AM John Doe wrote:\n"
+            "> 지난 감사 결과를 공유해주세요.\n"
+            "> 감사합니다."
+        )
+        result = clean_email_body(body)
+        assert "안녕하세요, 내일 회의에서 논의합시다." in result
+        assert "John Doe wrote" not in result
+        assert "지난 감사 결과를" not in result
+
+    def test_outlook_original_message_en(self):
+        """-----Original Message----- 마커 제거"""
+        body = (
+            "확인했습니다. 진행하겠습니다.\n\n"
+            "-----Original Message-----\n"
+            "From: 김감사\n"
+            "Sent: Monday, January 6, 2025\n"
+            "To: 박대리\n"
+            "Subject: 비용 보고서\n\n"
+            "비용 보고서를 검토해주세요."
+        )
+        result = clean_email_body(body)
+        assert "확인했습니다" in result
+        assert "Original Message" not in result
+        assert "비용 보고서를 검토해주세요" not in result
+
+    def test_korean_original_message(self):
+        """한국어 '원본 메일' 마커 제거"""
+        body = (
+            "네, 확인하겠습니다.\n\n"
+            "----- 원본 메일 -----\n"
+            "보낸 사람: 이과장\n"
+            "보낸 날짜: 2025-01-06\n"
+            "원본 내용입니다."
+        )
+        result = clean_email_body(body)
+        assert "네, 확인하겠습니다" in result
+        assert "원본 내용입니다" not in result
+
+    def test_signature_rfc3676(self):
+        """RFC 3676 서명 구분자 (-- ) 이후 제거"""
+        body = (
+            "보고서 첨부합니다. 검토 부탁드립니다.\n\n"
+            "-- \n"
+            "김감사\n"
+            "내부감사팀\n"
+            "02-1234-5678"
+        )
+        result = clean_email_body(body)
+        assert "보고서 첨부합니다" in result
+        assert "내부감사팀" not in result
+        assert "02-1234-5678" not in result
+
+    def test_mobile_signature(self):
+        """모바일 서명 제거"""
+        body = "간단히 확인했습니다.\n\nSent from my iPhone"
+        result = clean_email_body(body)
+        assert "간단히 확인했습니다" in result
+        assert "Sent from my iPhone" not in result
+
+    def test_disclaimer_en(self):
+        """영어 법적 면책고지 제거"""
+        body = (
+            "감사 일정을 확정합니다. 다음 주 월요일 시작입니다.\n\n"
+            "This email and any attachments are confidential and intended solely "
+            "for the use of the individual to whom it is addressed. If you are "
+            "not the intended recipient, please delete this email."
+        )
+        result = clean_email_body(body)
+        assert "감사 일정을 확정합니다" in result
+        assert "confidential" not in result
+
+    def test_disclaimer_ko(self):
+        """한국어 법적 면책고지 제거"""
+        body = (
+            "첨부 파일 확인 바랍니다.\n\n"
+            "본 메일은 지정된 수신인만을 위한 기밀 정보입니다."
+        )
+        result = clean_email_body(body)
+        assert "첨부 파일 확인 바랍니다" in result
+        assert "기밀" not in result
+
+    def test_clean_email_noop(self):
+        """깨끗한 이메일은 변경 없음 (no-op)"""
+        body = "안녕하세요, 감사 보고서를 첨부합니다. 검토 후 의견 부탁드립니다."
+        result = clean_email_body(body)
+        assert result == body
+
+    def test_fallback_on_overcleaning(self):
+        """정제 결과가 너무 짧으면 원본으로 fallback"""
+        # 전체가 인용이고 최신 본문이 극히 짧은 경우
+        body = (
+            "OK\n"
+            "On Mon, Jan 6, 2025 at 10:00 AM John wrote:\n"
+            "> 원본 내용이 매우 길고 중요한 내용입니다. " * 5
+        )
+        result = clean_email_body(body)
+        # "OK"만 남으면 너무 짧으므로 원본으로 fallback
+        assert len(result) > 10
+
+    def test_quoted_lines_block_removal(self):
+        """> 인용 라인이 연속 2줄 이상일 때만 제거"""
+        body = (
+            "동의합니다. 해당 내용으로 진행하겠습니다.\n\n"
+            "> 이전 내용 1\n"
+            "> 이전 내용 2\n"
+            "> 이전 내용 3\n"
+        )
+        result = clean_email_body(body)
+        assert "동의합니다" in result
+        assert "이전 내용" not in result
+
+    def test_single_quoted_line_preserved(self):
+        """> 인용 라인이 1줄만이면 보존 (오탐 방지)"""
+        body = "본문 내용입니다.\n> 이건 인용이 아닐 수 있는 한 줄입니다.\n끝."
+        result = clean_email_body(body)
+        assert "> 이건 인용이 아닐 수 있는 한 줄입니다." in result
+
+    def test_email_clean_toggle_off(self):
+        """email_clean_enabled=False면 EmailChunker가 정제를 건너뜀"""
+        chunker = EmailChunker(max_chars=5000)
+        body_with_quote = (
+            "확인했습니다.\n\n"
+            "-----Original Message-----\n"
+            "원본 메시지입니다."
+        )
+        email = EmailMessage(
+            subject="테스트",
+            sender="김감사",
+            recipients=["박대리"],
+            body=body_with_quote,
+            date=datetime(2026, 3, 14, 10, 0),
+        )
+
+        # 정제 ON (기본)
+        chunks_on = chunker.chunk([email])
+        assert "Original Message" not in chunks_on[0].content
+
+        # 정제 OFF
+        with patch("src.chunkers.chunker.settings") as mock_cfg:
+            mock_cfg.email_clean_enabled = False
+            mock_cfg.email_thread_max_chars = 5000
+            chunker2 = EmailChunker(max_chars=5000)
+            chunks_off = chunker2.chunk([email])
+        assert "Original Message" in chunks_off[0].content
+
+    def test_outlook_underscore_separator(self):
+        """Outlook 밑줄 구분선 제거"""
+        body = (
+            "내용입니다. 감사 일정을 확인해 주세요.\n\n"
+            "________________________________\n"
+            "From: 이과장\n"
+            "Sent: 2025-01-06\n"
+            "이전 메시지 내용입니다."
+        )
+        result = clean_email_body(body)
+        assert "감사 일정을 확인해 주세요" in result
+        assert "이전 메시지 내용입니다" not in result
+
+    def test_empty_body(self):
+        """빈 본문은 그대로 반환"""
+        assert clean_email_body("") == ""
+        assert clean_email_body(None) is None
 
 
 # === AttachmentChunker 테스트 ===

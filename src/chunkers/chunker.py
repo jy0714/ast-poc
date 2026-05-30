@@ -23,6 +23,136 @@ from typing import Any
 from src.utils.config import settings
 from src.utils.logger import get_logger
 
+# ── 이메일 본문 정제 ──
+# 인용 답장 체인·서명·법적 면책고지를 제거하여 임베딩 품질을 높임.
+# From/To/Subject 헤더는 _format_thread에서 별도로 부착하므로,
+# 인용 헤더 제거로 라우팅 메타가 유실되지 않음.
+
+# 영어/한국어 인용 마커 — 최신 본문 위쪽은 보존하고, 마커 이후 전체를 제거
+_QUOTED_REPLY_PATTERNS: list[re.Pattern[str]] = [
+    # Outlook "On ... wrote:" (영어)
+    re.compile(r"^On\s+.{10,80}\s+wrote:\s*$", re.MULTILINE),
+    # Outlook "-----Original Message-----"
+    re.compile(r"^-{3,}\s*Original Message\s*-{3,}\s*$", re.MULTILINE | re.IGNORECASE),
+    # Outlook 밑줄 구분선 (30자 이상)
+    re.compile(r"^_{30,}\s*$", re.MULTILINE),
+    # 한국어 원본 메시지 마커
+    re.compile(r"^-{3,}\s*원본\s*메일\s*-{3,}\s*$", re.MULTILINE),
+    re.compile(r"^-{3,}\s*원본\s*메시지\s*-{3,}\s*$", re.MULTILINE),
+    # 인용된 From/Sent/To 헤더 블록 (영어)
+    re.compile(
+        r"^From:\s*.+\nSent:\s*.+\nTo:\s*.+",
+        re.MULTILINE | re.IGNORECASE,
+    ),
+    # 인용된 보낸 사람/보낸 날짜 헤더 블록 (한국어)
+    re.compile(
+        r"^보낸\s*사람:\s*.+\n보낸\s*날짜:\s*.+",
+        re.MULTILINE,
+    ),
+]
+
+# ">" 인용 라인 (연속 2줄 이상일 때만 제거 — 단일 ">"는 오탐 위험)
+_QUOTE_LINE_RE = re.compile(r"^>+\s?.*$", re.MULTILINE)
+
+# 서명 구분자
+_SIGNATURE_PATTERNS: list[re.Pattern[str]] = [
+    # RFC 3676 서명 구분자: "-- " (대시-대시-공백-개행)
+    re.compile(r"^-- \s*$", re.MULTILINE),
+    # 모바일 서명
+    re.compile(
+        r"^Sent from my (?:iPhone|iPad|Galaxy|Android|mobile)\s*$",
+        re.MULTILINE | re.IGNORECASE,
+    ),
+]
+
+# 법적 면책고지 마커 — 매칭 이후 전체 제거
+_DISCLAIMER_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(
+        r"^This (?:email|message|e-mail) (?:and any attachments? )?(?:is|are) "
+        r"(?:intended |)?(?:solely )?(?:for |confidential)",
+        re.MULTILINE | re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:본\s*(?:메일|이메일|메시지)은?\s*.{0,20}기밀)",
+        re.MULTILINE,
+    ),
+    re.compile(
+        r"^CONFIDENTIALITY\s+(?:NOTICE|WARNING)",
+        re.MULTILINE | re.IGNORECASE,
+    ),
+]
+
+# 정제 후 최소 길이 — 이보다 짧아지면 원본으로 fallback (짧은 정상 메일 보호).
+# 한국어는 영어 대비 글자수가 매우 적어도 의미 전달이 가능하므로 5자로 설정.
+# 예: "확인했습니다." = 7자, "네" = 1자. 1~2글자 수준만 fallback.
+_MIN_CLEANED_LENGTH = 5
+
+
+def clean_email_body(body: str) -> str:
+    """이메일 본문에서 인용 답장·서명·면책고지 보일러플레이트를 제거.
+
+    보수적 전략: 가장 최신 본문(인용 마커 위쪽)만 보존.
+    정제 결과가 너무 짧으면(_MIN_CLEANED_LENGTH 미만) 원본으로 fallback하여
+    짧은 정상 메일이 통째로 사라지는 것을 방지.
+
+    config.email_clean_enabled=False이면 이 함수를 호출하지 않으므로
+    toggle 로직은 caller(_format_thread)에서 처리.
+    """
+    if not body:
+        return body
+
+    text = body
+
+    # 1) 인용 답장 마커 — 가장 먼저 나타나는 마커 위치에서 자름
+    earliest_cut = len(text)
+    for pattern in _QUOTED_REPLY_PATTERNS:
+        match = pattern.search(text)
+        if match and match.start() < earliest_cut:
+            earliest_cut = match.start()
+    if earliest_cut < len(text):
+        text = text[:earliest_cut]
+
+    # 2) ">" 인용 라인 제거 (연속 2줄 이상인 블록만)
+    lines = text.split("\n")
+    cleaned_lines: list[str] = []
+    i = 0
+    while i < len(lines):
+        if _QUOTE_LINE_RE.match(lines[i]):
+            # 연속 인용 라인 수 확인
+            j = i
+            while j < len(lines) and _QUOTE_LINE_RE.match(lines[j]):
+                j += 1
+            if j - i >= 2:
+                # 연속 2줄 이상 → 제거
+                i = j
+                continue
+        cleaned_lines.append(lines[i])
+        i += 1
+    text = "\n".join(cleaned_lines)
+
+    # 3) 서명 제거 — 마커 이후 전체 자름
+    for pattern in _SIGNATURE_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            text = text[:match.start()]
+            break  # 하나만 적용
+
+    # 4) 법적 면책고지 제거 — 마커 이후 전체 자름
+    for pattern in _DISCLAIMER_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            text = text[:match.start()]
+            break
+
+    # 5) 후처리: 연속 빈 줄 정리
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+    # 안전장치: 정제 결과가 과도하게 짧아지면 원본 반환
+    if len(text) < _MIN_CLEANED_LENGTH:
+        return body.strip()
+
+    return text
+
 logger = get_logger(__name__)
 
 
@@ -545,7 +675,13 @@ class EmailChunker:
 
     @staticmethod
     def _format_thread(emails: list[Any]) -> str:
-        """이메일 스레드를 읽기 쉬운 텍스트로 포맷"""
+        """이메일 스레드를 읽기 쉬운 텍스트로 포맷
+
+        email_clean_enabled=True(기본)이면 각 메일의 body에서 인용 답장 체인,
+        서명, 법적 면책고지를 제거하여 임베딩 벡터 오염을 방지.
+        From/To/Subject 헤더는 별도로 부착하므로 인용 헤더 제거로 유실되지 않음.
+        """
+        do_clean = settings.email_clean_enabled
         parts: list[str] = []
         for email_msg in emails:
             date_str = email_msg.date.strftime("%Y-%m-%d %H:%M") if email_msg.date else ""
@@ -555,7 +691,8 @@ class EmailChunker:
             header += f"\nTo: {', '.join(email_msg.recipients)}"
             header += f"\nSubject: {email_msg.subject}"
 
-            parts.append(f"{header}\n\n{email_msg.body}")
+            body = clean_email_body(email_msg.body) if do_clean else email_msg.body
+            parts.append(f"{header}\n\n{body}")
 
         return "\n\n---\n\n".join(parts)
 
