@@ -102,7 +102,11 @@ class Settings(BaseSettings):
     rrf_min_score: float = 0.0141  # RRF 최소 스코어 임계값 (한쪽만 10위 이하 필터링)
 
     # === Reranker ===
-    rerank_enabled: bool = False  # 기본 OFF, API 요청별 또는 전역 토글 가능
+    # cross-encoder reranker가 검색 품질에 가장 큰 영향을 주므로 기본 ON.
+    # FlagEmbedding 미설치 시 런타임에 경고 로그 후 rerank 건너뜀 (graceful degradation).
+    # 벤치마크 경로는 VectorStoreService.search()를 직접 호출하므로 영향 없음.
+    # 필요시 API 요청별 rerank=false 또는 환경변수 RERANK_ENABLED=false로 비활성화 가능.
+    rerank_enabled: bool = True
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
     rerank_top_k_candidates: int = 50  # reranker에 넘길 초기 후보 수
     rerank_top_n: int = 5  # reranker가 최종 선별할 결과 수

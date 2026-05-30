@@ -230,6 +230,27 @@ class TestHybridSearch:
         assert len(results) > 0
         assert all(r["score"] > 0 for r in results)
 
+    def test_hybrid_retrieval_depth_matches_n_results(self, store):
+        """n_results > search_top_k 일 때 각 검색기가 n_results만큼 후보를 가져오는지 확인.
+
+        reranker 활성화 시 rerank_top_k_candidates(50)개 후보를 요청하지만,
+        각 검색기가 search_top_k(20)만 가져오면 후보 풀이 부족해짐.
+        수정 후: 각 검색기 retrieval 깊이 = max(search_top_k, n_results).
+        """
+        # search_top_k=10인 store fixture에 30개 청크 추가
+        texts = [f"감사 보고서 항목 {i}번 내용입니다" for i in range(30)]
+        chunks = _make_chunks(texts)
+        store.add_chunks(chunks)
+
+        # n_results=25 (> search_top_k=10) 로 하이브리드 검색
+        results = store.search("감사 보고서", n_results=25)
+        # rrf_min_score 필터링으로 일부 제외될 수 있으므로 정확히 25가 아닐 수 있지만,
+        # search_top_k(10) 이상 결과를 반환해야 함
+        assert len(results) > 10, (
+            f"n_results=25 요청 시 search_top_k(10)보다 많은 결과가 나와야 하지만 "
+            f"{len(results)}건만 반환됨 — retrieval 깊이 정합 미적용"
+        )
+
 
 # === 컬렉션 관리 테스트 ===
 

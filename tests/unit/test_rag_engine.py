@@ -290,14 +290,20 @@ class TestFormatContext:
 
 
 class TestRerankIntegration:
-    def test_rerank_disabled_by_default(self, mock_vector_store, mock_llm_router):
-        """rerank_enabled 기본값은 settings 기반 (기본 False)"""
+    @patch("src.rag.engine.settings")
+    def test_rerank_enabled_by_default(self, mock_settings, mock_vector_store, mock_llm_router):
+        """rerank_enabled 기본값은 settings 기반 (기본 True — cross-encoder가 검색 품질 핵심)
+
+        .env 파일의 오버라이드를 배제하기 위해 settings를 직접 mock.
+        """
+        mock_settings.rerank_enabled = True
+        mock_settings.search_top_k = 20
         engine = RAGEngine(
             case_id="test",
             vector_store=mock_vector_store,
             llm_router=mock_llm_router,
         )
-        assert engine.rerank_enabled is False
+        assert engine.rerank_enabled is True
 
     def test_rerank_disabled_uses_normal_search(self, mock_vector_store, mock_llm_router):
         """rerank OFF → 기존 검색 그대로"""

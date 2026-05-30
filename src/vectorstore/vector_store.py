@@ -572,8 +572,15 @@ class VectorStoreService:
         n_results: int,
         filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """RRF 기반 하이브리드 검색 (벡터 + BM25 결합)"""
-        top_k = settings.search_top_k
+        """RRF 기반 하이브리드 검색 (벡터 + BM25 결합)
+
+        각 검색기(벡터/BM25)의 retrieval 깊이는 max(search_top_k, n_results)로 설정.
+        reranker 활성화 시 n_results가 rerank_top_k_candidates(50)까지 올라오므로,
+        각 검색기도 그만큼 후보를 가져와야 reranker가 충분한 후보를 받을 수 있음.
+        기존에는 search_top_k(20)로 고정되어 reranker 후보 풀이 부족했음.
+        """
+        # n_results가 search_top_k보다 클 때(reranker 후보 확보 등) 검색 깊이를 맞춤
+        top_k = max(settings.search_top_k, n_results)
         rrf_k = settings.rrf_k
 
         # 두 검색을 각각 실행
