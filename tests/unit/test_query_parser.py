@@ -72,38 +72,38 @@ class TestDateFilter:
     def test_year_month(self):
         """2025년 3월 → 날짜 범위"""
         result = parse_query("2025년 3월 이메일 찾아줘")
-        assert result.filters.get("date_range_start") == "2025-03-01"
-        assert result.filters.get("date_range_end") == "2025-04-01"
+        assert result.filters.get("_date_gte") == "2025-03-01"
+        assert result.filters.get("_date_lte") == "2025-04-01"
 
     def test_year_only(self):
         """2025년 → 전체 연도"""
         result = parse_query("2025년 감사 보고서")
-        assert result.filters.get("date_range_start") == "2025-01-01"
-        assert result.filters.get("date_range_end") == "2025-12-31"
+        assert result.filters.get("_date_gte") == "2025-01-01"
+        assert result.filters.get("_date_lte") == "2025-12-31"
 
     def test_december(self):
         """12월 — 경계값"""
         result = parse_query("2025년 12월 내용")
-        assert result.filters.get("date_range_start") == "2025-12-01"
-        assert result.filters.get("date_range_end") == "2025-12-31"
+        assert result.filters.get("_date_gte") == "2025-12-01"
+        assert result.filters.get("_date_lte") == "2025-12-31"
 
     def test_month_range(self):
         """1월부터 3월까지"""
         result = parse_query("1월부터 3월까지 이메일 찾아줘")
-        assert "date_range_start" in result.filters
-        assert "date_range_end" in result.filters
+        assert "_date_gte" in result.filters
+        assert "_date_lte" in result.filters
 
     def test_iso_date(self):
         """ISO 형식 날짜"""
         result = parse_query("2025-01-01부터 2025-03-31까지 내용")
-        assert result.filters.get("date_range_start") == "2025-01-01"
-        assert result.filters.get("date_range_end") == "2025-03-31"
+        assert result.filters.get("_date_gte") == "2025-01-01"
+        assert result.filters.get("_date_lte") == "2025-03-31"
 
     def test_no_date(self):
         """날짜 없으면 필터 없음"""
         result = parse_query("비용 관련 내용 알려줘")
-        assert "date_range_start" not in result.filters
-        assert "date" not in result.filters
+        assert "_date_gte" not in result.filters
+        assert "_date_eq" not in result.filters
 
 
 # === 참여자 추출 ===
@@ -248,7 +248,7 @@ class TestComplex:
         """소스 타입 + 날짜 동시 추출"""
         result = parse_query("2025년 3월 이메일에서 비용 관련 내용 찾아줘")
         assert result.filters.get("source_type") == "email"
-        assert result.filters.get("date_range_start") == "2025-03-01"
+        assert result.filters.get("_date_gte") == "2025-03-01"
         assert "비용" in result.cleaned
 
     def test_source_date_participant(self):
@@ -256,7 +256,7 @@ class TestComplex:
         result = parse_query("홍길동이 보낸 2025년 3월 이메일에서 감사 내용")
         assert result.filters.get("source_type") == "email"
         assert "홍길동" in result.filters.get("participants", [])
-        assert "date_range_start" in result.filters
+        assert "_date_gte" in result.filters
 
     def test_cleaned_not_empty(self):
         """필터 제거 후 쿼리가 비면 원본 사용"""

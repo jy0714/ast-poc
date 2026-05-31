@@ -312,3 +312,106 @@ class TestMetadataRoundtrip:
         assert meta["participants"] == ["김감사", "박대리"]
         assert meta["topics"] == ["감사", "비용"]
         assert meta["count"] == 5
+
+
+# === 날짜 범위 필터 테스트 ===
+
+
+class TestDateRangeFilter:
+    """_build_chroma_filter의 날짜 범위($gte/$lte) 변환 및 실제 검색 검증"""
+
+    def test_build_filter_date_gte_lte(self):
+        """_date_gte/_date_lte 키가 date_sortable $gte/$lte 정수로 변환"""
+        result = VectorStoreService._build_chroma_filter({
+            "_date_gte": "2025-03-01",
+            "_date_lte": "2025-04-01",
+        })
+        assert result == {
+            "$and": [
+                {"date_sortable": {"$gte": 20250301}},
+                {"date_sortable": {"$lte": 20250401}},
+            ]
+        }
+
+    def test_build_filter_date_eq(self):
+        """_date_eq 키가 date_sortable $eq 정수로 변환"""
+        result = VectorStoreService._build_chroma_filter({"_date_eq": "2025-03-15"})
+        assert result == {"date_sortable": {"$eq": 20250315}}
+
+    def test_build_filter_mixed(self):
+        """날짜 필터 + 일반 필터 혼합"""
+        result = VectorStoreService._build_chroma_filter({
+            "source_type": "email",
+            "_date_gte": "2025-01-01",
+            "_date_lte": "2025-12-31",
+        })
+        assert "$and" in result
+        conditions = result["$and"]
+        assert {"source_type": {"$eq": "email"}} in conditions
+        assert {"date_sortable": {"$gte": 20250101}} in conditions
+        assert {"date_sortable": {"$lte": 20251231}} in conditions
+
+    def test_build_filter_no_date_keys(self):
+        """일반 필터만 있을 때 기존 동작 유지"""
+        result = VectorStoreService._build_chroma_filter({"source_type": "document"})
+        assert result == {"source_type": {"$eq": "document"}}
+
+    def test_date_range_search_returns_matching_chunks(self, store):
+        """date_sortable 범위 필터로 해당 기간 청크만 반환
+
+        재인덱싱 후 date_sortable 필드가 있는 청크에서 범위 검색이 동작하는지 확인.
+        date_sortable은 YYYYMMDD 정수 (ChromaDB $gte/$lte는 숫자만 지원).
+        """
+        chunks = [
+            Chunk(
+                content="2025년 1월 감사 보고서 내용입니다",
+                metadata={"filename": "jan.pdf", "date_sortable": 20250115},
+                source_type="document",
+            ),
+            Chunk(
+                content="2025년 3월 감사 보고서 내용입니다",
+                metadata={"filename": "mar.pdf", "date_sortable": 20250310},
+                source_type="document",
+            ),
+            Chunk(
+                content="2025년 6월 감사 보고서 내용입니다",
+                metadata={"filename": "jun.pdf", "date_sortable": 20250620},
+                source_type="document",
+            ),
+        ]
+        store.add_chunks(chunks)
+
+        # 3월 범위 검색 — date_sortable이 20250301 ~ 20250401 사이인 청크만
+        results = store.search(
+            "감사 보고서",
+            n_results=10,
+            filters={"_date_gte": "2025-03-01", "_date_lte": "2025-04-01"},
+            search_method="vector",
+        )
+        assert len(results) == 1
+        assert "3월" in results[0]["content"]
+
+    def test_date_range_excludes_out_of_range(self, store):
+        """범위 밖 청크는 제외됨"""
+        chunks = [
+            Chunk(
+                content="2024년 문서 감사 결과 보고서입니다",
+                metadata={"filename": "old.pdf", "date_sortable": 20240601},
+                source_type="document",
+            ),
+            Chunk(
+                content="2025년 문서 감사 결과 보고서입니다",
+                metadata={"filename": "new.pdf", "date_sortable": 20250601},
+                source_type="document",
+            ),
+        ]
+        store.add_chunks(chunks)
+
+        results = store.search(
+            "감사 보고서",
+            n_results=10,
+            filters={"_date_gte": "2025-01-01", "_date_lte": "2025-12-31"},
+            search_method="vector",
+        )
+        assert len(results) == 1
+        assert "2025년" in results[0]["content"]

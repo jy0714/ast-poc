@@ -243,6 +243,16 @@ class DocumentChunker:
         # sections는 청크 메타데이터에 포함하지 않음 (크기 절약)
         clean_meta = {k: v for k, v in base_meta.items() if k != "sections"}
 
+        # 날짜 범위 검색용 canonical 필드 — 문서는 date/created_date 중 가용한 것을 사용.
+        # ChromaDB $gte/$lte는 숫자만 지원하므로 YYYYMMDD 정수로 저장.
+        # ISO 문자열("2025-01-15" 등)에서 숫자만 추출하여 변환.
+        if "date_sortable" not in clean_meta:
+            doc_date = clean_meta.get("date") or clean_meta.get("created_date") or ""
+            if doc_date:
+                digits = doc_date[:10].replace("-", "")
+                if digits.isdigit() and len(digits) == 8:
+                    clean_meta["date_sortable"] = int(digits)
+
         chunks: list[Chunk] = []
         for i, split_text in enumerate(splits):
             chunk_meta = {
@@ -497,6 +507,10 @@ class ChatChunker:
             if timestamps:
                 chunk_meta["date_range_start"] = min(timestamps).isoformat()
                 chunk_meta["date_range_end"] = max(timestamps).isoformat()
+                # 날짜 범위 검색용 canonical 필드: 모든 source_type에서 동일한 키로
+                # $gte/$lte 비교가 가능하도록 YYYYMMDD 정수로 저장.
+                # ChromaDB $gte/$lte는 숫자만 지원하므로 ISO 문자열 대신 정수 사용.
+                chunk_meta["date_sortable"] = int(min(timestamps).strftime("%Y%m%d"))
 
             chunks.append(
                 Chunk(
@@ -639,6 +653,9 @@ class EmailChunker:
             if dates:
                 thread_meta["date_range_start"] = min(dates).isoformat()
                 thread_meta["date_range_end"] = max(dates).isoformat()
+                # 날짜 범위 검색용 canonical 필드 (이메일: 스레드 최초 메시지 날짜)
+                # ChromaDB $gte/$lte는 숫자만 지원하므로 YYYYMMDD 정수로 저장.
+                thread_meta["date_sortable"] = int(min(dates).strftime("%Y%m%d"))
 
             # 스레드가 max_chars 초과 시 2차 분할
             if len(thread_text) > self.max_chars:

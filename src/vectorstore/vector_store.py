@@ -959,6 +959,13 @@ class VectorStoreService:
         """사용자 필터를 ChromaDB where 절로 변환
 
         이미 $and/$or 등 ChromaDB 연산자가 들어있으면 그대로 반환.
+
+        날짜 범위 필터(_date_gte/_date_lte/_date_eq)는 canonical 필드
+        date_sortable에 대한 $gte/$lte/$eq로 변환. date_sortable은
+        YYYYMMDD 정수이고 필터 값(ISO 문자열 "2025-03-01")도 정수로 변환.
+        ChromaDB $gte/$lte는 숫자만 지원하므로 정수 비교 필수.
+        date_sortable 필드가 없는 청크는 ChromaDB 특성상 where 절에서
+        자동 제외됨 (재인덱싱 전 기존 데이터).
         """
         if not filters:
             return {}
@@ -967,9 +974,21 @@ class VectorStoreService:
         if any(k.startswith("$") for k in filters.keys()):
             return filters
 
+        # 날짜 범위 키를 분리하여 $gte/$lte로 변환
+        _DATE_FILTER_KEYS = {"_date_gte", "_date_lte", "_date_eq"}
+
         conditions: list[dict] = []
         for key, value in filters.items():
-            if isinstance(value, list):
+            if key in _DATE_FILTER_KEYS:
+                # ISO 문자열("2025-03-01")을 YYYYMMDD 정수로 변환
+                int_val = int(str(value)[:10].replace("-", ""))
+                if key == "_date_gte":
+                    conditions.append({"date_sortable": {"$gte": int_val}})
+                elif key == "_date_lte":
+                    conditions.append({"date_sortable": {"$lte": int_val}})
+                elif key == "_date_eq":
+                    conditions.append({"date_sortable": {"$eq": int_val}})
+            elif isinstance(value, list):
                 conditions.append({key: {"$in": value}})
             else:
                 conditions.append({key: {"$eq": value}})

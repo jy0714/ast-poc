@@ -210,17 +210,28 @@ def _extract_source_types(text: str) -> list[str]:
 
 
 def _extract_date_filters(text: str, year_hint: int) -> dict[str, str]:
-    """날짜 범위 필터 추출"""
+    """날짜 범위 필터 추출
+
+    반환 키:
+    - _date_gte / _date_lte: 범위 질의용. _build_chroma_filter에서
+      date_sortable 필드에 대한 $gte/$lte 조건으로 변환됨.
+      기존 date_range_start/date_range_end 키와 이름이 달라야 메타 필드와 충돌하지 않음
+      (메타의 date_range_start는 스레드 시작 날짜, 여기서의 의미는 검색 범위 하한).
+    - _date_eq: 단일 날짜 정확일치용.
+
+    date_sortable canonical 필드가 모든 source_type에 ISO 문자열로 저장되므로,
+    사전식 비교($gte/$lte)가 정확히 동작함.
+    """
     filters: dict[str, str] = {}
 
     # ISO 날짜 (최우선)
     iso_dates = _DATE_ISO.findall(text)
     if len(iso_dates) >= 2:
-        filters["date_range_start"] = iso_dates[0]
-        filters["date_range_end"] = iso_dates[1]
+        filters["_date_gte"] = iso_dates[0]
+        filters["_date_lte"] = iso_dates[1]
         return filters
     if len(iso_dates) == 1:
-        filters["date"] = iso_dates[0]
+        filters["_date_eq"] = iso_dates[0]
         return filters
 
     # "1월부터 3월까지" 범위
@@ -230,31 +241,31 @@ def _extract_date_filters(text: str, year_hint: int) -> dict[str, str]:
         # 연도 찾기
         ym = _DATE_YM.search(text)
         year = int(ym.group(1)) if ym else year_hint
-        filters["date_range_start"] = f"{year}-{m_start:02d}-01"
+        filters["_date_gte"] = f"{year}-{m_start:02d}-01"
         # 월 말일 계산
         if m_end == 12:
-            filters["date_range_end"] = f"{year}-12-31"
+            filters["_date_lte"] = f"{year}-12-31"
         else:
-            filters["date_range_end"] = f"{year}-{m_end + 1:02d}-01"
+            filters["_date_lte"] = f"{year}-{m_end + 1:02d}-01"
         return filters
 
     # "2025년 3월" 특정 월
     ym = _DATE_YM.search(text)
     if ym:
         year, month = int(ym.group(1)), int(ym.group(2))
-        filters["date_range_start"] = f"{year}-{month:02d}-01"
+        filters["_date_gte"] = f"{year}-{month:02d}-01"
         if month == 12:
-            filters["date_range_end"] = f"{year}-12-31"
+            filters["_date_lte"] = f"{year}-12-31"
         else:
-            filters["date_range_end"] = f"{year}-{month + 1:02d}-01"
+            filters["_date_lte"] = f"{year}-{month + 1:02d}-01"
         return filters
 
     # "2025년" 전체 연도
     y = _DATE_Y.search(text)
     if y:
         year = int(y.group(1))
-        filters["date_range_start"] = f"{year}-01-01"
-        filters["date_range_end"] = f"{year}-12-31"
+        filters["_date_gte"] = f"{year}-01-01"
+        filters["_date_lte"] = f"{year}-12-31"
         return filters
 
     return filters
