@@ -27,6 +27,12 @@ data/ocr_cache/
 *.swp
 *.swo
 
+# === Claude Code (로컬 설정) ===
+.claude/
+
+# === Archives (빌드/백업 산출물) ===
+*.zip
+
 # === OS ===
 .DS_Store
 Thumbs.db
