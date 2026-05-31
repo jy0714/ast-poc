@@ -42,10 +42,14 @@ def mock_llm_router():
 
 @pytest.fixture
 def engine(mock_vector_store, mock_llm_router):
+    # rerank_enabled=False를 명시하여 FlagEmbedding 미설치 환경에서도
+    # 검색/쿼리 흐름 테스트가 독립적으로 동작하도록 함.
+    # reranker 통합은 TestRerankIntegration에서 별도 모킹으로 검증.
     return RAGEngine(
         case_id="test_case",
         vector_store=mock_vector_store,
         llm_router=mock_llm_router,
+        rerank_enabled=False,
     )
 
 
@@ -158,6 +162,7 @@ class TestQueryStreamDisconnect:
             case_id="test_case",
             vector_store=mock_vector_store,
             llm_router=router,
+            rerank_enabled=False,
         )
 
     @pytest.mark.asyncio
@@ -440,6 +445,7 @@ class TestShortChunkFilter:
             case_id="test",
             vector_store=mock_vector_store,
             llm_router=mock_llm_router,
+            rerank_enabled=False,
         )
         result = await engine.query("질문")
         # 짧은 "승인"은 제거되고 1건만 남음
@@ -456,6 +462,7 @@ class TestShortChunkFilter:
             case_id="test",
             vector_store=mock_vector_store,
             llm_router=mock_llm_router,
+            rerank_enabled=False,
         )
         result = await engine.query("질문")
         assert result.sources == []
@@ -472,6 +479,7 @@ class TestCitationInQueryResult:
             case_id="test",
             vector_store=mock_vector_store,
             llm_router=mock_llm_router,
+            rerank_enabled=False,
         )
         result = await engine.query("질문")
         assert result.citation_count == 2
