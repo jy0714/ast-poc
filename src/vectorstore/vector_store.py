@@ -595,18 +595,22 @@ class VectorStoreService:
                 if r["metadata"].get("case_id", self.case_id) == self.case_id
             ]
 
-        # RRF (Reciprocal Rank Fusion) 스코어 계산
+        # 가중 RRF (Reciprocal Rank Fusion) 스코어 계산
+        # rrf_vector_weight / rrf_bm25_weight가 각각 1.0이면 기존 동등 합산과 동일.
+        # 가중치를 조정하면 벡터(의미 유사도) vs BM25(키워드 정확 매칭) 비중을 제어.
         rrf_scores: dict[str, float] = defaultdict(float)
         result_map: dict[str, dict[str, Any]] = {}
+        vector_w = settings.rrf_vector_weight
+        bm25_w = settings.rrf_bm25_weight
 
         for rank, result in enumerate(vector_results):
             cid = result["chunk_id"]
-            rrf_scores[cid] += 1.0 / (rrf_k + rank + 1)
+            rrf_scores[cid] += vector_w * (1.0 / (rrf_k + rank + 1))
             result_map[cid] = result
 
         for rank, result in enumerate(bm25_results):
             cid = result["chunk_id"]
-            rrf_scores[cid] += 1.0 / (rrf_k + rank + 1)
+            rrf_scores[cid] += bm25_w * (1.0 / (rrf_k + rank + 1))
             if cid not in result_map:
                 result_map[cid] = result
 

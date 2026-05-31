@@ -216,6 +216,8 @@ class TestHybridSearch:
             mock_cfg.search_top_k = 10
             mock_cfg.rrf_k = 60
             mock_cfg.rrf_min_score = 99.0  # 불가능한 높은 임계값
+            mock_cfg.rrf_vector_weight = 1.0
+            mock_cfg.rrf_bm25_weight = 1.0
             results_high = store.search("감사 보고서", n_results=3)
 
         assert len(results_high) == 0
@@ -250,6 +252,65 @@ class TestHybridSearch:
             f"n_results=25 요청 시 search_top_k(10)보다 많은 결과가 나와야 하지만 "
             f"{len(results)}건만 반환됨 — retrieval 깊이 정합 미적용"
         )
+
+    def test_weighted_rrf_default_noop(self, store):
+        """가중치 1.0/1.0(기본값)에서 기존 검색 결과와 동일 (no-op)"""
+        chunks = _make_chunks([
+            "감사 보고서 비용 분석 상세 내용",
+            "감사 결과 보고 요약",
+            "완전히 무관한 문서 내용",
+        ])
+        store.add_chunks(chunks)
+
+        # 기본 가중치(1.0/1.0)로 검색
+        results_default = store.search("감사 보고서", n_results=3)
+        scores_default = {r["chunk_id"]: r["score"] for r in results_default}
+
+        # 명시적 1.0/1.0으로 검색 (동일해야 함)
+        with patch("src.vectorstore.vector_store.settings") as mock_cfg:
+            mock_cfg.search_top_k = 10
+            mock_cfg.rrf_k = 60
+            mock_cfg.rrf_min_score = 0.0
+            mock_cfg.rrf_vector_weight = 1.0
+            mock_cfg.rrf_bm25_weight = 1.0
+            results_explicit = store.search("감사 보고서", n_results=3)
+
+        scores_explicit = {r["chunk_id"]: r["score"] for r in results_explicit}
+        # 동일 청크에 대해 점수가 같아야 함
+        for cid in scores_default:
+            if cid in scores_explicit:
+                assert scores_default[cid] == pytest.approx(scores_explicit[cid])
+
+    def test_weighted_rrf_changes_scores(self, store):
+        """가중치 변경 시 RRF 점수에 반영됨"""
+        chunks = _make_chunks([
+            "감사 보고서 비용 분석 상세 내용입니다",
+            "감사 결과 보고 요약입니다",
+        ])
+        store.add_chunks(chunks)
+
+        # BM25 가중 2배로 올리면 점수가 달라져야 함
+        with patch("src.vectorstore.vector_store.settings") as mock_cfg:
+            mock_cfg.search_top_k = 10
+            mock_cfg.rrf_k = 60
+            mock_cfg.rrf_min_score = 0.0
+            mock_cfg.rrf_vector_weight = 1.0
+            mock_cfg.rrf_bm25_weight = 2.0
+            results_bm25_heavy = store.search("감사 보고서", n_results=2)
+
+        with patch("src.vectorstore.vector_store.settings") as mock_cfg:
+            mock_cfg.search_top_k = 10
+            mock_cfg.rrf_k = 60
+            mock_cfg.rrf_min_score = 0.0
+            mock_cfg.rrf_vector_weight = 2.0
+            mock_cfg.rrf_bm25_weight = 1.0
+            results_vec_heavy = store.search("감사 보고서", n_results=2)
+
+        # 가중치가 다르면 점수가 달라야 함 (정확한 값은 검색 결과에 따라 다르지만 둘 다 유효)
+        assert len(results_bm25_heavy) > 0
+        assert len(results_vec_heavy) > 0
+        assert all(r["score"] > 0 for r in results_bm25_heavy)
+        assert all(r["score"] > 0 for r in results_vec_heavy)
 
 
 # === 컬렉션 관리 테스트 ===

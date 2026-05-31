@@ -105,6 +105,11 @@ class Settings(BaseSettings):
     search_top_k: int = 20  # 하이브리드 검색 초기 후보 수
     rrf_k: int = 60  # Reciprocal Rank Fusion 파라미터
     rrf_min_score: float = 0.0141  # RRF 최소 스코어 임계값 (한쪽만 10위 이하 필터링)
+    # 가중 RRF: 벡터/BM25 기여를 가중치로 조절. 기본 1.0/1.0은 기존 동등 합산과
+    # 수학적으로 동일 (no-op). 감사 용도에서 엔티티/금액/고유명 검색이 많으면
+    # BM25 가중을 올리는 게 유리할 수 있음. 실제 튜닝은 평가셋 Recall@K 측정 후 결정.
+    rrf_vector_weight: float = 1.0
+    rrf_bm25_weight: float = 1.0
 
     # === Reranker ===
     # cross-encoder reranker가 검색 품질에 가장 큰 영향을 주므로 기본 ON.
