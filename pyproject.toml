@@ -15,6 +15,7 @@ dependencies = [
     "python-docx>=1.1.0",
     "python-pptx>=0.6.23",
     "openpyxl>=3.1.2",
+    "xlrd>=2.0.1",  # v4: 레거시 XLS 첨부
     "pytesseract>=0.3.10",
     "opencv-python-headless>=4.10.0",  # OCR 이미지 전처리 (deskew/denoise/contrast)
     "langdetect>=1.0.9",
@@ -37,14 +38,20 @@ dependencies = [
     "websockets>=12.0",
 
     # === Database ===
-    "sqlalchemy>=2.0.0",
+    "sqlalchemy[asyncio]>=2.0.0",
     "aiosqlite>=0.20.0",
 
-    # === Korean NLP ===
+    # === Korean NLP / 다국어 ===
     "kiwipiepy>=0.18.0",
+    "lingua-language-detector>=2.0.0",  # v4: 단위별 언어 감지 (langdetect 대체)
+    "tokenizers>=0.19.0",  # v4: Qwen3 토크나이저 토큰 수
 
     # === Reranker ===
-    "FlagEmbedding>=1.2.0",
+    # torch는 CUDA 빌드를 별도 설치한다 (docs/guides/offline-models.md 참고)
+    # pip install torch --index-url https://download.pytorch.org/whl/cu126
+    "torch>=2.4.0",
+    "transformers>=4.51.0",  # v4: Qwen3-Reranker
+    "FlagEmbedding>=1.2.0",  # bge 백엔드 (R9 비교 전용)
 
     # === Utilities ===
     "pydantic>=2.8.0",
@@ -63,6 +70,11 @@ dev = [
     "mypy>=1.11.0",
     "pre-commit>=3.8.0",
     "httpx>=0.27.0",
+]
+# v4 실험 하네스 (experiments_v4/)
+experiments = [
+    "ranx>=0.3.20",
+    "pyyaml>=6.0",
 ]
 # 한국어 OCR 정확도 95%+ — paddleocr는 4GB+ 의존성이라 기본 install 제외.
 # pip install -e .[ocr-paddle]  또는 pip install paddleocr paddlepaddle 후

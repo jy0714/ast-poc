@@ -214,10 +214,17 @@ class CaseStore:
 
     def list_all(self) -> list[CaseMetadata]:
         """전체 케이스 목록 조회 (생성일 내림차순)"""
+        from sqlalchemy import literal_column
+
         from src.db.models import CaseModel
 
         with self._get_session() as session:
-            rows = session.query(CaseModel).order_by(CaseModel.created_at.desc()).all()
+            # 같은 시각 생성(Windows 시계 해상도) 시 삽입 순서(rowid)로 2차 정렬
+            rows = (
+                session.query(CaseModel)
+                .order_by(CaseModel.created_at.desc(), literal_column("rowid").desc())
+                .all()
+            )
             return [_model_to_metadata(r) for r in rows]
 
     def update_status(self, case_id: str, new_status: CaseStatus) -> CaseMetadata:
