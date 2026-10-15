@@ -79,6 +79,31 @@ def make_document_id(rel_path: str, suffix: str) -> str:
     return f"doc:{_sha1(norm)[:12]}{suffix}"
 
 
+SOURCE_PREFIX_DEPTH = 3
+
+
+def relative_source_path(file_path: str | Path, source_root: str | Path) -> str:
+    """케이스 기준 상대 경로 = 데이터 소스 루트의 마지막 3개 경로 요소 + 루트 기준 상대 경로
+
+    문서 unit_id 가 이 값의 해시라서 재색인·데이터 이동(D:\\ → E:\\)·소스 추가에도 바뀌지
+    않아야 한다. 루트 이름만 쓰면 조사 대상자마다 같은 이름(Exchange.pst)이라 충돌하므로
+    상위 요소까지 붙인다. 예: '천세영/Migrated_14-02-2024 09-59/Exchange.pst/a.eml'
+    """
+    file_path, source_root = Path(file_path), Path(source_root)
+    if source_root.is_file() or source_root == file_path:
+        root, rel = source_root.parent, PurePath(file_path.name)
+    else:
+        root = source_root
+        try:
+            rel = PurePath(file_path.resolve().relative_to(source_root.resolve()))
+        except ValueError:
+            rel = PurePath(file_path.name)
+    prefix = PurePath(*root.parts[-SOURCE_PREFIX_DEPTH:]) if root.parts else PurePath()
+    if prefix.anchor:  # 드라이브 루트(D:\)는 접두어에 넣지 않는다
+        prefix = PurePath(*prefix.parts[1:]) if len(prefix.parts) > 1 else PurePath()
+    return (prefix / rel).as_posix()
+
+
 def make_attachment_id(parent_unit_id: str, ordinal: int, suffix: str = "") -> str:
     """첨부 ID: att: + 부모 ID 의 해시 부분 + ':' + 첨부 순번(1부터) + 위치 접미어"""
     parent_hash = parent_unit_id.split(":", 1)[1] if ":" in parent_unit_id else parent_unit_id
@@ -190,7 +215,7 @@ class UnitBuilder:
             settings.email_clean_enabled if clean_enabled is None else clean_enabled
         )
         self.gap_minutes = gap_minutes or settings.chat_session_gap_minutes
-        self.doc_parser = doc_parser or DocumentParser()
+        self.doc_parser = doc_parser or DocumentParser(detect_language=False)
         self.stats = BuildStats()
 
     # ── 공통: 메타 마무리 + 파트 분할 ──

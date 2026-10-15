@@ -1391,6 +1391,11 @@ class IndexingPipeline:
         return Path(cleaned)
 
     def _collect_files(self, case_meta: CaseMetadata) -> list[Path]:
+        """케이스 데이터 소스에서 처리 대상 파일 수집 (collect_case_files 위임)"""
+        return collect_case_files(case_meta)
+
+    @staticmethod
+    def _collect_files_impl(case_meta: CaseMetadata) -> list[Path]:
         """케이스 데이터 소스에서 처리 대상 파일 수집
 
         PST 경로: 파일이면 직접 추가, 폴더면 .pst/.ost 재귀 스캔
@@ -1402,7 +1407,7 @@ class IndexingPipeline:
 
         # PST 경로 처리
         for pst_path_str in case_meta.pst_paths:
-            pst_path = self._normalize_path(pst_path_str)
+            pst_path = IndexingPipeline._normalize_path(pst_path_str)
             logger.debug(f"PST 경로 확인: '{pst_path_str}' → {pst_path} (exists={pst_path.exists()})")
 
             if pst_path.is_file():
@@ -1423,7 +1428,7 @@ class IndexingPipeline:
 
         # 문서 경로 처리
         for doc_path_str in case_meta.doc_paths:
-            doc_path = self._normalize_path(doc_path_str)
+            doc_path = IndexingPipeline._normalize_path(doc_path_str)
             logger.debug(f"문서 경로 확인: '{doc_path_str}' → {doc_path} (exists={doc_path.exists()})")
 
             if doc_path.is_file():
@@ -1560,6 +1565,14 @@ class IndexingPipeline:
 
 # 인덱싱 실패 임계값 — 저장 시도 대비 실패 배치/파일 비율
 _FAILURE_RATE_THRESHOLD = 0.10  # 10% 초과 시 abort
+
+
+def collect_case_files(case_meta: CaseMetadata) -> list[Path]:
+    """케이스 데이터 소스(PST 경로·문서 경로)에서 처리 대상 파일 목록 수집
+
+    인덱싱 파이프라인과 scripts/unit_stats.py 가 같은 파일 목록을 쓰도록 공개한다.
+    """
+    return IndexingPipeline._collect_files_impl(case_meta)
 
 
 class IndexingFailureRateExceeded(Exception):

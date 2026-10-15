@@ -140,16 +140,19 @@ class DocumentParser:
         ".pdf", ".docx", ".pptx", ".xlsx", ".xls", ".txt", ".html", ".htm", ".eml", ".msg",
     }
 
-    def __init__(self, ocr_languages: str | None = None) -> None:
+    def __init__(self, ocr_languages: str | None = None, detect_language: bool = True) -> None:
         """DocumentParser 초기화
 
         Args:
             ocr_languages: OCR 언어 설정 ('+' 구분자, tesseract 형식).
                 None이면 settings.ocr_languages 사용.
+            detect_language: 파일 단위 langdetect 메타(language) 계산 여부.
+                v4 단위 빌더는 단위별 lingua 감지를 쓰므로 False로 끈다.
         """
         from src.utils.config import settings as _settings
 
         self.ocr_languages = ocr_languages or _settings.ocr_languages
+        self.detect_language = detect_language
 
     def _get_ocr_engine(self):  # noqa: ANN202
         """OCR 엔진 인스턴스 (싱글톤). 사용처에서 항상 이 메서드 경유."""
@@ -1524,7 +1527,7 @@ class DocumentParser:
             "file_type": doc.file_type,
             "file_hash": self._compute_file_hash(path),
             "char_count": len(doc.content),
-            "language": self._detect_language(doc.content),
+            "language": self._detect_language(doc.content) if self.detect_language else "",
         })
 
     def _attach_common_metadata_bytes(
@@ -1538,7 +1541,7 @@ class DocumentParser:
             "file_type": doc.file_type,
             "file_hash": file_hash,
             "char_count": len(doc.content),
-            "language": self._detect_language(doc.content),
+            "language": self._detect_language(doc.content) if self.detect_language else "",
         })
 
     @staticmethod

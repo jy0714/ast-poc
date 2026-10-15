@@ -96,7 +96,8 @@ def detect(text: str) -> LangResult:
 
     pairs = [(ln, w) for ln, w in zip(lines, weights, strict=True) if w > 0]
     detector = _get_detector()
-    detected = detector.detect_languages_in_parallel_of([ln for ln, _ in pairs])
+    # 줄마다 순차 판정 — 병렬 API는 프로세스마다 스레드 풀을 띄워 멀티프로세싱에서 과부하
+    detected = [detector.detect_language_of(ln) for ln, _ in pairs]
 
     totals: Counter[str] = Counter()
     for (_, w), lang in zip(pairs, detected, strict=True):

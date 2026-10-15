@@ -245,6 +245,11 @@ class TestParserOcrIntegration:
         from src.parsers import ocr as ocr_module
 
         monkeypatch.setattr(ocr_module, "_engine_cache", fake)
+        # 공유 OCR 캐시(data/ocr_cache)를 끈다 — 같은 빈 페이지 2장이 병렬로 처리될 때
+        # 한쪽이 캐시에 먼저 쓰면 호출 수가 1이 되는 경쟁 조건 방지
+        from src.utils.config import settings
+
+        monkeypatch.setattr(settings, "ocr_cache_enabled", False)
 
         # 빈 페이지 2개짜리 PDF
         path = tmp_path / "scan.pdf"
