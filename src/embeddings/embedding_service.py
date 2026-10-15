@@ -322,8 +322,12 @@ class EmbeddingService:
         }
 
     def _text_limits(self) -> tuple[int, int]:
-        """(최대 문자 수, 최대 바이트 수) — 모델 계열별 사전 절단 안전망"""
-        if self.is_qwen3:
+        """(최대 문자 수, 최대 바이트 수) — 모델 계열별 사전 절단 안전망
+
+        Qwen3·bge-m3(8,192토큰 모델)는 num_ctx 기준으로 넓게 잡는다. v4는 num_ctx를 요청마다
+        넘기므로 bge-m3도 v3의 2,500자 컷이 필요 없다(R9 비교에서 bge 쪽만 잘리지 않게).
+        """
+        if self.is_qwen3 or "bge-m3" in self.model.lower():
             ctx = settings.embed_num_ctx
             return ctx * _QWEN3_CHARS_PER_CTX_TOKEN, ctx * _QWEN3_BYTES_PER_CTX_TOKEN
         return _MAX_CHARS_PER_TEXT, settings.embed_max_bytes

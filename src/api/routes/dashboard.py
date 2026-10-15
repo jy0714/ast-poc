@@ -1,6 +1,8 @@
 """커뮤니케이션 분석 대시보드 엔드포인트 — Analyst UI
 
 - GET /{case_id}  — 케이스 메타데이터 집계 (네트워크, 타임라인, 소스 분포 등)
+
+v4: 케이스 색인 units.jsonl의 단위 메타데이터로 집계한다(단위마다 1회, 지시서 §5.7).
 """
 
 from __future__ import annotations
@@ -14,8 +16,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from src.cases.case_store import CaseNotFoundError, CaseStatus, CaseStore
-from src.chunkers.metadata_enricher import deserialize_metadata_from_chroma
-from src.vectorstore.vector_store import VectorStoreService
+from src.index import case_index
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -71,7 +72,7 @@ class DashboardResponse(BaseModel):
 
     case_id: str
     case_name: str
-    total_chunks: int
+    total_chunks: int  # v4: 증거 단위 수 (키 이름은 프론트엔드 호환을 위해 유지)
     source_type_counts: dict[str, int]
     top_participants: list[ParticipantNode]
     participant_network: NetworkData
@@ -101,12 +102,24 @@ def _parse_month(date_str: str) -> str | None:
     return None
 
 
+# 단위 유형 → 대시보드 source_type 이름 (프론트엔드 호환)
+_UNIT_TO_SOURCE_TYPE = {"chat": "teams_chat"}
+
+
+def unit_metadatas(idx: case_index.CaseIndex) -> list[dict[str, Any]]:
+    """케이스 색인 → 단위별 메타데이터 목록 (source_type 키 포함)"""
+    return [
+        {**meta, "source_type": _UNIT_TO_SOURCE_TYPE.get(utype, utype)}
+        for _uid, utype, meta in idx.iter_unit_meta()
+    ]
+
+
 def aggregate_dashboard(case_id: str, all_metadatas: list[dict[str, Any]]) -> dict[str, Any]:
-    """ChromaDB 메타데이터를 대시보드용 집계 데이터로 변환
+    """단위 메타데이터를 대시보드용 집계 데이터로 변환
 
     Args:
         case_id: 케이스 ID
-        all_metadatas: ChromaDB에서 가져온 전체 메타데이터 리스트
+        all_metadatas: 단위별 메타데이터 리스트 (unit_metadatas). 목록 필드가 JSON 문자열이어도 된다
 
     Returns:
         집계 결과 딕셔너리
@@ -118,8 +131,7 @@ def aggregate_dashboard(case_id: str, all_metadatas: list[dict[str, Any]]) -> di
     month_data: dict[str, Counter[str]] = defaultdict(Counter)
     topic_counts: Counter[str] = Counter()
 
-    for raw_meta in all_metadatas:
-        meta = deserialize_metadata_from_chroma(raw_meta)
+    for meta in all_metadatas:
         source_type = meta.get("source_type", "unknown")
         source_counts[source_type] += 1
 
@@ -138,7 +150,7 @@ def aggregate_dashboard(case_id: str, all_metadatas: list[dict[str, Any]]) -> di
                     participant_counts[name] += 1
                     participant_sources[name].add(source_type)
 
-            # 엣지: 같은 청크에 등장하는 참여자 쌍
+            # 엣지: 같은 단위에 등장하는 참여자 쌍
             unique_names = sorted(set(
                 p.strip() for p in participants
                 if isinstance(p, str) and p.strip()
@@ -233,21 +245,13 @@ async def get_dashboard(case_id: str):
             "인덱싱이 완료된 케이스만 대시보드를 볼 수 있습니다.",
         )
 
-    # ChromaDB에서 케이스 메타데이터만 조회 (단일 공유 컬렉션 + case_id 필터)
+    # 케이스 색인의 단위 메타데이터
     try:
-        vector_store = VectorStoreService(case_id=case_id)
-        collection = vector_store._get_collection()
-
-        result = collection.get(
-            where={"case_id": case_id},
-            include=["metadatas"],
-        )
-        all_metadatas: list[dict[str, Any]] = result.get("metadatas") or []
-        total = len(all_metadatas)
-
-    except Exception as e:
-        logger.error(f"ChromaDB 조회 실패: {case_id} — {e}")
-        raise HTTPException(status_code=500, detail=f"벡터DB 조회 실패: {e}")
+        idx = case_index.load(case_id)
+    except (case_index.IndexNotFoundError, case_index.IndexVersionError) as e:
+        raise HTTPException(status_code=409, detail=f"재인덱싱이 필요합니다: {e}") from e
+    all_metadatas = unit_metadatas(idx)
+    total = len(all_metadatas)
 
     # 집계
     aggregated = aggregate_dashboard(case_id, all_metadatas)

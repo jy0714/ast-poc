@@ -141,6 +141,9 @@ class TestChatAPI:
                     last_modified_by="",
                     created_date="",
                     last_modified="",
+                    unit_id="em:abc",
+                    page=None,
+                    lang="ko",
                 ),
             ],
             secure_mode=True,
@@ -159,6 +162,7 @@ class TestChatAPI:
         assert data["answer"] == "테스트 답변입니다."
         assert len(data["sources"]) == 1
         assert data["sources"][0]["source_type"] == "email"
+        assert data["sources"][0]["unit_id"] == "em:abc"
         assert data["case_id"] == case_id
         assert data["security_mode"] is True
 
@@ -329,3 +333,18 @@ class TestStreamAPI:
             assert rows[0].is_stopped == 1
             # 첫 토큰까지만 모임
             assert rows[0].answer == "부분 "
+
+
+class TestReindexRequired:
+    @patch("src.api.routes.chat.RAGEngine")
+    def test_missing_index_returns_409(self, mock_engine_cls, client, store):
+        """READY 케이스에 v4 색인이 없으면 409 재인덱싱 안내"""
+        from src.index.case_index import IndexNotFoundError
+
+        case_id = _create_ready_case(store)
+        mock_engine = AsyncMock()
+        mock_engine.query.side_effect = IndexNotFoundError("케이스 색인이 없습니다")
+        mock_engine_cls.return_value = mock_engine
+        resp = client.post("/api/analyst/chat/", json={"case_id": case_id, "message": "질의"})
+        assert resp.status_code == 409
+        assert "재인덱싱" in resp.json()["detail"]

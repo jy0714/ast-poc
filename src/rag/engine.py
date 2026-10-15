@@ -1,12 +1,14 @@
-"""RAG 질의 엔진 — 하이브리드 검색 + LLM 응답 생성
+"""RAG 질의 엔진 — 검색(retrieve) + LLM 응답 생성
 
 흐름:
     사용자 질의
-    → 질의 파서 (의도 분석 + 필터 추출)
-    → 하이브리드 검색 (벡터 + BM25 + RRF)
-    → 컨텍스트 조합
-    → LLM 응답 생성
-    → 출처 포함 결과 반환
+    → 질의 파서 (의도 분석 + 필터 추출, 서비스 경로 전용)
+    → retrieve(): BM25 + Dense → RRF → 재순위 (실험과 같은 함수, 지시서 §5.6)
+    → 상위 RERANK_TOP_N 단위를 출처로 변환 (헤더 + 대표 파트 본문)
+    → 컨텍스트 조합 → LLM 응답 생성 → 출처 포함 결과 반환
+
+서비스 후처리(min_source_length, rerank_min_score)는 평가 대상이 아니다. 실험은
+retrieve() 결과를 그대로 평가한다.
 """
 
 from __future__ import annotations
@@ -15,9 +17,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Awaitable, Callable
 
+from src.index import case_index
 from src.llm.router import LLMRouter
-from src.rag.query_parser import ParsedQuery, parse_query
-from src.vectorstore.vector_store import VectorStoreService
+from src.rag.query_parser import parse_query
+from src.rag.retrieval import RetrievalResult, retrieve, service_config
 from src.utils.config import settings
 from src.utils.logger import get_logger
 
@@ -48,6 +51,14 @@ class SourceReference:
     last_modified_by: str = ""
     created_date: str = ""
     last_modified: str = ""
+    # v4 단위 정보 (선택)
+    unit_id: str = ""
+    page: int | None = None
+    lang: str = ""
+
+
+# 단위 유형 → 기존 source_type 이름 (프론트엔드 호환: 채팅은 teams_chat)
+_UNIT_TO_SOURCE_TYPE = {"chat": "teams_chat"}
 
 
 @dataclass
@@ -113,27 +124,25 @@ class RAGEngine:
     def __init__(
         self,
         case_id: str,
-        vector_store: VectorStoreService | None = None,
         llm_router: LLMRouter | None = None,
-        top_k: int | None = None,
         rerank_enabled: bool | None = None,
+        retrieve_fn: Callable[..., RetrievalResult] | None = None,
     ) -> None:
         """RAGEngine 초기화
 
         Args:
             case_id: 검색 대상 케이스 ID
-            vector_store: 벡터 저장소 (기본: case_id 기반 생성)
             llm_router: LLM 라우터 (기본: 새 인스턴스)
-            top_k: 검색 결과 수 (기본: settings.search_top_k)
             rerank_enabled: Reranker 사용 여부 (None이면 settings.rerank_enabled)
+            retrieve_fn: 검색 함수 (기본 retrieval.retrieve, 테스트 주입용)
         """
         self.case_id = case_id
-        self.vector_store = vector_store or VectorStoreService(case_id=case_id)
         self.llm_router = llm_router or LLMRouter()
-        self.top_k = top_k or settings.search_top_k
         self.rerank_enabled = (
             rerank_enabled if rerank_enabled is not None else settings.rerank_enabled
         )
+        self._retrieve = retrieve_fn or retrieve
+        self.last_retrieval: RetrievalResult | None = None
 
     def search(
         self,
@@ -141,85 +150,50 @@ class RAGEngine:
         filters: dict[str, Any] | None = None,
         n_results: int | None = None,
     ) -> list[SourceReference]:
-        """하이브리드 검색만 수행 (LLM 호출 없이)
+        """검색만 수행 (LLM 호출 없이) — retrieve() 상위 n개 단위를 출처로 변환
 
-        rerank_enabled=True일 경우:
-            1. rerank_top_k_candidates개 후보를 하이브리드 검색으로 가져옴
-            2. Reranker로 rerank_top_n개 선별
-        rerank_enabled=False일 경우:
-            기존 동작 (하이브리드 검색 → top_k 반환)
+        재순위를 켠 경우 RERANK_MIN_SCORE(기본 0.0 = 끔) 미만 단위는 출처에서 뺀다.
 
         Args:
             query: 검색 쿼리
-            filters: 메타데이터 필터 (source_type, date 등)
-            n_results: 결과 수
+            filters: 메타데이터 필터 (source_type, _date_gte/_date_lte/_date_eq, participants 등)
+            n_results: 결과 수 (기본: settings.rerank_top_n)
 
         Returns:
-            SourceReference 리스트 (점수 내림차순)
+            SourceReference 리스트 (순위 순)
+
+        Raises:
+            IndexNotFoundError / IndexVersionError / EmbeddingDimensionError: 재인덱싱 필요
         """
-        if self.rerank_enabled:
-            # reranker용: 넉넉한 후보를 가져온 뒤 reranker가 선별
-            candidate_count = settings.rerank_top_k_candidates
-            results = self.vector_store.search(
-                query=query,
-                n_results=candidate_count,
-                filters=filters,
-            )
-
-            if results:
-                from src.rag.reranker import get_reranker
-
-                reranker = get_reranker()
-                final_n = n_results or settings.rerank_top_n
-                results = reranker.rerank(
-                    query=query, documents=results, top_n=final_n
-                )
-        else:
-            results = self.vector_store.search(
-                query=query,
-                n_results=n_results or self.top_k,
-                filters=filters,
-            )
-            # reranker 미사용 시 RRF 점수 상대 필터 — 상위 결과 평균 대비 너무 낮은
-            # 결과 제거 (절대 임계값 rrf_min_score는 vector_store에서 이미 적용됨)
-            results = self._apply_relative_score_filter(results)
+        cfg = service_config(rerank=self.rerank_enabled)
+        result = self._retrieve(self.case_id, query, cfg, filters)
+        self.last_retrieval = result
+        n = n_results or settings.rerank_top_n
+        idx = case_index.load(self.case_id)
+        method = "hybrid+rerank" if cfg.rerank else "hybrid"
+        min_score = settings.rerank_min_score
 
         sources: list[SourceReference] = []
-        for r in results:
-            meta = r.get("metadata", {})
-            sources.append(
-                SourceReference(
-                    content=r.get("content", ""),
-                    source_type=meta.get("source_type", "unknown"),
-                    filename=meta.get("filename", ""),
-                    date=meta.get("date", meta.get("date_range_start", "")),
-                    participants=meta.get("participants", []),
-                    subject=meta.get("subject", meta.get("thread_subject", "")),
-                    score=r.get("rerank_score", r.get("score", 0.0)),
-                    search_method=r.get("search_method", ""),
-                    sender=meta.get("sender", ""),
-                    recipients=meta.get("recipients", []),
-                    cc=meta.get("cc", []),
-                    attachments=meta.get("attachment_filenames", []),
-                    message_id=meta.get("message_id", ""),
-                    in_reply_to=meta.get("in_reply_to", ""),
-                    author=meta.get("author", ""),
-                    last_modified_by=meta.get("last_modified_by", ""),
-                    created_date=meta.get("created_date", ""),
-                    last_modified=meta.get("last_modified", ""),
-                )
-            )
-
+        for hit in result.hits:
+            if len(sources) >= n:
+                break
+            if cfg.rerank and min_score > 0 and "rerank" in hit.stage_ranks and hit.score < min_score:
+                continue
+            part = idx.part(hit.best_part_id)
+            sources.append(_to_source(part, hit.score, method))
+        logger.info(
+            f"검색: case={self.case_id}, 단위 {len(result.hits)}건 중 {len(sources)}건 출처, "
+            f"{result.timings_ms.get('total', 0):.0f}ms (재순위 절단 {result.n_rerank_truncated})"
+        )
         return sources
 
     @staticmethod
     def _apply_relative_score_filter(
         results: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """상위 결과 평균 점수의 30% 미만인 결과 제거 (상대 필터)
+        """상위 결과 평균 점수의 30% 미만인 결과 제거 (v3 상대 필터)
 
-        reranker 미사용 시 RRF 점수 기반으로 적용. 결과가 1건 이하면 필터하지 않음
-        (비교 기준이 자기 자신뿐).
+        v4 기본 경로에서는 호출하지 않는다(지시서 §5.7). 체크포인트 3에서 삭제한다.
         """
         if len(results) <= 1:
             return results
@@ -229,12 +203,6 @@ class RAGEngine:
             return results
         threshold = mean_score * 0.3
         filtered = [r for r in results if r.get("score", 0.0) >= threshold]
-        if filtered and len(filtered) < len(results):
-            logger.info(
-                f"RRF 상대 필터: {len(results)}건 중 {len(filtered)}건 통과 "
-                f"(평균 {mean_score:.4f}의 30%={threshold:.4f} 미만 제거)"
-            )
-        # 필터가 전부 제거하는 경우는 방어적으로 원본 유지 (상대 필터가 과하게 작동)
         return filtered or results
 
     def _postprocess_sources(
@@ -280,7 +248,7 @@ class RAGEngine:
 
         키워드를 추출하지 못하면(너무 짧은 질의 등) True 반환 (체크 skip).
         """
-        from src.chunkers.metadata_enricher import extract_topics
+        from src.units.topics import extract_topics
 
         keywords = extract_topics(query, max_topics=5)
         if not keywords:
@@ -529,6 +497,39 @@ class RAGEngine:
 
         header = " | ".join(header_parts) if header_parts else "출처 불명"
         return f"[{header}]\n{source.content}"
+
+
+def _to_source(part: Any, score: float, method: str) -> SourceReference:
+    """증거 단위 대표 파트 → SourceReference (content = 헤더 + 대표 파트 본문)"""
+    meta = part.meta
+    filename = meta.get("filename") or ""
+    if not filename and part.unit_type in ("document", "attachment"):
+        filename = str(meta.get("source_file", "")).rsplit("/", 1)[-1]
+    if part.unit_type == "email":
+        filename = filename or str(meta.get("source_file", "")).rsplit("/", 1)[-1]
+    return SourceReference(
+        content=part.full_text(with_header=True),
+        source_type=_UNIT_TO_SOURCE_TYPE.get(part.unit_type, part.unit_type),
+        filename=filename,
+        date=str(meta.get("date") or ""),
+        participants=list(meta.get("participants") or []),
+        subject=str(meta.get("subject") or meta.get("parent_subject") or ""),
+        score=float(score),
+        search_method=method,
+        sender=str(meta.get("sender") or ""),
+        recipients=list(meta.get("recipients") or []),
+        cc=list(meta.get("cc") or []),
+        attachments=list(meta.get("attachment_filenames") or []),
+        message_id=str(meta.get("message_id") or ""),
+        in_reply_to=str(meta.get("in_reply_to") or ""),
+        author=str(meta.get("author") or ""),
+        last_modified_by=str(meta.get("last_modified_by") or ""),
+        created_date=str(meta.get("created_date") or ""),
+        last_modified=str(meta.get("last_modified") or ""),
+        unit_id=part.unit_id,
+        page=meta.get("page"),
+        lang=str(meta.get("lang") or ""),
+    )
 
 
 def _usage_subset(rec: dict[str, Any]) -> dict[str, Any]:

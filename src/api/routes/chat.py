@@ -15,8 +15,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from src.cases.case_store import CaseNotFoundError, CaseStatus, CaseStore
+from src.embeddings.embedding_service import EmbeddingDimensionError
+from src.index.case_index import IndexNotFoundError, IndexVersionError
 from src.rag.engine import RAGEngine
 from src.utils.logger import get_logger
+
+# 케이스 색인이 없거나(v3 케이스) 버전·모델이 달라 재인덱싱이 필요한 경우
+REINDEX_ERRORS = (IndexNotFoundError, IndexVersionError, EmbeddingDimensionError)
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -64,6 +69,10 @@ class SourceReference(BaseModel):
     last_modified_by: str = ""
     created_date: str = ""
     last_modified: str = ""
+    # v4 단위 정보 (선택 — 기존 프론트엔드는 무시)
+    unit_id: str = ""
+    page: int | None = None
+    lang: str = ""
 
 
 class TokenUsage(BaseModel):
@@ -210,11 +219,14 @@ async def chat(request: ChatRequest):
         case_id=request.case_id,
         rerank_enabled=request.rerank,
     )
-    result = await engine.query(
-        question=request.message.strip(),
-        filters=request.filters,
-        secure_mode=request.security_mode,
-    )
+    try:
+        result = await engine.query(
+            question=request.message.strip(),
+            filters=request.filters,
+            secure_mode=request.security_mode,
+        )
+    except REINDEX_ERRORS as e:
+        raise HTTPException(status_code=409, detail=f"재인덱싱이 필요합니다: {e}") from e
 
     sources = [
         SourceReference(
@@ -236,6 +248,9 @@ async def chat(request: ChatRequest):
             last_modified_by=s.last_modified_by,
             created_date=s.created_date,
             last_modified=s.last_modified,
+            unit_id=s.unit_id,
+            page=s.page,
+            lang=s.lang,
         )
         for s in result.sources
     ]
@@ -349,6 +364,9 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         last_modified_by=s.last_modified_by,
                         created_date=s.created_date,
                         last_modified=s.last_modified,
+                        unit_id=s.unit_id,
+                        page=s.page,
+                        lang=s.lang,
                     )
                     collected_sources.append(src_ref)
                     sources_data.append(src_ref.model_dump())

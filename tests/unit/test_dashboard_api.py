@@ -5,14 +5,18 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.api.routes.dashboard import aggregate_dashboard
 from src.cases.case_store import CaseStatus, CaseStore
+from src.index import case_index
+from src.index.case_index import ProfileVectors
+from src.units.schema import UnitPart
+from src.utils.config import settings
 
 
 @pytest.fixture
@@ -170,8 +174,33 @@ class TestAggregateDashboard:
 # === API 엔드포인트 테스트 ===
 
 
+def _write_units(case_id: str, metas: list[tuple[str, str, dict]]) -> None:
+    """(unit_id, unit_type, meta) 목록으로 케이스 색인 작성 (단위당 파트 1개, 첫 단위는 파트 2개)"""
+    parts = []
+    for i, (uid, utype, meta) in enumerate(metas):
+        n = 2 if i == 0 else 1
+        for k in range(1, n + 1):
+            parts.append(UnitPart(f"{uid}#{k}", uid, utype, "[헤더]", f"본문 {k}", 2, meta))
+    vecs = np.zeros((len(parts), 4), dtype=np.float32)
+    case_index.write_index(case_id, parts, {"hdr-qwen3": ProfileVectors(vecs, settings.ollama_embed_model)})
+
+
+def _ready(case_store, name: str) -> str:
+    meta = case_store.create(name)
+    case_store.update_status(meta.case_id, CaseStatus.INDEXING)
+    case_store.update_status(meta.case_id, CaseStatus.READY)
+    return meta.case_id
+
+
 class TestDashboardAPI:
     """HTTP 엔드포인트 테스트"""
+
+    @pytest.fixture(autouse=True)
+    def _tmp_index(self, tmpdir, monkeypatch):
+        monkeypatch.setattr(settings, "index_dir", str(tmpdir / "index"))
+        case_index._cache.clear()
+        yield
+        case_index._cache.clear()
 
     def test_case_not_found(self, client):
         """존재하지 않는 케이스 → 404"""
@@ -184,76 +213,52 @@ class TestDashboardAPI:
         resp = client.get(f"/api/analyst/dashboard/{meta.case_id}")
         assert resp.status_code == 409
 
-    @patch("src.api.routes.dashboard.VectorStoreService")
-    def test_dashboard_success(self, mock_vs_cls, client, case_store):
-        """정상 조회"""
-        meta = case_store.create("대시보드 테스트")
-        case_store.update_status(meta.case_id, CaseStatus.INDEXING)
-        case_store.update_status(meta.case_id, CaseStatus.READY)
+    def test_dashboard_success(self, client, case_store):
+        """단위 메타 집계 — 파트가 여러 개인 단위도 한 번만 센다"""
+        case_id = _ready(case_store, "대시보드 테스트")
+        _write_units(case_id, [
+            ("em:1", "email", {"participants": ["Alice", "Bob"], "date": "2025-01-15T09:00:00+09:00",
+                               "topics": ["감사"]}),
+            ("em:2", "email", {"participants": ["Alice"], "date": "2025-02-10T09:00:00+09:00",
+                               "topics": ["계약"]}),
+            ("ch:3", "chat", {"participants": ["Bob", "Charlie"], "date": "2025-02-20T10:00:00+09:00",
+                              "topics": ["회의"]}),
+        ])
 
-        # ChromaDB mock
-        mock_collection = MagicMock()
-        mock_collection.count.return_value = 3
-        mock_collection.get.return_value = {
-            "metadatas": [
-                {"source_type": "email", "participants": json.dumps(["Alice", "Bob"]),
-                 "date_range_start": "2025-01-15", "topics": json.dumps(["감사"])},
-                {"source_type": "email", "participants": json.dumps(["Alice"]),
-                 "date_range_start": "2025-02-10", "topics": json.dumps(["계약"])},
-                {"source_type": "teams_chat", "participants": json.dumps(["Bob", "Charlie"]),
-                 "date_range_start": "2025-02-20", "topics": json.dumps(["회의"])},
-            ]
-        }
-        mock_vs = MagicMock()
-        mock_vs._get_collection.return_value = mock_collection
-        mock_vs_cls.return_value = mock_vs
-
-        resp = client.get(f"/api/analyst/dashboard/{meta.case_id}")
+        resp = client.get(f"/api/analyst/dashboard/{case_id}")
         assert resp.status_code == 200
 
         data = resp.json()
-        assert data["case_id"] == meta.case_id
+        assert data["case_id"] == case_id
         assert data["case_name"] == "대시보드 테스트"
-        assert data["total_chunks"] == 3
-        assert data["source_type_counts"]["email"] == 2
-        assert data["source_type_counts"]["teams_chat"] == 1
+        assert data["total_chunks"] == 3  # 단위 수 (파트 4개)
+        assert data["source_type_counts"] == {"email": 2, "teams_chat": 1}
         assert len(data["timeline"]) == 2  # 2025-01, 2025-02
+        assert data["timeline"][1]["teams_chat_count"] == 1
         assert len(data["top_topics"]) == 3
 
-    @patch("src.api.routes.dashboard.VectorStoreService")
-    def test_dashboard_empty_collection(self, mock_vs_cls, client, case_store):
-        """빈 컬렉션"""
-        meta = case_store.create("빈 케이스")
-        case_store.update_status(meta.case_id, CaseStatus.INDEXING)
-        case_store.update_status(meta.case_id, CaseStatus.READY)
-
-        mock_collection = MagicMock()
-        mock_collection.count.return_value = 0
-        mock_vs = MagicMock()
-        mock_vs._get_collection.return_value = mock_collection
-        mock_vs_cls.return_value = mock_vs
-
-        resp = client.get(f"/api/analyst/dashboard/{meta.case_id}")
+    def test_dashboard_empty_index(self, client, case_store):
+        """빈 색인"""
+        case_id = _ready(case_store, "빈 케이스")
+        _write_units(case_id, [])
+        resp = client.get(f"/api/analyst/dashboard/{case_id}")
         assert resp.status_code == 200
-
         data = resp.json()
         assert data["total_chunks"] == 0
         assert data["source_type_counts"] == {}
         assert data["top_participants"] == []
 
-    @patch("src.api.routes.dashboard.VectorStoreService")
-    def test_dashboard_archived_case(self, mock_vs_cls, client, case_store):
+    def test_dashboard_missing_index_needs_reindex(self, client, case_store):
+        """READY인데 v4 색인이 없는 (v3) 케이스 → 409 재인덱싱"""
+        case_id = _ready(case_store, "v3 케이스")
+        resp = client.get(f"/api/analyst/dashboard/{case_id}")
+        assert resp.status_code == 409
+        assert "재인덱싱" in resp.json()["detail"]
+
+    def test_dashboard_archived_case(self, client, case_store):
         """보관된 케이스도 조회 가능"""
-        meta = case_store.create("보관 케이스")
-        case_store.update_status(meta.case_id, CaseStatus.INDEXING)
-        case_store.update_status(meta.case_id, CaseStatus.READY)
-        case_store.update_status(meta.case_id, CaseStatus.ARCHIVED)
-
-        mock_collection = MagicMock()
-        mock_collection.count.return_value = 0
-        mock_vs = MagicMock()
-        mock_vs._get_collection.return_value = mock_collection
-        mock_vs_cls.return_value = mock_vs
-
-        resp = client.get(f"/api/analyst/dashboard/{meta.case_id}")
+        case_id = _ready(case_store, "보관 케이스")
+        case_store.update_status(case_id, CaseStatus.ARCHIVED)
+        _write_units(case_id, [])
+        resp = client.get(f"/api/analyst/dashboard/{case_id}")
         assert resp.status_code == 200

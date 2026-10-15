@@ -175,7 +175,7 @@ async def update_case_sources(case_id: str, request: CaseUpdateSources):
 
 @router.delete("/{case_id}", response_model=DeleteResponse)
 async def delete_case(case_id: str):
-    """케이스 삭제 (벡터DB 컬렉션 + BM25 인덱스 + 메타데이터 삭제)
+    """케이스 삭제 (케이스 색인 data/index/{case_id} + v3 벡터DB 잔여 데이터 + 메타데이터 삭제)
 
     인덱싱이 실행 중이면 워커를 먼저 cancel하고 종료될 때까지 대기.
     그렇지 않으면 워커가 삭제 직후 stale 청크를 vectorstore에 다시 upsert하는
@@ -200,7 +200,15 @@ async def delete_case(case_id: str):
                 f"인덱싱 워커가 timeout 안에 종료되지 않음: {case_id} — 삭제는 진행"
             )
 
-    # 벡터DB에서 해당 케이스 청크만 삭제 (단일 공유 컬렉션)
+    # v4 케이스 색인 폴더 삭제
+    from src.index import case_index
+
+    try:
+        case_index.delete(case_id)
+    except Exception as e:
+        logger.warning(f"케이스 색인 삭제 실패 (무시): {e}")
+
+    # v3 Chroma에 남은 케이스 청크 삭제 (체크포인트 3에서 Chroma 제거 시 함께 삭제)
     try:
         from src.vectorstore.vector_store import VectorStoreService
 

@@ -1,25 +1,28 @@
-"""인덱싱 파이프라인 유닛 테스트
+"""인덱싱 파이프라인 유닛 테스트 (v4)
 
-Ollama 없이 테스트: VectorStoreService를 모킹하여
-파싱 → 청킹 → 메타데이터 보강 단계까지 검증.
+AST_FAKE_MODELS=1(가짜 임베더)과 임시 INDEX_DIR로 실제 경로 전체를 돈다:
+파싱 → 증거 단위 → (중복 제거) → 임베딩 → 케이스 색인 저장.
 """
 
 import tempfile
 import threading
 import time
+from email.mime.text import MIMEText
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.cases.case_store import CaseStatus, CaseStore
-from src.chunkers.chunker import Chunk
+from src.index import case_index
+from src.indexing import pipeline as pipeline_mod
 from src.indexing.pipeline import (
     IndexingPhase,
     IndexingPipeline,
     IndexingProgress,
+    case_source_files,
 )
-
+from src.units.schema import EvidenceUnit
+from src.utils.config import settings
 
 # === 테스트 헬퍼 ===
 
@@ -28,6 +31,21 @@ from src.indexing.pipeline import (
 def tmpdir():
     with tempfile.TemporaryDirectory() as d:
         yield Path(d)
+
+
+@pytest.fixture(autouse=True)
+def _fake_models(tmpdir, monkeypatch):
+    """가짜 임베더 + 임시 색인 폴더 + 실패 파트 기록 가로채기"""
+    monkeypatch.setattr(settings, "ast_fake_models", True)
+    monkeypatch.setattr(settings, "embed_dim", 32)
+    monkeypatch.setattr(settings, "index_dir", str(tmpdir / "index"))
+    monkeypatch.setattr(settings, "service_index_profile", "hdr-qwen3")
+    monkeypatch.setattr(settings, "ollama_embed_model", "qwen3-embedding:4b-q8_0")
+    saved: list = []
+    monkeypatch.setattr(pipeline_mod, "_save_failed_parts", lambda cid, parts, diag=None: saved.extend(parts))
+    case_index._cache.clear()
+    yield saved
+    case_index._cache.clear()
 
 
 @pytest.fixture
@@ -44,21 +62,19 @@ def case_store(tmpdir):
 
 
 @pytest.fixture
-def mock_vector_store():
-    """add_chunks를 모킹한 VectorStore 팩토리"""
-    def factory(case_id: str):
-        store = MagicMock()
-        store.add_chunks.side_effect = lambda chunks, rebuild_bm25=True: len(chunks)
-        return store
-    return factory
+def pipeline(case_store):
+    return IndexingPipeline(case_store=case_store)
 
 
-@pytest.fixture
-def pipeline(case_store, mock_vector_store):
-    return IndexingPipeline(
-        case_store=case_store,
-        vector_store_factory=mock_vector_store,
-    )
+def _eml(path: Path, subject: str, body: str, message_id: str) -> None:
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = "sender@example.com"
+    msg["To"] = "recipient@example.com"
+    msg["Message-ID"] = message_id
+    msg["Date"] = "Tue, 05 Mar 2024 14:22:00 +0900"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(msg.as_bytes())
 
 
 def _create_test_files(tmpdir: Path, files: dict[str, str]) -> Path:
@@ -198,57 +214,64 @@ class TestCollectFiles:
         assert "mail.pst" in names
 
 
-# === 문서 처리 테스트 ===
 
 
-class TestProcessDocument:
-    def test_process_txt(self, pipeline, case_store, tmpdir):
-        """TXT 파일 처리: 파싱 → 청킹 → 메타데이터"""
-        doc_file = tmpdir / "test.txt"
-        doc_file.write_text(
-            "이것은 테스트 문서입니다. 충분히 긴 내용을 포함해야 합니다. " * 20,
-            encoding="utf-8",
-        )
-        meta = case_store.create("문서 처리")
-        progress = IndexingProgress(case_id=meta.case_id)
-        chunks = pipeline._process_document(doc_file, meta.case_id, progress)
+# === 파일 → 단위 ===
 
-        assert len(chunks) > 0
-        assert all(isinstance(c, Chunk) for c in chunks)
-        assert all(c.metadata.get("case_id") == meta.case_id for c in chunks)
-        assert all(c.metadata.get("topics") is not None for c in chunks)
 
-    def test_process_empty_txt(self, pipeline, case_store, tmpdir):
-        """빈 TXT 파일 → 청크 0개"""
-        doc_file = tmpdir / "empty.txt"
-        doc_file.write_text("", encoding="utf-8")
-        meta = case_store.create("빈 문서")
-        progress = IndexingProgress(case_id=meta.case_id)
-        chunks = pipeline._process_document(doc_file, meta.case_id, progress)
-        assert chunks == []
+class TestBuildFile:
+    def test_txt_to_units(self, tmpdir):
+        """TXT 파일 → 문서 단위 (case_id·헤더·통계)"""
+        doc = tmpdir / "test.txt"
+        doc.write_text("이것은 테스트 문서입니다. 감사 보고서 내용입니다. " * 20, encoding="utf-8")
+        units, stats, err = pipeline_mod._process_file_thread(doc, "test.txt", "c1")
+        assert err is None and units
+        assert all(isinstance(u, EvidenceUnit) for u in units)
+        assert all(u.unit_type == "document" and u.meta["case_id"] == "c1" for u in units)
+        assert all(u.parts and u.parts[0].header.startswith("[문서]") for u in units)
+        assert stats["counts"]["units:document"] == len(units)
 
-    def test_process_eml(self, pipeline, case_store, tmpdir):
-        """EML 파일 처리"""
-        from email.mime.text import MIMEText
+    def test_empty_txt(self, tmpdir):
+        """빈 TXT → 단위 0개, 에러 없음"""
+        doc = tmpdir / "empty.txt"
+        doc.write_text("", encoding="utf-8")
+        units, _, err = pipeline_mod._process_file_thread(doc, "empty.txt", "c1")
+        assert units == [] and err is None
 
-        msg = MIMEText("EML 파싱 테스트 본문입니다. 인덱싱 파이프라인으로 처리합니다.", "plain", "utf-8")
-        msg["Subject"] = "테스트 이메일"
-        msg["From"] = "sender@example.com"
-        msg["To"] = "recipient@example.com"
+    def test_eml_is_email_unit(self, tmpdir):
+        """문서 폴더의 EML도 이메일 단위"""
+        _eml(tmpdir / "a.eml", "테스트 이메일", "EML 파싱 테스트 본문입니다.", "<m1@x>")
+        units, _, err = pipeline_mod._process_file_thread(tmpdir / "a.eml", "a.eml", "c1")
+        assert err is None
+        assert units[0].unit_type == "email" and units[0].unit_id.startswith("em:")
+        assert "테스트 이메일" in units[0].header
 
-        eml_file = tmpdir / "test.eml"
-        eml_file.write_bytes(msg.as_bytes())
+    def test_subprocess_worker_same_result(self, tmpdir):
+        """ProcessPool 워커 함수도 같은 단위를 만든다 (같은 프로세스에서 직접 호출)"""
+        _eml(tmpdir / "a.eml", "제목", "본문 내용입니다.", "<m2@x>")
+        u1, _, _ = pipeline_mod._process_file_thread(tmpdir / "a.eml", "a.eml", "c1")
+        u2, _, _ = pipeline_mod._process_file_subprocess((str(tmpdir / "a.eml"), "a.eml", "c1"))
+        assert [u.unit_id for u in u1] == [u.unit_id for u in u2]
 
-        meta = case_store.create("EML 처리")
-        progress = IndexingProgress(case_id=meta.case_id)
-        chunks = pipeline._process_document(eml_file, meta.case_id, progress)
+    def test_bad_file_reports_error(self, tmpdir):
+        """파싱 실패 파일 → 에러 메시지 (예외 아님)"""
+        bad = tmpdir / "bad.pdf"
+        bad.write_bytes(b"not a real pdf")
+        units, _, err = pipeline_mod._process_file_thread(bad, "bad.pdf", "c1")
+        assert units == [] and err and "bad.pdf" in err
 
-        assert len(chunks) > 0
-        assert "테스트 이메일" in chunks[0].content or "EML 파싱" in chunks[0].content
+    def test_relative_paths_from_source_root(self, case_store, tmpdir):
+        """상대 경로 = 소스 루트의 마지막 3개 요소 + 루트 기준 경로 (문서 ID의 근거)"""
+        doc_dir = _create_test_files(tmpdir, {"a.txt": "x " * 10})
+        (doc_dir / "sub").mkdir()
+        (doc_dir / "sub" / "b.txt").write_text("y " * 10, encoding="utf-8")
+        meta = case_store.create("경로", doc_paths=[str(doc_dir)])
+        rels = sorted(rel for _, rel in case_source_files(meta))
+        assert rels[0].endswith("/docs/a.txt") and rels[1].endswith("/docs/sub/b.txt")
+        assert len(rels[0].split("/")) == 4
 
 
 # === 전체 파이프라인 실행 테스트 ===
-
 
 class TestRun:
     def test_run_with_documents(self, pipeline, case_store, tmpdir):
@@ -442,3 +465,112 @@ class TestProgressStalledField:
         assert d["stalled"] is False
         assert d["encrypted_pdfs"] == []
         assert d["scan_pdfs_no_ocr"] == []
+
+
+# === v4: 중복 제거·증분·실패 파트·취소 ===
+
+
+class TestV4Pipeline:
+    def test_index_written_and_searchable(self, pipeline, case_store, tmpdir):
+        """완료 후 케이스 색인이 생기고 retrieve()로 검색된다"""
+        from src.rag.retrieval import RetrievalConfig, retrieve
+
+        doc_dir = _create_test_files(tmpdir, {
+            "doc1.txt": "첫 번째 문서입니다. 감사 보고서 내용을 포함합니다. " * 10,
+            "doc2.txt": "두 번째 문서입니다. 재무 분석 자료입니다. " * 10,
+        })
+        meta = case_store.create("검색", doc_paths=[str(doc_dir)])
+        progress = pipeline.run(meta.case_id)
+        idx = case_index.load(meta.case_id)
+        assert idx.n_parts == progress.total_chunks
+        assert idx.profiles() == ["hdr-qwen3"]
+        assert case_store.get(meta.case_id).total_chunks == idx.n_units
+        res = retrieve(meta.case_id, "재무 분석", RetrievalConfig(rerank=False))
+        assert idx.part(res.hits[0].best_part_id).meta["source_file"].endswith("docs/doc2.txt")
+
+    def test_empty_case_writes_empty_index(self, pipeline, case_store):
+        meta = case_store.create("빈 케이스")
+        pipeline.run(meta.case_id)
+        assert case_index.load(meta.case_id).n_parts == 0
+
+    def test_duplicate_email_across_custodians(self, pipeline, case_store, tmpdir):
+        """같은 Message-ID 메일이 두 조사 대상자 폴더에 있으면 단위 1개 + folder_paths 병합"""
+        root = tmpdir / "mail"
+        _eml(root / "kim" / "Inbox" / "a.eml", "정산 건", "선급금 송금 관련 본문", "<dup@x>")
+        _eml(root / "lee" / "Sent" / "a.eml", "정산 건", "선급금 송금 관련 본문", "<dup@x>")
+        _eml(root / "lee" / "Sent" / "b.eml", "다른 메일", "점심 메뉴", "<other@x>")
+        meta = case_store.create("중복", doc_paths=[str(root)])
+        progress = pipeline.run(meta.case_id)
+        assert progress.phase == IndexingPhase.COMPLETED
+        idx = case_index.load(meta.case_id)
+        assert idx.n_units == 2
+        dup = [p for p in idx.parts if "dup@x" in p.meta.get("message_id", "")]
+        assert len(dup) == 1
+        folders = sorted(dup[0].meta["folder_paths"])
+        assert len(folders) == 2
+        assert folders[0].endswith("mail/kim/Inbox") and folders[1].endswith("mail/lee/Sent")
+        assert idx.manifest["build_stats"]["duplicates_removed"] == {"email": 1}
+
+    def test_incremental_reuses_vectors(self, case_store, tmpdir):
+        """다시 돌리면 기존 파트 벡터를 재사용하고 새 파트만 임베딩"""
+        from src.embeddings.embedding_service import EmbeddingService
+
+        calls: list[int] = []
+
+        class CountingService(EmbeddingService):
+            def embed_texts(self, texts, cancel_event=None):
+                calls.append(len(texts))
+                return super().embed_texts(texts, cancel_event=cancel_event)
+
+        pl = IndexingPipeline(
+            case_store=case_store, embedding_service_factory=lambda m: CountingService(model=m)
+        )
+        doc_dir = _create_test_files(tmpdir, {"a.txt": "첫 문서 " * 20})
+        meta = case_store.create("증분", doc_paths=[str(doc_dir)])
+        pl.run(meta.case_id)
+        first = sum(calls)
+        assert first > 0
+        (doc_dir / "b.txt").write_text("새 문서 내용 " * 20, encoding="utf-8")
+        calls.clear()
+        progress = pl.run(meta.case_id)
+        assert progress.phase == IndexingPhase.COMPLETED
+        idx = case_index.load(meta.case_id)
+        assert idx.n_units == 2
+        assert sum(calls) == 1  # b.txt 파트만 새로 임베딩
+        assert idx.manifest["build_stats"]["embedding"]["reused"] == first
+
+    def test_failed_parts_excluded_and_saved(self, case_store, tmpdir, _fake_models):
+        """영구 임베딩 실패 파트는 색인(Dense·BM25)에서 빠지고 failed_embeddings에 저장"""
+        from src.embeddings.embedding_service import EmbeddingService
+
+        class FailSome(EmbeddingService):
+            def embed_texts(self, texts, cancel_event=None):
+                out = super().embed_texts(texts, cancel_event=cancel_event)
+                bad = [i for i, t in enumerate(texts) if "실패" in t]
+                for i in bad:
+                    out[i] = []
+                self._last_failed_indices = bad
+                return out
+
+        pl = IndexingPipeline(case_store=case_store, embedding_service_factory=lambda m: FailSome(model=m))
+        doc_dir = _create_test_files(tmpdir, {"ok.txt": "정상 문서 " * 10, "bad.txt": "실패 문서 " * 10})
+        meta = case_store.create("실패", doc_paths=[str(doc_dir)])
+        pl.run(meta.case_id)
+        idx = case_index.load(meta.case_id)
+        assert idx.n_units == 1
+        assert idx.bm25_scores("실패", header=False).sum() == 0
+        assert _fake_models and "실패" in _fake_models[0].text
+
+    def test_cancel_keeps_previous_index(self, pipeline, case_store, tmpdir):
+        """취소된 실행은 색인을 쓰지 않는다"""
+        doc_dir = _create_test_files(tmpdir, {"a.txt": "문서 " * 10})
+        meta = case_store.create("취소", doc_paths=[str(doc_dir)])
+        pipeline.run(meta.case_id)
+        n_before = case_index.load(meta.case_id).n_parts
+        (doc_dir / "b.txt").write_text("새 문서 " * 10, encoding="utf-8")
+        flag = threading.Event()
+        flag.set()
+        progress = pipeline.run(meta.case_id, cancel_flag=flag)
+        assert progress.phase == IndexingPhase.CANCELLED
+        case_index._cache.clear()
+        assert case_index.load(meta.case_id).n_parts == n_before

@@ -8,7 +8,7 @@ def test_default_settings():
     s = Settings(
         _env_file=None,  # .env 파일 무시
     )
-    assert s.ollama_llm_model == "gemma4:e4b"
+    assert s.ollama_llm_model == "gemma4:12b"
     assert s.ollama_embed_model == "qwen3-embedding:4b-q8_0"
     assert s.embed_dim == 2560
     assert s.rerank_backend == "qwen3"

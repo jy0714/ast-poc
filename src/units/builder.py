@@ -134,6 +134,19 @@ class BuildStats:
             self.clean_chars[lang][1] += a
         self.forwarded_tokens.extend(other.forwarded_tokens)
 
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> BuildStats:
+        """to_dict() 결과에서 복원 (프로세스 간 전달용)"""
+        s = cls()
+        s.counts.update(d.get("counts", {}))
+        s.excluded_types.update(d.get("excluded_types", {}))
+        s.errors.update(d.get("errors", {}))
+        for lang, (b, a) in d.get("clean_chars", {}).items():
+            s.clean_chars[lang][0] += b
+            s.clean_chars[lang][1] += a
+        s.forwarded_tokens.extend(d.get("forwarded_tokens", []))
+        return s
+
     def to_dict(self) -> dict[str, Any]:
         """JSON 직렬화용"""
         return {

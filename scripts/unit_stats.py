@@ -31,7 +31,7 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.units.builder import BuildStats, UnitCollector, relative_source_path  # noqa: E402
+from src.units.builder import BuildStats, UnitCollector  # noqa: E402
 from src.units.schema import UNIT_RULES_VERSION, EvidenceUnit, UnitPart  # noqa: E402
 
 # ─────────────────────────── 워커 ───────────────────────────
@@ -105,15 +105,7 @@ def _unit_from_dict(d: dict[str, Any]) -> EvidenceUnit:
 
 
 def _stats_from_dict(d: dict[str, Any]) -> BuildStats:
-    s = BuildStats()
-    s.counts.update(d["counts"])
-    s.excluded_types.update(d["excluded_types"])
-    s.errors.update(d["errors"])
-    for lang, (b, a) in d["clean_chars"].items():
-        s.clean_chars[lang][0] += b
-        s.clean_chars[lang][1] += a
-    s.forwarded_tokens.extend(d["forwarded_tokens"])
-    return s
+    return BuildStats.from_dict(d)
 
 
 # ─────────────────────────── 집계 ───────────────────────────
@@ -137,19 +129,12 @@ def _dist(values: list[int]) -> dict[str, int]:
 
 
 def _collect_source_files(case_id: str) -> list[tuple[str, str]]:
-    """케이스 데이터 소스 → [(절대 경로, 케이스 기준 상대 경로)]"""
+    """케이스 데이터 소스 → [(절대 경로, 케이스 기준 상대 경로)] (인덱싱과 같은 규칙)"""
     from src.cases.case_store import CaseStore
-    from src.indexing.pipeline import IndexingPipeline, collect_case_files
+    from src.indexing.pipeline import case_source_files
 
-    meta = CaseStore().get(case_id)
-    roots = [IndexingPipeline._normalize_path(p) for p in [*meta.pst_paths, *meta.doc_paths]]
-    out: list[tuple[str, str]] = []
-    for f in collect_case_files(meta):
-        resolved = f.resolve()
-        candidates = [r for r in roots if r == f or (r.is_dir() and resolved.is_relative_to(r.resolve()))]
-        root = max(candidates, key=lambda r: len(str(r))) if candidates else f.parent
-        out.append((str(f), relative_source_path(f, root)))
-    return sorted(out, key=lambda x: x[1])
+    files = case_source_files(CaseStore().get(case_id))
+    return sorted(((str(f), rel) for f, rel in files), key=lambda x: x[1])
 
 
 def _write_samples(units: list[EvidenceUnit], paths_by_unit: dict[str, str], out_dir: Path,

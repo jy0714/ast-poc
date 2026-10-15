@@ -217,7 +217,7 @@ class TestPrepareTexts:
 
         # 한자 1자 = 3바이트. 1000자 = 3000바이트지만 byte 한도 1000으로 낮추면 truncate
         monkeypatch.setattr(settings, "embed_max_bytes", 1000)
-        service = EmbeddingService(model="bge-m3")
+        service = EmbeddingService(model="nomic-embed-text")
         text = "漢" * 1000  # 1000자, 3000바이트
         cleaned, skipped, truncated = service._prepare_texts([text])
         assert len(cleaned) == 1
@@ -512,11 +512,12 @@ class TestQwen3Embedding:
         assert captured["options"] == {"num_ctx": settings.embed_num_ctx}
         assert vec == pytest.approx([0.0, 1.0])
 
-    def test_qwen3_limits_wider_than_bge(self):
-        """Qwen3는 2,048토큰 파트가 사전 절단에 걸리지 않게 안전망을 넓게 잡는다"""
-        q3_chars, q3_bytes = EmbeddingService(model="qwen3-embedding:4b-q8_0")._text_limits()
-        bge_chars, _ = EmbeddingService(model="bge-m3")._text_limits()
-        assert q3_chars > bge_chars
+    def test_qwen3_limits_wider_than_v3(self):
+        """Qwen3·bge-m3는 2,048토큰 파트가 사전 절단에 걸리지 않게 num_ctx 기준으로 넓게 잡는다"""
+        q3 = EmbeddingService(model="qwen3-embedding:4b-q8_0")._text_limits()
+        assert EmbeddingService(model="bge-m3:latest")._text_limits() == q3  # R9 공정성
+        v3_chars, _ = EmbeddingService(model="nomic-embed-text")._text_limits()
+        assert q3[0] > v3_chars
         service = EmbeddingService(model="qwen3-embedding:4b-q8_0")
         text = "가" * 6000  # 한국어 약 2,000~6,000토큰 — 기존 2,500자 컷에 걸리던 길이
         cleaned, _, truncated = service._prepare_texts([text])

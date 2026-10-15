@@ -79,6 +79,34 @@ async def set_rerank_mode(request: RerankModeRequest):
     }
 
 
+
+def _cases_needing_reindex(model: str, dim: int | None) -> list[str]:
+    """서비스 프로필 색인이 이 임베딩 모델·차원과 다른 READY/ARCHIVED 케이스 (v4 색인이 없는 케이스 포함)
+
+    Chroma 컬렉션 대신 케이스별 프로필 meta.json으로 판단한다(지시서 §5.7).
+    """
+    from src.cases.case_store import CaseStatus, CaseStore
+    from src.index import case_index
+
+    out: list[str] = []
+    try:
+        cases = CaseStore().list_all()
+    except Exception as e:
+        logger.warning(f"케이스 호환성 확인 실패 (무시): {e}")
+        return out
+    for case in cases:
+        if case.status not in (CaseStatus.READY, CaseStatus.ARCHIVED):
+            continue
+        try:
+            meta = case_index.load(case.case_id).profile_meta(settings.service_index_profile)
+        except Exception:
+            out.append(case.case_id)  # v4 색인 없음·버전 불일치 → 재인덱싱 필요
+            continue
+        if meta.get("embed_model") != model or (dim is not None and meta.get("embed_dim") != dim):
+            out.append(case.case_id)
+    return out
+
+
 @router.put("/embed-model", response_model=EmbedModelResponse)
 async def set_embed_model(request: EmbedModelRequest):
     """임베딩 모델 변경 + 재인덱싱 필요 케이스 경고
@@ -87,7 +115,6 @@ async def set_embed_model(request: EmbedModelRequest):
     호환되지 않으므로 재인덱싱이 필요합니다.
     """
     from src.embeddings.embedding_service import KNOWN_DIMENSIONS, EmbeddingService
-    from src.vectorstore.vector_store import VectorStoreService
 
     old_model = settings.ollama_embed_model
     new_model = request.model.strip()
@@ -106,29 +133,8 @@ async def set_embed_model(request: EmbedModelRequest):
         # Ollama에 없는 모델이면 알려진 차원만 확인
         new_dim = KNOWN_DIMENSIONS.get(new_model)
 
-    # 기존 모델과 차원 비교 → 재인덱싱 필요 케이스 수집
-    reindex_required: list[str] = []
-
-    if new_dim is not None:
-        try:
-            from src.cases.case_store import CaseStatus, CaseStore
-
-            case_store = CaseStore()
-            all_cases = case_store.list_all()
-
-            # 단일 공유 컬렉션이므로 컬렉션 차원만 1회 확인
-            try:
-                vs = VectorStoreService()
-                existing_dim = vs.get_collection_dimension()
-                if existing_dim is not None and existing_dim != new_dim:
-                    # 모든 ready/archived 케이스가 재인덱싱 필요
-                    for case in all_cases:
-                        if case.status in (CaseStatus.READY, CaseStatus.ARCHIVED):
-                            reindex_required.append(case.case_id)
-            except Exception:
-                pass
-        except Exception as e:
-            logger.warning(f"케이스 호환성 확인 실패 (무시): {e}")
+    # 케이스 프로필 색인과 비교 → 재인덱싱 필요 케이스 수집
+    reindex_required = _cases_needing_reindex(new_model, new_dim)
 
     # 설정 변경 적용
     settings.ollama_embed_model = new_model
@@ -139,7 +145,7 @@ async def set_embed_model(request: EmbedModelRequest):
     elif reindex_required:
         message = (
             f"임베딩 모델이 '{old_model}' → '{new_model}'로 변경되었습니다. "
-            f"⚠️ 벡터 차원이 달라 {len(reindex_required)}개 케이스의 재인덱싱이 필요합니다: "
+            f"⚠️ 색인 모델·차원이 달라 {len(reindex_required)}개 케이스의 재인덱싱이 필요합니다: "
             f"{', '.join(reindex_required)}"
         )
     else:
@@ -159,7 +165,6 @@ async def set_embed_model(request: EmbedModelRequest):
 async def get_embed_model():
     """현재 임베딩 모델 정보 + 케이스 호환성 확인"""
     from src.embeddings.embedding_service import KNOWN_DIMENSIONS, EmbeddingService
-    from src.vectorstore.vector_store import VectorStoreService
 
     model = settings.ollama_embed_model
     service = EmbeddingService(model=model)
@@ -169,29 +174,12 @@ async def get_embed_model():
     except ConnectionError:
         dim = KNOWN_DIMENSIONS.get(model)
 
-    # 호환성 확인
-    mismatched: list[str] = []
-    if dim is not None:
-        try:
-            from src.cases.case_store import CaseStatus, CaseStore
-
-            case_store = CaseStore()
-            # 단일 공유 컬렉션 — 한 번만 차원 확인
-            try:
-                vs = VectorStoreService()
-                existing_dim = vs.get_collection_dimension()
-                if existing_dim is not None and existing_dim != dim:
-                    for case in case_store.list_all():
-                        if case.status in (CaseStatus.READY, CaseStatus.ARCHIVED):
-                            mismatched.append(case.case_id)
-            except Exception:
-                pass
-        except Exception:
-            pass
+    # 호환성 확인 (케이스 프로필 색인 기준)
+    mismatched = _cases_needing_reindex(model, dim)
 
     message = f"현재 모델: {model} ({dim}차원)"
     if mismatched:
-        message += f" — ⚠️ {len(mismatched)}개 케이스 차원 불일치, 재인덱싱 필요"
+        message += f" — ⚠️ {len(mismatched)}개 케이스 색인 모델 불일치, 재인덱싱 필요"
 
     return EmbedModelResponse(
         model=model,

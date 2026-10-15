@@ -3,7 +3,6 @@
 import tempfile
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -21,8 +20,13 @@ def tmpdir():
 
 
 @pytest.fixture
-def setup(tmpdir):
-    """테스트용 CaseStore + Pipeline 교체 (SQLite)"""
+def setup(tmpdir, monkeypatch):
+    """테스트용 CaseStore + Pipeline 교체 (SQLite, 가짜 임베더, 임시 색인 폴더)"""
+    from src.utils.config import settings
+
+    monkeypatch.setattr(settings, "ast_fake_models", True)
+    monkeypatch.setattr(settings, "embed_dim", 16)
+    monkeypatch.setattr(settings, "index_dir", str(tmpdir / "index"))
     db_path = tmpdir / "test.db"
     db_url = f"sqlite:///{db_path}"
 
@@ -31,16 +35,7 @@ def setup(tmpdir):
 
     store = CaseStore(db_url=db_url)
 
-    def mock_vs_factory(case_id):
-        vs = MagicMock()
-        # add_chunks(chunks, rebuild_bm25=True) 시그니처 지원
-        vs.add_chunks.side_effect = lambda chunks, rebuild_bm25=True: len(chunks)
-        return vs
-
-    pipeline = IndexingPipeline(
-        case_store=store,
-        vector_store_factory=mock_vs_factory,
-    )
+    pipeline = IndexingPipeline(case_store=store)
 
     # 모듈 전역 교체
     orig_store = indexing_module._case_store

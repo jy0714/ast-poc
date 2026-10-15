@@ -27,8 +27,8 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# 모듈 레벨 캐시 — 모델 중복 로딩 방지
-_reranker_instance: Reranker | None = None
+# 모듈 레벨 캐시 — (백엔드, 모델)마다 1개. R8(qwen3)·R9(bge)를 번갈아 돌려도 다시 적재하지 않는다.
+_instances: dict[tuple[str, str], Reranker] = {}
 _instance_lock = threading.Lock()
 
 # Qwen3-Reranker 템플릿 (HF 모델 카드 형식)
@@ -397,26 +397,26 @@ class Reranker:
 
 
 def get_reranker(backend: str | None = None, model_name: str | None = None) -> Reranker:
-    """싱글톤 Reranker 인스턴스 반환 (백엔드·모델이 바뀌면 새로 만든다)
+    """(백엔드, 모델)별 싱글톤 Reranker 반환
 
     Args:
         backend: "qwen3" | "bge" (None이면 settings 기본값)
         model_name: 모델명 (None이면 백엔드별 settings 기본값)
 
     Returns:
-        Reranker 인스턴스 (캐싱됨)
+        Reranker 인스턴스 (캐싱됨, 모델은 첫 score 때 적재)
     """
-    global _reranker_instance
-
     with _instance_lock:
-        # 백엔드 생성은 설정 저장뿐이라 비용이 없다 (모델은 첫 score 때 적재)
+        # 백엔드 생성은 설정 저장뿐이라 비용이 없다
         candidate = Reranker(backend=backend, model_name=model_name)
-        inst = _reranker_instance
-        if (
-            inst is not None
-            and inst.backend_name == candidate.backend_name
-            and inst.model_name == candidate.model_name
-        ):
-            return inst
-        _reranker_instance = candidate
-        return candidate
+        key = (candidate.backend_name, candidate.model_name)
+        inst = _instances.get(key)
+        if inst is None:
+            _instances[key] = inst = candidate
+        return inst
+
+
+def release_rerankers() -> None:
+    """캐시된 재순위기를 모두 버린다 (VRAM 반환은 GC·torch에 맡김)"""
+    with _instance_lock:
+        _instances.clear()

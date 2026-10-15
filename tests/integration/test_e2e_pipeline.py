@@ -1,16 +1,12 @@
-"""통합 테스트 — 케이스 생성 → 인덱싱 → RAG 질의 전체 파이프라인
+"""통합 테스트 — 케이스 생성 → 인덱싱 → RAG 질의 전체 파이프라인 (v4, 가짜 모델)
 
 FastAPI TestClient를 통해 API 레벨에서 전체 흐름을 검증한다.
-Ollama에 현재 설정된 임베딩 모델이 설치되어 있어야 통과한다.
+AST_FAKE_MODELS=1(해시 임베더·토큰 겹침 재순위기)과 임시 INDEX_DIR로 돌아서 GPU·Ollama가
+필요 없다. LLM은 모킹한다.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
-import time
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -21,34 +17,28 @@ from src.api.routes import cases as cases_mod
 from src.api.routes import chat as chat_mod
 from src.api.routes import indexing as indexing_mod
 from src.cases.case_store import CaseStore
+from src.index import case_index
 from src.indexing.pipeline import IndexingPipeline
-
-
-def _embed_model_available() -> bool:
-    """Ollama 서버 + 현재 임베딩 모델 설치 여부 확인"""
-    try:
-        import urllib.request
-
-        from src.utils.config import settings
-
-        req = urllib.request.Request("http://localhost:11434/api/tags", method="GET")
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            data = json.loads(resp.read())
-            model_names = [m.get("name", "").split(":")[0] for m in data.get("models", [])]
-            return settings.ollama_embed_model in model_names
-    except Exception:
-        return False
-
-
-pytestmark = pytest.mark.skipif(
-    not _embed_model_available(),
-    reason="Ollama 서버가 실행되지 않거나 임베딩 모델이 설치되지 않았습니다",
-)
+from src.rag import retrieval
+from src.rag.reranker import release_rerankers
+from src.rag.retrieval import RetrievalConfig, retrieve
+from src.utils.config import settings
 
 
 @pytest.fixture()
-def env(tmp_path):
-    """통합 테스트 환경: 격리된 CaseStore + IndexingPipeline + TestClient"""
+def env(tmp_path, monkeypatch):
+    """통합 테스트 환경: 가짜 모델 + 격리된 CaseStore·색인 폴더 + IndexingPipeline + TestClient"""
+    monkeypatch.setattr(settings, "ast_fake_models", True)
+    monkeypatch.setattr(settings, "embed_dim", 64)
+    monkeypatch.setattr(settings, "index_dir", str(tmp_path / "index"))
+    monkeypatch.setattr(settings, "ollama_embed_model", "qwen3-embedding:4b-q8_0")
+    monkeypatch.setattr(settings, "service_index_profile", "hdr-qwen3")
+    monkeypatch.setattr(settings, "rerank_enabled", True)
+    monkeypatch.setattr(settings, "rerank_min_score", 0.0)
+    monkeypatch.setattr(retrieval, "_embedders", {})
+    release_rerankers()
+    case_index._cache.clear()
+
     # 격리된 SQLite DB
     db_path = tmp_path / "test.db"
     db_url = f"sqlite:///{db_path}"
@@ -133,6 +123,8 @@ def env(tmp_path):
     indexing_mod._pipeline = orig_idx_pipeline
     chat_mod._case_store = orig_chat_store
     reset_globals()
+    release_rerankers()
+    case_index._cache.clear()
 
 
 # =====================================================================
@@ -225,9 +217,10 @@ class TestFullPipeline:
         assert len(chat_data["answer"]) > 0
         assert len(chat_data["sources"]) > 0
 
-        # 출처에 감사보고서 또는 회의록이 포함되어야 함
+        # 출처에 감사보고서 또는 회의록이 포함되어야 함 + v4 단위 정보
         filenames = [s["filename"] for s in chat_data["sources"]]
         assert any("감사보고서" in f or "회의록" in f or "이메일" in f for f in filenames)
+        assert all(s["unit_id"] for s in chat_data["sources"])
 
     def test_query_not_ready_case(self, env):
         """인덱싱 안 된 케이스에 질의하면 409 에러"""
@@ -279,8 +272,12 @@ class TestFullPipeline:
         )
         case_id = create_resp.json()["case_id"]
 
+        env["pipeline"].run(case_id)
+        assert case_index.exists(case_id)
+
         delete_resp = env["client"].delete(f"/api/admin/cases/{case_id}")
         assert delete_resp.status_code == 200
+        assert not case_index.exists(case_id)
 
         get_resp = env["client"].get(f"/api/admin/cases/{case_id}")
         assert get_resp.status_code == 404
@@ -304,8 +301,8 @@ class TestIndexingPipeline:
         env["pipeline"].run(case_id)
 
         case_data = env["client"].get(f"/api/admin/cases/{case_id}").json()
-        assert case_data["total_documents"] >= 2  # txt 2개 + eml 1개
-        assert case_data["total_chunks"] >= 3
+        assert case_data["total_documents"] == 3  # txt 2개 + eml 1개
+        assert case_data["total_chunks"] >= 3  # 증거 단위 수
 
     def test_eml_indexed(self, env):
         """EML 파일이 인덱싱되는지 확인"""
@@ -316,14 +313,12 @@ class TestIndexingPipeline:
         case_id = create_resp.json()["case_id"]
         env["pipeline"].run(case_id)
 
-        # 벡터 스토어에서 직접 검색
-        from src.vectorstore.vector_store import VectorStoreService
-
-        vs = VectorStoreService(collection_name=f"case_{case_id}")
-        results = vs.search("감사 결과 동보", n_results=10)
-        source_types = [r["metadata"].get("source_type", "") for r in results]
-        # 이메일이 하나 이상 인덱싱됨
-        assert any("email" in st or "document" in st for st in source_types)
+        # EML은 이메일 단위가 되고 헤더에 보낸이·제목이 들어간다
+        idx = case_index.load(case_id)
+        emails = [p for p in idx.parts if p.unit_type == "email"]
+        assert len(emails) == 1
+        assert emails[0].header.startswith("[이메일] 2025-03-17")
+        assert "hong@company.com" in emails[0].header
 
     def test_empty_case_indexing(self, env):
         """데이터 소스 없는 케이스 인덱싱 — 에러 없이 완료"""
@@ -360,23 +355,31 @@ class TestSearchQuality:
         self.env = env
 
     def test_keyword_search(self):
-        """키워드 기반 검색 — '비용 승인'으로 감사보고서가 검색됨"""
-        from src.vectorstore.vector_store import VectorStoreService
-
-        vs = VectorStoreService(collection_name=f"case_{self.case_id}")
-        results = vs.search("비용 승인 프로세스", n_results=5)
-        assert len(results) > 0
-        # 비용 관련 내용이 포함된 결과가 있어야 함
-        contents = " ".join(r["content"] for r in results)
-        assert "비용" in contents
+        """BM25 단독 — '비용 승인'으로 감사보고서가 1위"""
+        res = retrieve(self.case_id, "비용 승인 프로세스", RetrievalConfig(use_dense=False, rerank=False))
+        assert res.hits
+        idx = case_index.load(self.case_id)
+        assert "비용" in idx.unit_text(res.hits[0].unit_id)
 
     def test_participant_search(self):
-        """참여자 관련 검색"""
-        from src.vectorstore.vector_store import VectorStoreService
+        """참여자 이름 검색 + 참여자 필터"""
+        res = retrieve(self.case_id, "홍길동", RetrievalConfig(rerank=False))
+        assert len(res.hits) > 0
+        filtered = retrieve(self.case_id, "감사", RetrievalConfig(rerank=False),
+                            filters={"source_type": "email"})
+        assert [h.unit_id[:3] for h in filtered.hits] == ["em:"]
 
-        vs = VectorStoreService(collection_name=f"case_{self.case_id}")
-        results = vs.search("홍길동", n_results=5)
-        assert len(results) > 0
+    def test_full_retrieval_ladder(self):
+        """R2·R4·R6·R8 설정이 모두 동작하고 hits가 depth 이하"""
+        for cfg in (
+            RetrievalConfig(use_dense=False, rerank=False),
+            RetrievalConfig(use_bm25=False, rerank=False),
+            RetrievalConfig(rerank=False),
+            RetrievalConfig(),
+        ):
+            res = retrieve(self.case_id, "거래처 A사 수의계약", cfg)
+            assert 0 < len(res.hits) <= cfg.depth
+            assert [h.rank for h in res.hits] == list(range(1, len(res.hits) + 1))
 
     def test_query_parser_filter(self):
         """질의 파서가 필터를 추출하는지 확인"""

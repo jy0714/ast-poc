@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     # === Ollama ===
     ollama_base_url: str = "http://localhost:11434"
-    ollama_llm_model: str = "gemma4:e4b"
+    ollama_llm_model: str = "gemma4:12b"  # v4 (지시서 §5.9). 개발 PC .env는 gemma4:e4b
     ollama_embed_model: str = "qwen3-embedding:4b-q8_0"
 
     # === External LLM ===
@@ -62,6 +62,12 @@ class Settings(BaseSettings):
 
     # === BM25 ===
     bm25_index_dir: str = "./data/bm25_index"
+
+    # === v4 케이스 색인 (src/index) ===
+    # 케이스별 폴더 색인 (units.jsonl + BM25 + 프로필별 dense.npy). 기존 vectordb/bm25_index는 건드리지 않는다.
+    index_dir: str = "./data/index"
+    # 서비스 인덱싱이 만드는 프로필 (실험 프로필은 scripts/build_profiles.py로 추가)
+    service_index_profile: str = "hdr-qwen3"
 
     # === Embedding ===
     embed_batch_size: int = 256  # VRAM에 따라 조정 (3060 12GB: 256, A5000 24GB: 512+)
@@ -131,6 +137,11 @@ class Settings(BaseSettings):
     indexing_stuck_timeout_min: int = 30
 
     # === Search ===
+    # v4 retrieve(): 검색기별 상위 단위 수 (RRF 입력). 지시서 §5.6 고정값.
+    search_k_bm25: int = 50
+    search_k_dense: int = 50
+    # 아래 search_top_k·rrf_min_score·rrf_*_weight·rerank_top_k_candidates는 v3 Chroma 경로 전용.
+    # v4 경로는 쓰지 않으며 체크포인트 3에서 삭제한다.
     search_top_k: int = 20  # 하이브리드 검색 초기 후보 수
     rrf_k: int = 60  # Reciprocal Rank Fusion 파라미터
     rrf_min_score: float = 0.0141  # RRF 최소 스코어 임계값 (한쪽만 10위 이하 필터링)
@@ -154,7 +165,8 @@ class Settings(BaseSettings):
     rerank_top_n: int = 5  # reranker가 최종 선별할 결과 수
     # reranker top_n 선별 후 이 점수 이하 결과는 제거 (관련 없는 결과가 LLM에
     # 들어가 억지 답변을 만드는 것 방지). normalize=True 기준 0~1 점수.
-    rerank_min_score: float = 0.1
+    # v4: Qwen3 P(yes) 척도에서 다시 정하기 전까지 끈다 (지시서 §5.7)
+    rerank_min_score: float = 0.0
     # v4 (지시서 §5.4): 백엔드 qwen3(서비스 기본) | bge(R9 비교 실험 전용)
     rerank_backend: str = "qwen3"
     # 템플릿·질의·문서를 합친 토큰 상한. qwen3·bge 두 백엔드에 같은 값을 쓴다(R9 공정성).

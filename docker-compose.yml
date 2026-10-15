@@ -57,6 +57,10 @@ services:
       - "11434:11434"
     volumes:
       - ollama-models:/root/.ollama
+    environment:
+      # v4: 모델을 내리지 않고(실험·서비스 응답 시간), 임베딩 + LLM 동시 적재
+      - OLLAMA_KEEP_ALIVE=-1
+      - OLLAMA_MAX_LOADED_MODELS=2
     deploy:
       resources:
         reservations:

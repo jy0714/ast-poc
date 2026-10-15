@@ -164,6 +164,24 @@ class TestDeleteAPI:
         resp = client.get(f"/api/admin/cases/{case_id}")
         assert resp.status_code == 404
 
+    def test_delete_removes_case_index(self, client: TestClient, tmp_path, monkeypatch):
+        """DELETE — 케이스 색인 폴더(data/index/{case_id})도 삭제"""
+        import numpy as np
+
+        from src.index import case_index
+        from src.index.case_index import ProfileVectors
+        from src.units.schema import UnitPart
+        from src.utils.config import settings
+
+        monkeypatch.setattr(settings, "index_dir", str(tmp_path / "index"))
+        case_id = client.post("/api/admin/cases/", json={"name": "색인 삭제"}).json()["case_id"]
+        part = UnitPart("doc:a:p1#1", "doc:a:p1", "document", "[문서]", "본문", 1, {})
+        case_index.write_index(case_id, [part], {"hdr-qwen3": ProfileVectors(np.zeros((1, 4)), "m")})
+        assert case_index.exists(case_id)
+
+        assert client.delete(f"/api/admin/cases/{case_id}").status_code == 200
+        assert not case_index.exists(case_id)
+
     def test_delete_not_found(self, client: TestClient):
         """DELETE /{case_id} — 404"""
         resp = client.delete("/api/admin/cases/nonexistent")

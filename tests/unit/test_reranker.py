@@ -44,9 +44,9 @@ def _with_scores(scores: list[float]) -> Reranker:
 def _reset_singleton(monkeypatch):
     """테스트마다 싱글톤 초기화, 실제 모델 경로 사용 (가짜 모델 끔)"""
     monkeypatch.setattr(settings, "ast_fake_models", False)
-    reranker_module._reranker_instance = None
+    reranker_module.release_rerankers()
     yield
-    reranker_module._reranker_instance = None
+    reranker_module.release_rerankers()
 
 
 class TestBackendSelection:
@@ -200,8 +200,9 @@ class TestGetReranker:
         assert r2.model_name == "other/model"
 
     def test_different_backend_new_instance(self):
-        """백엔드가 바뀌면 새 인스턴스"""
+        """백엔드가 바뀌면 새 인스턴스, 이전 백엔드 인스턴스는 유지 (재적재 없음)"""
         r1 = get_reranker(backend="bge")
         r2 = get_reranker(backend="qwen3")
         assert r1 is not r2
         assert r2.backend_name == "qwen3"
+        assert get_reranker(backend="bge") is r1

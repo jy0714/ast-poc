@@ -1,25 +1,29 @@
-"""인덱싱 파이프라인 오케스트레이터
+"""인덱싱 파이프라인 오케스트레이터 (v4)
 
-케이스 단위로 PST/문서 파일을 파싱 → 청킹 → 메타데이터 → 임베딩 → 저장하는
-전체 Phase A 파이프라인을 관리.
+케이스 단위로 PST/문서 파일을 파싱 → 증거 단위 생성 → 임베딩 → 케이스 색인 저장까지
+전체 Phase A 파이프라인을 관리한다 (지시서 §5.8).
 
-3-stage Producer-Consumer 스트리밍 (`_run_streaming_pipeline`):
-    파싱: 파일 크기 1MB 기준 듀얼 풀 분기
+스트리밍 구조 (`_run_pipeline`):
+    파싱+단위 생성: 파일 크기 1MB 기준 듀얼 풀 분기
         - >= 1MB → ProcessPool (GIL 우회, PyMuPDF/libpff 진짜 병렬)
         - <  1MB → ThreadPool (프로세스 부팅 비용 회피)
-    [Process+Thread 파싱] → chunk_queue(20) → [임베딩 워커 1개] → store_queue(10) → [저장 워커 1개]
+    [Process+Thread: 파일 → 단위] → (메인: unit_id 중복 제거) → part_queue(20) → [임베딩 워커 1개]
+    → 종료 후 케이스 색인 1회 저장(units.jsonl + BM25 + 서비스 프로필 dense.npy, 폴더 원자 교체)
 
-각 단계가 독립 스레드로 분리되어 GPU/CPU/디스크가 동시에 일하며,
-임베딩/저장 진행도를 별도 카운터로 추적 (embedded_chunks vs stored_chunks).
-Bounded submission으로 in-flight future 수를 제한해 ProcessPool 메모리 폭주 방지.
-
-파일 수가 적을 때(`num_workers * 2` 이하)는 `_sequential_pipeline` fallback.
+- 같은 메일이 여러 PST에 있으면 같은 unit_id → 처음 것만 남기고 folder_paths 병합(UnitCollector).
+- 증분 색인: 기존 색인에 같은 part_id·같은 임베딩 입력이 있으면 벡터를 재사용하고 새 파트만
+  임베딩한다. 데이터 소스를 추가해 다시 돌려도 바뀐 부분만 GPU를 쓴다.
+- 영구 임베딩 실패 파트는 data/failed_embeddings/{case_id}.jsonl에 보존하고 색인(Dense·BM25 모두)
+  에서 뺀다 — 두 검색기의 대상 파트가 같게 유지된다.
+- 진행률 필드 이름(parsed_chunks 등)은 프론트엔드 호환을 위해 유지하고 값은 파트 수다.
+  `IndexingPhase.CHUNKING`은 "단위 생성" 의미로 쓴다.
 
 진행률은 IndexingProgress 객체로 실시간 추적 가능.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import threading
@@ -39,17 +43,14 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import numpy as np
 
 from src.cases.case_store import CaseMetadata, CaseStatus, CaseStore
-from src.chunkers.chunker import (
-    AttachmentChunker,
-    ChatChunker,
-    Chunk,
-    DocumentChunker,
-    EmailChunker,
-)
-from src.chunkers.metadata_enricher import enrich_chunks
+from src.index import case_index
+from src.index.case_index import ProfileVectors, embed_input, input_hash, profile_spec
 from src.parsers.document_parser import DocumentParser
+from src.units.builder import BuildStats, UnitBuilder, UnitCollector, relative_source_path
+from src.units.schema import EvidenceUnit, UnitPart
 from src.utils.config import settings
 from src.utils.logger import get_logger
 
@@ -66,6 +67,8 @@ def _unload_llm_for_phase_a() -> None:
     Ollama에 keep_alive=0으로 generate 호출을 보내면 모델이 즉시 unload됨.
     LLM이 이미 언로드 상태면 빠르게 no-op 반환. 실패해도 인덱싱은 계속 진행.
     """
+    if settings.ast_fake_models:
+        return
     llm_model = settings.ollama_llm_model
     url = f"{settings.ollama_base_url}/api/generate"
     try:
@@ -81,8 +84,6 @@ def _unload_llm_for_phase_a() -> None:
 
 
 # 파싱 풀 분기 임계값 — 1MB 이상이면 ProcessPool, 미만이면 ThreadPool로 라우팅.
-# 큰 파일은 PyMuPDF/libpff C-extension이 GIL을 풀더라도 파이썬 측 청킹/메타데이터
-# 보강이 누적되어 결국 GIL 직렬화. ProcessPool로 진짜 병렬화.
 _PARSE_PROCESS_THRESHOLD_BYTES = 1024 * 1024  # 1MB
 
 
@@ -96,131 +97,101 @@ def _get_parsing_worker_count() -> int:
     return max(1, min(base, _WINDOWS_MAX_WORKERS))
 
 
-# ThreadPool 워커가 사용할 thread-local DocumentParser — 스레드당 1회 생성
+# 파일 1개 처리 결과: (단위 목록, BuildStats.to_dict(), 에러 메시지 | None)
+FileResult = tuple[list[EvidenceUnit], dict[str, Any], str | None]
+
+# ThreadPool 워커가 사용할 thread-local UnitBuilder — 스레드·케이스당 1회 생성
 _thread_local = threading.local()
 
 
-def _get_thread_doc_parser() -> DocumentParser:
-    """현재 스레드 전용 DocumentParser — 스레드당 1회 lazy 생성"""
-    parser = getattr(_thread_local, "doc_parser", None)
-    if parser is None:
-        parser = DocumentParser()
-        _thread_local.doc_parser = parser
-    return parser
+def _thread_builder(case_id: str) -> UnitBuilder:
+    """현재 스레드 전용 UnitBuilder (DocumentParser 포함)"""
+    builders: dict[str, UnitBuilder] | None = getattr(_thread_local, "builders", None)
+    if builders is None:
+        builders = _thread_local.builders = {}
+    if case_id not in builders:
+        builders[case_id] = UnitBuilder(case_id, doc_parser=DocumentParser(detect_language=False))
+    return builders[case_id]
 
 
-def _process_file_thread(file_path: Path, case_id: str) -> tuple[list[Chunk], str | None]:
-    """ThreadPool 워커 (작은 파일): 파싱 → 청킹 → 메타데이터 보강
-
-    같은 프로세스 내 스레드이므로 Chunk를 dict로 직렬화할 필요 없이 그대로 반환.
-    DocumentParser는 thread-local로 스레드당 1회 생성하여 재사용.
-
-    Returns:
-        (chunks, error_msg) — 성공 시 (chunks, None), 실패 시 ([], "에러 메시지")
-    """
+def _build_file(builder: UnitBuilder, file_path: Path, rel_path: str) -> FileResult:
+    """파일 1개 → 증거 단위 (파일별 통계 포함)"""
+    builder.stats = BuildStats()
     try:
-        suffix = file_path.suffix.lower()
-        doc_parser = _get_thread_doc_parser()
-
-        if suffix in (".pst", ".ost"):
-            chunks = _process_pst_standalone(file_path, case_id, doc_parser)
-        else:
-            chunks = _process_document_standalone(file_path, case_id, doc_parser)
-
-        if chunks:
-            enrich_chunks(chunks, case_id=case_id)
-        return chunks, None
+        units = builder.build_file(file_path, rel_path)
+        return units, builder.stats.to_dict(), None
     except Exception as e:
-        return [], f"파일 처리 실패 ({file_path.name}): {e}"
+        return [], builder.stats.to_dict(), f"파일 처리 실패 ({file_path.name}): {e}"
+
+
+def _process_file_thread(file_path: Path, rel_path: str, case_id: str) -> FileResult:
+    """ThreadPool 워커 (작은 파일): 파싱 → 단위 생성"""
+    return _build_file(_thread_builder(case_id), file_path, rel_path)
 
 
 # ProcessPool 워커 프로세스의 모듈 전역 — initializer로 1회 생성, 모든 task에서 재사용
-_subprocess_doc_parser: DocumentParser | None = None
+_subprocess_builders: dict[str, UnitBuilder] = {}
 
 
 def _subprocess_init() -> None:
-    """ProcessPoolExecutor 워커 초기화 — DocumentParser 1회 생성
-
-    파일마다 DocumentParser()를 새로 만들면 PyMuPDF/python-docx/Tesseract
-    초기화 비용이 누적됨. 워커 프로세스당 1회만 만들어 재사용.
-    """
-    global _subprocess_doc_parser
-    _subprocess_doc_parser = DocumentParser()
+    """ProcessPoolExecutor 워커 초기화 (빌더는 케이스별로 첫 task에서 생성)"""
+    _subprocess_builders.clear()
 
 
-def _process_file_subprocess(args: tuple[str, str]) -> tuple[list[Chunk], str | None]:
-    """ProcessPool 워커 (큰 파일): 파싱 → 청킹 → 메타데이터 보강
-
-    별도 프로세스에서 실행되므로 결과(Chunk dataclass)는 자동으로 pickle되어 부모로 전송됨.
+def _process_file_subprocess(args: tuple[str, str, str]) -> FileResult:
+    """ProcessPool 워커 (큰 파일): 파싱 → 단위 생성. 결과는 pickle되어 부모로 전송된다.
 
     Args:
-        args: (file_path_str, case_id) — Path는 pickle 가능하지만 args 직렬화 일관성 위해 str
-
-    Returns:
-        (chunks, error_msg) — 성공 시 (chunks, None), 실패 시 ([], "에러 메시지")
+        args: (file_path_str, rel_path, case_id)
     """
-    file_path_str, case_id = args
-    file_path = Path(file_path_str)
+    file_path_str, rel_path, case_id = args
+    builder = _subprocess_builders.get(case_id)
+    if builder is None:
+        builder = _subprocess_builders[case_id] = UnitBuilder(
+            case_id, doc_parser=DocumentParser(detect_language=False)
+        )
+    return _build_file(builder, Path(file_path_str), rel_path)
+
+
+def case_source_files(case_meta: CaseMetadata) -> list[tuple[Path, str]]:
+    """케이스 데이터 소스 → [(파일 경로, 케이스 기준 상대 경로)]
+
+    상대 경로는 그 파일을 포함하는 가장 구체적인 데이터 소스 루트 기준이다. 문서 단위 ID가
+    이 경로에서 나오므로(지시서 §5.1.2) 인덱싱과 scripts/unit_stats.py가 같은 함수를 쓴다.
+    """
+    roots = [IndexingPipeline._normalize_path(p) for p in [*case_meta.pst_paths, *case_meta.doc_paths]]
+    out: list[tuple[Path, str]] = []
+    for f in collect_case_files(case_meta):
+        resolved = f.resolve()
+        candidates = [r for r in roots if r == f or (r.is_dir() and resolved.is_relative_to(r.resolve()))]
+        root = max(candidates, key=lambda r: len(str(r))) if candidates else f.parent
+        out.append((f, relative_source_path(f, root)))
+    return out
+
+
+def _file_fingerprint(path: Path, rel: str) -> dict[str, Any]:
+    """manifest source_files 항목 (내용 해시 대신 크기·수정 시각 — 1TB 재해시 비용 회피)"""
     try:
-        suffix = file_path.suffix.lower()
-        global _subprocess_doc_parser
-        if _subprocess_doc_parser is None:
-            # initializer 실패/미실행 시 fallback
-            _subprocess_doc_parser = DocumentParser()
-        doc_parser = _subprocess_doc_parser
-
-        if suffix in (".pst", ".ost"):
-            chunks = _process_pst_standalone(file_path, case_id, doc_parser)
-        else:
-            chunks = _process_document_standalone(file_path, case_id, doc_parser)
-
-        if chunks:
-            enrich_chunks(chunks, case_id=case_id)
-        return chunks, None
-    except Exception as e:
-        return [], f"파일 처리 실패 ({file_path.name}): {e}"
+        st = path.stat()
+        return {"path": rel, "size": st.st_size, "mtime": int(st.st_mtime)}
+    except OSError:
+        return {"path": rel, "size": -1, "mtime": 0}
 
 
-def _process_pst_standalone(
-    pst_path: Path, case_id: str, doc_parser: DocumentParser
-) -> list[Chunk]:
-    """독립 프로세스용 PST 처리"""
-    from src.parsers.pst_parser import PSTParser
+def _save_failed_parts(
+    case_id: str, parts: list[UnitPart], diagnostics: list[dict[str, Any]] | None = None
+) -> None:
+    """영구 임베딩 실패 파트를 data/failed_embeddings/{case_id}.jsonl에 보존 (재처리용)"""
+    out_dir = settings.get_data_path("data/failed_embeddings")
+    with (out_dir / f"{case_id}.jsonl").open("a", encoding="utf-8") as f:
+        for i, p in enumerate(parts):
+            rec = {
+                "failed_at": datetime.now().isoformat(timespec="seconds"),
+                "part": p.to_dict(),
+                "diagnostics": (diagnostics[i] if diagnostics and i < len(diagnostics) else {}),
+            }
+            f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
 
-    parser = PSTParser(pst_path)
-    result = parser.parse()
-
-    all_chunks: list[Chunk] = []
-    pst_meta = {"pst_file": pst_path.name}
-
-    if result.emails:
-        email_chunker = EmailChunker()
-        all_chunks.extend(email_chunker.chunk(result.emails, metadata=pst_meta))
-
-    if result.chats:
-        chat_chunker = ChatChunker()
-        all_chunks.extend(chat_chunker.chunk_chat_messages(result.chats, extra_metadata=pst_meta))
-
-    if result.attachments:
-        att_chunker = AttachmentChunker()
-        all_chunks.extend(att_chunker.chunk(result.attachments, source_metadata=pst_meta))
-
-    return all_chunks
-
-
-def _process_document_standalone(
-    doc_path: Path, case_id: str, doc_parser: DocumentParser
-) -> list[Chunk]:
-    """독립 프로세스용 문서 처리"""
-    parsed = doc_parser.parse(doc_path)
-    docs = parsed if isinstance(parsed, list) else [parsed]
-
-    doc_chunker = DocumentChunker()
-    all_chunks: list[Chunk] = []
-    for doc in docs:
-        all_chunks.extend(doc_chunker.chunk_parsed_document(doc))
-
-    return all_chunks
 
 # 문서 파서가 지원하는 확장자
 _DOCUMENT_EXTENSIONS = DocumentParser.SUPPORTED_TYPES
@@ -447,21 +418,16 @@ class IndexingPipeline:
     def __init__(
         self,
         case_store: CaseStore | None = None,
-        vector_store_factory: Any = None,
+        embedding_service_factory: Any = None,
     ) -> None:
         """IndexingPipeline 초기화
 
         Args:
             case_store: 케이스 저장소 (기본: 새 CaseStore 생성)
-            vector_store_factory: VectorStoreService 생성 팩토리 (테스트용 주입)
+            embedding_service_factory: model → EmbeddingService 팩토리 (테스트용 주입)
         """
         self.case_store = case_store or CaseStore()
-        self._vector_store_factory = vector_store_factory
-        self._doc_parser = DocumentParser()
-        self._doc_chunker = DocumentChunker()
-        self._chat_chunker = ChatChunker()
-        self._email_chunker = EmailChunker()
-        self._attachment_chunker = AttachmentChunker()
+        self._embedding_service_factory = embedding_service_factory
 
         # 진행률 추적 (case_id → IndexingProgress)
         self._progress: dict[str, IndexingProgress] = {}
@@ -470,14 +436,13 @@ class IndexingPipeline:
         # 취소 플래그 (case_id → Event)
         self._cancel_flags: dict[str, threading.Event] = {}
 
-    def _create_vector_store(self, case_id: str) -> Any:
-        """케이스별 VectorStoreService 생성 (단일 공유 컬렉션 + case_id 필터)"""
-        if self._vector_store_factory:
-            return self._vector_store_factory(case_id)
+    def _create_embedding_service(self, model: str) -> Any:
+        """서비스 프로필 임베딩 모델의 EmbeddingService"""
+        if self._embedding_service_factory:
+            return self._embedding_service_factory(model)
+        from src.embeddings.embedding_service import EmbeddingService
 
-        from src.vectorstore.vector_store import VectorStoreService
-
-        return VectorStoreService(case_id=case_id)
+        return EmbeddingService(model=model)
 
     def get_progress(self, case_id: str) -> IndexingProgress:
         """케이스 인덱싱 진행률 조회"""
@@ -506,11 +471,7 @@ class IndexingPipeline:
     def cancel_and_wait(self, case_id: str, timeout: float | None = None) -> bool:
         """인덱싱 중단 + 워커 스레드 종료 대기
 
-        삭제·재시작 등 즉시 후속 동작이 필요한 호출자가 사용. cancel()과 달리
-        워커 스레드가 cancel_flag를 인지하고 정리(파일 핸들 close, vectorstore
-        flush 등)할 때까지 join으로 기다림. timeout 안에 종료되지 않아도 워커는
-        백그라운드에서 cancel_flag를 계속 체크하므로 곧 멈추지만, 정합성을 위해
-        호출자는 timeout 후 별도 정리 작업이 필요할 수 있음.
+        삭제·재시작 등 즉시 후속 동작이 필요한 호출자가 사용. 취소된 실행은 색인을 쓰지 않는다.
 
         Args:
             case_id: 케이스 ID
@@ -587,16 +548,13 @@ class IndexingPipeline:
         case_id: str,
         cancel_flag: threading.Event | None = None,
     ) -> IndexingProgress:
-        """동기 인덱싱 실행 (CPU/GPU 동시 스트리밍 파이프라인)
+        """동기 인덱싱 실행 (파싱·단위 생성과 임베딩을 동시에 돌리는 스트리밍 파이프라인)
 
-        CPU와 GPU를 동시에 활용하는 Producer-Consumer 구조:
-            [CPU 워커들: 파싱+청킹] ──큐──→ [GPU 스레드: 임베딩+저장]
-
-        파일 수가 적을 때는 오버헤드 없이 순차 처리로 fallback.
+        완료 시 케이스 통계: total_documents = 처리한 파일 수, total_chunks = 증거 단위 수.
 
         Args:
             case_id: 인덱싱할 케이스 ID
-            cancel_flag: 취소 플래그 (set되면 중단)
+            cancel_flag: 취소 플래그 (set되면 중단, 색인은 쓰지 않음)
 
         Returns:
             최종 IndexingProgress
@@ -620,32 +578,13 @@ class IndexingPipeline:
 
             # 1. 파일 수집
             progress.set_phase(IndexingPhase.SCANNING)
-            files = self._collect_files(case_meta)
+            files = case_source_files(case_meta)
             progress.total_files = len(files)
             logger.info(f"파일 수집 완료: {len(files)}개 ({case_id})")
 
-            if not files:
-                progress.set_phase(IndexingPhase.COMPLETED)
-                progress.completed_at = datetime.now()
-                self.case_store.update_status(case_id, CaseStatus.READY)
-                self.case_store.update_stats(case_id, total_documents=0, total_chunks=0)
-                return progress
-
-            # 2~5. 스트리밍 파이프라인 (3-stage: 파싱 / 임베딩 / 저장 분리)
-            num_workers = _get_parsing_worker_count()
-            use_streaming = len(files) > num_workers * 2 and num_workers > 1
-
-            if use_streaming:
-                progress.set_phase(IndexingPhase.PARSING)
-                stored_count = self._run_streaming_pipeline(
-                    files, case_id, progress, cancel_flag,
-                )
-            else:
-                # 파일 수가 적으면 순차 처리 (배치 즉시 저장)
-                progress.set_phase(IndexingPhase.PARSING)
-                stored_count = self._sequential_pipeline(
-                    files, case_id, progress, cancel_flag,
-                )
+            # 2~4. 파싱·단위 생성 → 임베딩 → 케이스 색인 저장 (파일이 없어도 빈 색인을 쓴다)
+            progress.set_phase(IndexingPhase.PARSING)
+            n_units, n_parts = self._run_pipeline(files, case_id, progress, cancel_flag)
 
             if cancel_flag and cancel_flag.is_set():
                 progress.set_phase(IndexingPhase.CANCELLED)
@@ -655,8 +594,8 @@ class IndexingPipeline:
                 logger.info(f"인덱싱 취소됨: {case_id}")
                 return progress
 
-            progress.total_chunks = stored_count
-            progress.stored_chunks = stored_count
+            progress.total_chunks = n_parts
+            progress.stored_chunks = n_parts
             progress.set_phase(IndexingPhase.COMPLETED)
             progress.completed_at = datetime.now()
 
@@ -664,30 +603,14 @@ class IndexingPipeline:
             self.case_store.update_stats(
                 case_id,
                 total_documents=progress.processed_files,
-                total_chunks=stored_count,
+                total_chunks=n_units,
             )
             self.case_store.update_status(case_id, CaseStatus.READY)
 
-            summary = (
-                f"인덱싱 완료: {case_id} — "
-                f"파일 {progress.processed_files}개, 청크 {stored_count}개, "
-                f"에러 {len(progress.errors)}개"
+            logger.info(
+                f"인덱싱 완료: {case_id} — 파일 {progress.processed_files}개, "
+                f"단위 {n_units}개, 파트 {n_parts}개, 에러 {len(progress.errors)}개"
             )
-            if progress.encrypted_pdfs:
-                summary += (
-                    f", 암호화 PDF {len(progress.encrypted_pdfs)}개 "
-                    f"({', '.join(progress.encrypted_pdfs[:3])}"
-                    f"{'...' if len(progress.encrypted_pdfs) > 3 else ''})"
-                )
-            if progress.scan_pdfs_no_ocr:
-                summary += (
-                    f", 스캔 PDF(OCR 미적용) {len(progress.scan_pdfs_no_ocr)}개 "
-                    f"({', '.join(progress.scan_pdfs_no_ocr[:3])}"
-                    f"{'...' if len(progress.scan_pdfs_no_ocr) > 3 else ''})"
-                )
-            logger.info(summary)
-
-            # 인덱싱 이력 저장
             _save_indexing_log(progress, "completed")
             return progress
 
@@ -706,680 +629,279 @@ class IndexingPipeline:
             return progress
 
     # ------------------------------------------------------------------
-    # 3-stage 스트리밍 파이프라인:
-    #   ThreadPool 파싱 → chunk_queue(20) → 임베딩 워커 → store_queue(10) → 저장 워커
-    #   CPU(스레드)        버퍼               GPU(단일)          버퍼            디스크 I/O(단일)
+    # 스트리밍 파이프라인:
+    #   파싱·단위 생성(Process/Thread) → 메인(중복 제거) → part_queue(20) → 임베딩 워커
+    #   → 끝나면 케이스 색인 1회 저장
     # ------------------------------------------------------------------
 
-    def _run_streaming_pipeline(
+    def _run_pipeline(
         self,
-        files: list[Path],
+        files: list[tuple[Path, str]],
         case_id: str,
         progress: IndexingProgress,
         cancel_flag: threading.Event | None = None,
-    ) -> int:
-        """3-stage Producer-Consumer 스트리밍 파이프라인 (파싱 / 임베딩 / 저장 분리)
+    ) -> tuple[int, int]:
+        """파일 → 단위 → 임베딩 → 케이스 색인
 
-        파싱은 파일 크기로 듀얼 풀 분기:
-            - >= 1MB: ProcessPoolExecutor (PyMuPDF/libpff 진짜 병렬, GIL 우회)
-            - <  1MB: ThreadPoolExecutor (프로세스 부팅 비용 회피)
-        Bounded submission으로 in-flight future를 max_pending개로 제한 →
-        ProcessPool 결과 큐에 거대 청크가 무한 누적되는 메모리 폭주 방지.
-
-        구조:
-            [ProcessPool: 큰 파일] ┐
-                                   ├─→ chunk_queue(20) → [임베딩 1개] → store_queue(10) → [저장 1개]
-            [ThreadPool: 작은 파일] ┘     CPU 버퍼          GPU 단일                       디스크 I/O 단일
+        Args:
+            files: [(파일 경로, 케이스 기준 상대 경로)]
 
         Returns:
-            저장된 총 청크 수 (ChromaDB upsert 성공 기준)
+            (색인에 들어간 단위 수, 파트 수). 취소되면 (0, 0)이고 색인은 그대로 둔다.
         """
         num_workers = _get_parsing_worker_count()
         embed_batch_size = settings.embed_batch_size
         embed_concurrent = max(1, settings.embed_max_concurrent)
-        # super-batch: embed_batch_size × embed_max_concurrent 개를 모아서 한 번에
-        # embed_texts_async 호출 → 내부에서 batch_size 단위로 분할 + Semaphore로
-        # embed_concurrent개 동시 전송. Ollama OLLAMA_NUM_PARALLEL≥2 일 때 GPU 활용도 상승.
         super_batch_size = embed_batch_size * embed_concurrent
         _SENTINEL = None
 
-        chunk_queue: queue.Queue[list[Chunk] | None] = queue.Queue(maxsize=20)
-        store_queue: queue.Queue[
-            tuple[list[Chunk], list[list[float]]] | None
-        ] = queue.Queue(maxsize=10)
+        spec = profile_spec(settings.service_index_profile)
+        embedder = self._create_embedding_service(spec.embed_model)
+        # 증분: 같은 part_id·같은 입력의 기존 벡터 재사용
+        reuse = case_index.reusable_vectors(case_id, spec.name)
+        if reuse:
+            logger.info(f"기존 색인 벡터 {len(reuse):,}개 재사용 가능 ({spec.name})")
 
-        # vector_store는 임베딩/저장 워커가 공유 (ChromaDB 클라이언트는 thread-safe)
-        vector_store = self._create_vector_store(case_id)
-        embedding_service = vector_store._embedding_service
-
-        # thread-safe 카운터/누적 컨테이너 보호
+        part_queue: queue.Queue[list[UnitPart] | None] = queue.Queue(maxsize=20)
+        collector = UnitCollector()
+        build_stats = BuildStats()
+        vectors: dict[str, np.ndarray] = {}
         counter_lock = threading.Lock()
-
-        # 결과 누적 (counter_lock으로 보호)
-        state: dict[str, Any] = {
-            "embedded": 0,
-            "stored": 0,
-            "embed_errors": [],
-            "store_errors": [],
-            "bm25_corpus": [],
-            "bm25_ids": [],
-            "bm25_metadatas": [],
-        }
-        # 워커별 wall-clock 측정 (3-stage가 동시 실행되므로 phase_times로는 부정확)
-        wall_times: dict[str, float] = {"parse": 0.0, "embed": 0.0, "store": 0.0}
-        wall_times_lock = threading.Lock()
-
-        def _save_failed_or_log(chunks: list[Chunk], stage: str, exc: Exception) -> str:
-            """배치 전체 실패 시 retry 큐로 보존하고 적절한 에러 메시지 생성"""
-            try:
-                vector_store._save_failed_chunks(chunks)
-                msg = f"{stage} 실패 ({len(chunks)}개 → retry 큐 저장): {exc}"
-                logger.warning(msg)
-            except Exception as save_e:
-                msg = (
-                    f"{stage} 실패 + retry 저장 실패 (DATA LOSS {len(chunks)}개): "
-                    f"{exc} / {save_e}"
-                )
-                logger.error(msg, exc_info=True)
-            return msg
+        state: dict[str, Any] = {"embedded": 0, "reused": 0, "failed": 0, "embed_errors": []}
+        wall_times: dict[str, float] = {"parse": 0.0, "embed": 0.0}
 
         def embedding_worker() -> None:
-            """chunk_queue → super-batch 수집 → embed_texts_async (동시 전송) → store_queue"""
-            buffer: list[Chunk] = []
+            """part_queue → super-batch → (재사용 또는) 임베딩 → vectors"""
+            buffer: list[UnitPart] = []
+            active = 0.0
             batch_num = 0
-            worker_active_seconds = 0.0
 
-            def flush_super_batch(batch: list[Chunk]) -> None:
-                nonlocal batch_num, worker_active_seconds
+            def flush(batch: list[UnitPart]) -> None:
+                nonlocal active, batch_num
                 if not batch:
                     return
                 batch_num += 1
-                num_sub = (len(batch) + embed_batch_size - 1) // embed_batch_size
-                t_start = time.monotonic()
-                try:
-                    # embed_texts (동기 래퍼) → 내부에서 embed_texts_async 호출.
-                    # super-batch가 embed_batch_size를 초과하면 자동으로 batch_size
-                    # 단위로 분할 + asyncio.Semaphore(embed_concurrent)로 동시 전송.
-                    # cancel_flag를 전달 → 임베딩 재시도/분할 루프에서도 즉시 중단됨.
-                    embeddings = embedding_service.embed_texts(
-                        [c.content for c in batch],
-                        cancel_event=cancel_flag,
-                    )
-                    elapsed = time.monotonic() - t_start
-                    worker_active_seconds += elapsed
-
-                    failed_idx_set = set(embedding_service._last_failed_indices)
-                    if failed_idx_set:
-                        sorted_failed = sorted(failed_idx_set)
-                        failed_chunks = [batch[i] for i in sorted_failed]
-                        failed_diag = [
-                            embedding_service._last_failed_diagnostics.get(i, {})
-                            for i in sorted_failed
-                        ]
-                        try:
-                            vector_store._save_failed_chunks(
-                                failed_chunks, diagnostics=failed_diag
+                t0 = time.monotonic()
+                todo: list[tuple[UnitPart, str]] = []
+                n_reused = 0
+                for p in batch:
+                    text = embed_input(p, spec.header)
+                    v = reuse.get((p.part_id, input_hash(text)))
+                    if v is not None:
+                        vectors[p.part_id] = v
+                        n_reused += 1
+                    else:
+                        todo.append((p, text))
+                n_ok = 0
+                if todo:
+                    try:
+                        embs = embedder.embed_texts([t for _, t in todo], cancel_event=cancel_flag)
+                        failed = set(embedder._last_failed_indices)
+                        for i, (p, _) in enumerate(todo):
+                            if i not in failed and embs[i]:
+                                vectors[p.part_id] = np.asarray(embs[i], dtype=np.float16)
+                                n_ok += 1
+                        if failed and not (cancel_flag and cancel_flag.is_set()):
+                            idx_sorted = sorted(failed)
+                            _save_failed_parts(
+                                case_id,
+                                [todo[i][0] for i in idx_sorted],
+                                [embedder._last_failed_diagnostics.get(i, {}) for i in idx_sorted],
                             )
-                            err_msg = (
+                            msg = (
                                 f"임베딩 super-batch {batch_num} 부분 실패: "
-                                f"{len(failed_idx_set)}/{len(batch)}개 (retry 큐 저장)"
+                                f"{len(failed)}/{len(todo)}개 (failed_embeddings 저장)"
                             )
-                            logger.warning(err_msg)
+                            logger.warning(msg)
+                            with counter_lock:
+                                state["embed_errors"].append(msg)
+                                state["failed"] += len(failed)
+                    except Exception as e:
+                        msg = f"임베딩 super-batch {batch_num} 실패 ({len(todo)}개): {e}"
+                        try:
+                            _save_failed_parts(case_id, [p for p, _ in todo])
+                            msg += " → failed_embeddings 저장"
                         except Exception as save_e:
-                            err_msg = (
-                                f"임베딩 super-batch {batch_num} 부분 실패 + retry 저장 실패 "
-                                f"(DATA LOSS {len(failed_idx_set)}개): {save_e}"
-                            )
-                            logger.error(err_msg, exc_info=True)
+                            msg += f" + 저장 실패 (DATA LOSS): {save_e}"
+                        logger.error(msg)
                         with counter_lock:
-                            state["embed_errors"].append(err_msg)
-                    # progress.last_success_at 갱신 (성공한 청크가 있으면)
-                    if len(failed_idx_set) < len(batch):
-                        with counter_lock:
-                            progress.last_success_at = (
-                                embedding_service._last_success_at or time.time()
-                            )
-
-                    kept_indices = [
-                        i for i in range(len(batch)) if i not in failed_idx_set
-                    ]
-                    if not kept_indices:
-                        return
-                    kept_chunks = [batch[i] for i in kept_indices]
-                    kept_embeddings = [embeddings[i] for i in kept_indices]
-                    with counter_lock:
-                        state["embedded"] += len(kept_chunks)
-                        progress.embedded_chunks = state["embedded"]
-                    throughput = (
-                        len(kept_chunks) * 60.0 / elapsed if elapsed > 0 else 0.0
-                    )
-                    logger.info(
-                        f"[EMBED] super-batch {batch_num} 완료: "
-                        f"{len(kept_chunks)}개 ({num_sub}개 sub-batch × "
-                        f"{embed_concurrent} 동시), {elapsed:.2f}초, "
-                        f"{throughput:.0f} chunks/min "
-                        f"(누적 {state['embedded']}개)"
-                    )
-                    store_queue.put((kept_chunks, kept_embeddings))
-                except Exception as e:
-                    worker_active_seconds += time.monotonic() - t_start
-                    err_msg = _save_failed_or_log(
-                        batch, f"임베딩 (super-batch {batch_num})", e
-                    )
-                    with counter_lock:
-                        state["embed_errors"].append(err_msg)
+                            state["embed_errors"].append(msg)
+                            state["failed"] += len(todo)
+                active += time.monotonic() - t0
+                with counter_lock:
+                    state["embedded"] += n_ok + n_reused
+                    state["reused"] += n_reused
+                    progress.embedded_chunks = state["embedded"]
+                    if n_ok or n_reused:
+                        progress.last_success_at = time.time()
 
             while True:
                 if cancel_flag and cancel_flag.is_set():
                     break
                 try:
-                    item = chunk_queue.get(timeout=1.0)
+                    item = part_queue.get(timeout=1.0)
                 except queue.Empty:
                     continue
                 if item is _SENTINEL:
-                    flush_super_batch(buffer)
-                    buffer = []
+                    flush(buffer)
                     break
                 buffer.extend(item)
-                # super-batch 크기 도달 시 한 번에 전송
-                while len(buffer) >= super_batch_size:
-                    if cancel_flag and cancel_flag.is_set():
-                        break
-                    batch = buffer[:super_batch_size]
+                while len(buffer) >= super_batch_size and not (cancel_flag and cancel_flag.is_set()):
+                    flush(buffer[:super_batch_size])
                     buffer = buffer[super_batch_size:]
-                    flush_super_batch(batch)
+            wall_times["embed"] = active
+            progress.embed_wall_seconds = active
 
-            with wall_times_lock:
-                wall_times["embed"] = worker_active_seconds
-                progress.embed_wall_seconds = worker_active_seconds
-            store_queue.put(_SENTINEL)
-
-        def storage_worker() -> None:
-            """store_queue에서 (chunks, embeddings)를 꺼내 ChromaDB upsert + BM25 corpus 누적"""
-            worker_active_seconds = 0.0
-            while True:
-                if cancel_flag and cancel_flag.is_set():
-                    break
-                try:
-                    item = store_queue.get(timeout=1.0)
-                except queue.Empty:
-                    continue
-                if item is _SENTINEL:
-                    break
-                chunks, embeddings = item
-                t_start = time.monotonic()
-                try:
-                    count = vector_store.add_chunks_with_embeddings(
-                        chunks, embeddings, rebuild_bm25=False
-                    )
-                    elapsed = time.monotonic() - t_start
-                    worker_active_seconds += elapsed
-                    with counter_lock:
-                        state["stored"] += count
-                        progress.stored_chunks = state["stored"]
-                        for c in chunks:
-                            state["bm25_corpus"].append(c.content)
-                            state["bm25_ids"].append(c.chunk_id)
-                            meta = dict(c.metadata) if c.metadata else {}
-                            meta["source_type"] = c.source_type
-                            if vector_store.case_id:
-                                meta["case_id"] = vector_store.case_id
-                            state["bm25_metadatas"].append(meta)
-                    logger.info(
-                        f"[STORE] 저장 완료: {count}개, {elapsed:.2f}초 "
-                        f"(누적 {state['stored']}개, "
-                        f"{progress.chunks_per_second:.1f} 청크/초)"
-                    )
-                except Exception as e:
-                    worker_active_seconds += time.monotonic() - t_start
-                    err_msg = _save_failed_or_log(chunks, "저장", e)
-                    with counter_lock:
-                        state["store_errors"].append(err_msg)
-            with wall_times_lock:
-                wall_times["store"] = worker_active_seconds
-                progress.store_wall_seconds = worker_active_seconds
-
-        # 10초마다 throughput을 INFO 로그로 보고하는 모니터 스레드
-        monitor_stop = threading.Event()
-
-        def throughput_monitor() -> None:
-            """10초 슬라이딩 윈도우로 임베딩 throughput을 측정 + ETA 출력"""
-            interval = 10.0
-            last_embedded = 0
-            last_t = time.monotonic()
-            while not monitor_stop.wait(interval):
-                now = time.monotonic()
-                with counter_lock:
-                    current = state["embedded"]
-                    total = progress.total_chunks
-                    parsed = progress.parsed_chunks
-                delta = current - last_embedded
-                dt = now - last_t
-                if dt <= 0:
-                    continue
-                rate_per_min = delta * 60.0 / dt
-                if rate_per_min > progress.peak_embed_chunks_per_min:
-                    progress.peak_embed_chunks_per_min = rate_per_min
-
-                # ETA: 총 청크 수를 모르면 파싱된 청크 기준으로 추정 (under-count)
-                target = total if total > 0 else parsed
-                remaining = max(0, target - current)
-                eta_text = ""
-                if rate_per_min > 0 and remaining > 0:
-                    eta_min = remaining / rate_per_min
-                    if eta_min >= 60:
-                        eta_text = f", 예상 잔여 약 {eta_min / 60:.1f}시간"
-                    elif eta_min >= 1:
-                        eta_text = f", 예상 잔여 약 {eta_min:.0f}분"
-                    else:
-                        eta_text = f", 예상 잔여 약 {eta_min * 60:.0f}초"
-                target_text = (
-                    f"누적 {current:,}/{target:,}" if target > 0 else f"누적 {current:,}"
-                )
-                logger.info(
-                    f"[THROUGHPUT] 임베딩: {rate_per_min:.0f} chunks/min "
-                    f"({target_text}{eta_text})"
-                )
-                last_embedded = current
-                last_t = now
-
-        embed_thread = threading.Thread(
-            target=embedding_worker, daemon=True, name=f"embed-{case_id}"
-        )
-        store_thread = threading.Thread(
-            target=storage_worker, daemon=True, name=f"store-{case_id}"
-        )
-        monitor_thread = threading.Thread(
-            target=throughput_monitor, daemon=True, name=f"monitor-{case_id}"
-        )
+        embed_thread = threading.Thread(target=embedding_worker, daemon=True, name=f"embed-{case_id}")
         embed_thread.start()
-        store_thread.start()
-        monitor_thread.start()
 
-        # 파일을 크기로 분류: 큰 파일은 ProcessPool(GIL 우회), 작은 파일은 ThreadPool
-        # (프로세스 부팅 비용 회피). 양쪽 모두 크기 내림차순으로 큰 것부터 시작.
-        large_files: list[Path] = []
-        small_files: list[Path] = []
-        sized_files: list[tuple[Path, int]] = []
-        for f in files:
+        # 파일을 크기로 분류: 큰 파일은 ProcessPool(GIL 우회), 작은 파일은 ThreadPool.
+        # 파일 수가 적으면 ProcessPool 부팅 비용이 더 커서 ThreadPool만 쓴다.
+        sized: list[tuple[Path, str, int]] = []
+        for f, rel in files:
             try:
-                size = f.stat().st_size if f.exists() else 0
+                size = f.stat().st_size
             except OSError:
                 size = 0
-            sized_files.append((f, size))
-        sized_files.sort(key=lambda x: x[1], reverse=True)
-        for f, size in sized_files:
-            if size >= _PARSE_PROCESS_THRESHOLD_BYTES:
-                large_files.append(f)
-            else:
-                small_files.append(f)
-
-        # 풀별 워커 수 — 대상 파일이 없으면 풀 자체를 만들지 않음 (cold-start 비용 회피)
-        process_workers = min(num_workers, len(large_files)) if large_files else 0
-        thread_workers = min(num_workers, len(small_files)) if small_files else 0
-
+            sized.append((f, rel, size))
+        sized.sort(key=lambda x: x[2], reverse=True)
+        use_process = len(files) > num_workers * 2 and num_workers > 1
+        large = [(f, r) for f, r, s in sized if use_process and s >= _PARSE_PROCESS_THRESHOLD_BYTES]
+        small = [(f, r) for f, r, s in sized if not (use_process and s >= _PARSE_PROCESS_THRESHOLD_BYTES)]
+        process_workers = min(num_workers, len(large)) if large else 0
+        thread_workers = min(num_workers, len(small)) if small else 0
         logger.info(
-            f"3-stage 스트리밍 파이프라인 시작: {len(files)}개 파일 "
-            f"(>=1MB ProcessPool {len(large_files)}개 / <1MB ThreadPool {len(small_files)}개), "
-            f"임베딩 1개 (super-batch={super_batch_size}={embed_batch_size}×{embed_concurrent} 동시) + 저장 1개 "
-            f"(chunk_queue={chunk_queue.maxsize}, store_queue={store_queue.maxsize})"
+            f"인덱싱 파이프라인 시작: 파일 {len(files)}개 (ProcessPool {len(large)} / ThreadPool {len(small)}), "
+            f"프로필 {spec.name} ({spec.embed_model}), super-batch {super_batch_size}"
         )
 
-        # 파싱 풀별 카운터 — 완료 후 요약 로그용
-        parse_summary = {
-            "process_success": 0,
-            "process_fail": 0,
-            "thread_success": 0,
-            "thread_fail": 0,
-        }
-        parse_start_t = time.monotonic()
-
+        cancelled = False
+        parse_start = time.monotonic()
         try:
             with ExitStack() as stack:
                 proc_exec: ProcessPoolExecutor | None = None
                 thread_exec: ThreadPoolExecutor | None = None
                 if process_workers > 0:
                     proc_exec = stack.enter_context(
-                        ProcessPoolExecutor(
-                            max_workers=process_workers,
-                            initializer=_subprocess_init,
-                        )
+                        ProcessPoolExecutor(max_workers=process_workers, initializer=_subprocess_init)
                     )
                 if thread_workers > 0:
                     thread_exec = stack.enter_context(
-                        ThreadPoolExecutor(
-                            max_workers=thread_workers,
-                            thread_name_prefix=f"parse-{case_id}",
-                        )
+                        ThreadPoolExecutor(max_workers=thread_workers, thread_name_prefix=f"parse-{case_id}")
                     )
 
-                # Bounded submission — 한 번에 최대 max_pending개의 future만 in-flight.
-                # ProcessPool 결과 큐에 거대 청크가 무한 누적되는 것 방지.
-                # chunk_queue.put이 block되면 자연스럽게 backfill도 멈춤 → 진짜 backpressure.
-                large_iter = iter(large_files)
-                small_iter = iter(small_files)
-                pending: dict[Future, tuple[Path, str]] = {}
+                large_iter = iter(large)
+                small_iter = iter(small)
+                pending: dict[Future, Path] = {}
                 max_pending = max(num_workers * 2, 4)
 
                 def _submit_next() -> bool:
                     """대기 중인 파일 1개를 적절한 풀에 submit. 더 없으면 False."""
                     if proc_exec is not None:
-                        for f in large_iter:
-                            fut = proc_exec.submit(
-                                _process_file_subprocess, (str(f), case_id)
-                            )
-                            pending[fut] = (f, "process")
+                        for f, rel in large_iter:
+                            pending[proc_exec.submit(_process_file_subprocess, (str(f), rel, case_id))] = f
                             return True
                     if thread_exec is not None:
-                        for f in small_iter:
-                            fut = thread_exec.submit(
-                                _process_file_thread, f, case_id
-                            )
-                            pending[fut] = (f, "thread")
+                        for f, rel in small_iter:
+                            pending[thread_exec.submit(_process_file_thread, f, rel, case_id)] = f
                             return True
                     return False
 
-                # Prime
                 for _ in range(max_pending):
                     if not _submit_next():
                         break
 
-                cancelled = False
                 while pending:
                     if cancel_flag and cancel_flag.is_set():
                         cancelled = True
-                        if proc_exec is not None:
-                            proc_exec.shutdown(wait=False, cancel_futures=True)
-                        if thread_exec is not None:
-                            thread_exec.shutdown(wait=False, cancel_futures=True)
+                        for ex in (proc_exec, thread_exec):
+                            if ex is not None:
+                                ex.shutdown(wait=False, cancel_futures=True)
                         break
-
-                    done, _not_done = wait(
-                        list(pending), return_when=FIRST_COMPLETED, timeout=1.0
-                    )
-                    if not done:
-                        continue
-
+                    done, _ = wait(list(pending), return_when=FIRST_COMPLETED, timeout=1.0)
                     for future in done:
-                        file_path, mode = pending.pop(future)
+                        file_path = pending.pop(future)
                         try:
-                            chunks, err = future.result()
+                            units, stats, err = future.result()
+                            build_stats.merge(BuildStats.from_dict(stats))
                             if err:
                                 with counter_lock:
                                     progress.errors.append(err)
-                                parse_summary[f"{mode}_fail"] += 1
                                 logger.warning(err)
-                            else:
-                                if chunks:
-                                    # chunk_queue가 가득 차면 여기서 block → 자연스러운 backpressure
-                                    chunk_queue.put(chunks)
+                            elif units:
+                                before = set(collector.units)
+                                collector.add(units)
+                                new_ids = [
+                                    uid for uid in dict.fromkeys(u.unit_id for u in units)
+                                    if uid not in before
+                                ]
+                                new_parts = [p for uid in new_ids for p in collector.units[uid].parts]
+                                if new_parts:
+                                    # 큐가 가득 차면 여기서 block → 자연스러운 backpressure
+                                    part_queue.put(new_parts)
                                     with counter_lock:
-                                        progress.parsed_chunks += len(chunks)
-                                        # 본문 추출 불가 PDF 추적 (multi-process 경로)
-                                        meta0 = chunks[0].metadata
-                                        if meta0.get("file_type") == "pdf":
-                                            fname = meta0.get("filename", file_path.name)
-                                            if (meta0.get("is_encrypted")
-                                                and fname not in progress.encrypted_pdfs):
-                                                progress.encrypted_pdfs.append(fname)
-                                            if (meta0.get("scan_pdf")
-                                                and fname not in progress.scan_pdfs_no_ocr):
-                                                progress.scan_pdfs_no_ocr.append(fname)
-                                parse_summary[f"{mode}_success"] += 1
+                                        progress.parsed_chunks += len(new_parts)
                         except Exception as e:
-                            error_msg = (
-                                f"파싱 워커 실패 ({file_path.name}, {mode}): {e}"
-                            )
+                            msg = f"파싱 워커 실패 ({file_path.name}): {e}"
                             with counter_lock:
-                                progress.errors.append(error_msg)
-                            parse_summary[f"{mode}_fail"] += 1
-                            logger.warning(error_msg)
+                                progress.errors.append(msg)
+                            logger.warning(msg)
                         finally:
                             with counter_lock:
                                 progress.processed_files += 1
-
-                        # 진행률 로그 (10% 단위)
-                        if progress.total_files > 0:
-                            step = max(1, progress.total_files // 10)
-                            if progress.processed_files % step == 0:
-                                eta = progress.eta_seconds
-                                eta_str = f", ETA {int(eta)}초" if eta else ""
-                                logger.info(
-                                    f"[PARSE] 파싱 진행: "
-                                    f"{progress.processed_files}/"
-                                    f"{progress.total_files} "
-                                    f"({progress.progress_percent:.0f}%, "
-                                    f"{progress.files_per_second:.1f} 파일/초"
-                                    f"{eta_str})"
-                                )
-
-                        # backfill — 다음 파일 1개 submit
                         _submit_next()
         finally:
-            # 파싱 wall-clock 종료 (제출 완료 시점까지)
-            parse_elapsed = time.monotonic() - parse_start_t
-            with wall_times_lock:
-                wall_times["parse"] = parse_elapsed
-                progress.parse_wall_seconds = parse_elapsed
-            # 파싱 종료 신호 → 임베딩 워커가 store_queue로 sentinel 전파
-            chunk_queue.put(_SENTINEL)
+            wall_times["parse"] = time.monotonic() - parse_start
+            progress.parse_wall_seconds = wall_times["parse"]
+            part_queue.put(_SENTINEL)
             embed_thread.join()
-            store_thread.join()
-            monitor_stop.set()
-            monitor_thread.join(timeout=2.0)
 
-        # 파싱 단계 요약 — 풀별 성공/실패
-        logger.info(
-            f"[PARSE] 완료: 성공 {parse_summary['process_success'] + parse_summary['thread_success']}개 "
-            f"(process {parse_summary['process_success']}, thread {parse_summary['thread_success']}), "
-            f"실패 {parse_summary['process_fail'] + parse_summary['thread_fail']}개 "
-            f"(process {parse_summary['process_fail']}, thread {parse_summary['thread_fail']})"
-            + (" — CANCELLED" if cancelled else "")
-        )
-
-        # 워커 에러를 progress에 병합
         progress.errors.extend(state["embed_errors"])
-        progress.errors.extend(state["store_errors"])
+        if cancelled or (cancel_flag and cancel_flag.is_set()):
+            return 0, 0
 
-        # BM25 인덱스 최종 1회 구축 (저장 성공한 청크만 포함 → 벡터/키워드 일관성)
-        if state["stored"] > 0:
-            logger.info("BM25 인덱스 구축 시작...")
-            vector_store.rebuild_bm25(
-                corpus=state["bm25_corpus"],
-                ids=state["bm25_ids"],
-                metadatas=state["bm25_metadatas"],
-            )
-            logger.info("BM25 인덱스 구축 완료")
+        # 결정적 행 순서: 파싱 완료 순서와 무관하게 (unit_id, 파트 번호)로 정렬
+        parts = sorted(
+            (p for p in collector.parts() if p.part_id in vectors),
+            key=lambda p: (p.unit_id, int(p.part_id.rsplit("#", 1)[1])),
+        )
+        dim = int(next(iter(vectors.values())).shape[0]) if vectors else embedder.get_dimension()
+        mat = (
+            np.stack([vectors[p.part_id] for p in parts]).astype(np.float16)
+            if parts else np.zeros((0, dim), dtype=np.float16)
+        )
+        progress.set_phase(IndexingPhase.STORING)
+        t0 = time.monotonic()
+        stats_out = build_stats.to_dict()
+        stats_out["duplicates_removed"] = dict(collector.duplicates)
+        stats_out["embedding"] = {
+            "embedded": state["embedded"] - state["reused"],
+            "reused": state["reused"],
+            "failed": state["failed"],
+        }
+        case_index.write_index(
+            case_id,
+            parts,
+            {spec.name: ProfileVectors(mat, spec.embed_model)},
+            source_files=[_file_fingerprint(f, rel) for f, rel in files],
+            build_stats=stats_out,
+        )
+        progress.store_wall_seconds = time.monotonic() - t0
 
-        # 임계 실패율 검사
-        total_stage_errors = len(state["embed_errors"]) + len(state["store_errors"])
         _check_failure_rate(
             progress=progress,
-            stored=state["stored"],
-            store_errors=total_stage_errors,
+            stored=len(parts),
+            store_errors=len(state["embed_errors"]),
             total_files=len(files),
         )
-
-        # === 벤치마크 요약 ===
-        total_files_processed = parse_summary["process_success"] + parse_summary["thread_success"]
-        total_files_failed = parse_summary["process_fail"] + parse_summary["thread_fail"]
-        total_elapsed = max(0.001, progress.elapsed_seconds)
-        avg_throughput = state["embedded"] * 60.0 / total_elapsed if state["embedded"] else 0.0
-
-        logger.info("=" * 70)
-        logger.info("[BENCHMARK] 인덱싱 단계별 소요 시간 요약")
+        n_units = len({p.unit_id for p in parts})
         logger.info(
-            f"  파싱     : {wall_times['parse']:>8.1f}초 "
-            f"(파일 {len(files)}개, 성공 {total_files_processed}개, 실패 {total_files_failed}개)"
+            f"[BENCHMARK] 파싱·단위 {wall_times['parse']:.1f}s, 임베딩 {wall_times['embed']:.1f}s "
+            f"(새로 {state['embedded'] - state['reused']}, 재사용 {state['reused']}, 실패 {state['failed']}), "
+            f"색인 저장 {progress.store_wall_seconds:.1f}s — 단위 {n_units}, 파트 {len(parts)}, "
+            f"중복 제거 {sum(collector.duplicates.values())}"
         )
-        logger.info(
-            f"  임베딩   : {wall_times['embed']:>8.1f}초 "
-            f"(super-batch {embed_concurrent}-동시, 청크 {state['embedded']}개)"
-        )
-        logger.info(
-            f"  저장     : {wall_times['store']:>8.1f}초 "
-            f"(청크 {state['stored']}개)"
-        )
-        logger.info(f"  전체     : {total_elapsed:>8.1f}초 (wall-clock)")
-        logger.info(f"  총 청크 수      : {state['stored']:,}개")
-        logger.info(f"  평균 throughput : {avg_throughput:>8.0f} chunks/min")
-        logger.info(
-            f"  피크 throughput : {progress.peak_embed_chunks_per_min:>8.0f} chunks/min "
-            f"(10초 윈도우)"
-        )
-        logger.info("=" * 70)
-
-        logger.info(
-            f"3-stage 파이프라인 완료: 파일 {progress.processed_files}개, "
-            f"임베딩 {state['embedded']}개, 저장 {state['stored']}개"
-        )
-        return state["stored"]
-
-    def _sequential_pipeline(
-        self,
-        files: list[Path],
-        case_id: str,
-        progress: IndexingProgress,
-        cancel_flag: threading.Event | None = None,
-    ) -> int:
-        """순차 파싱 + 배치 즉시 저장 (메모리 절약)
-
-        파일 하나씩 파싱→청킹 후 버퍼에 쌓고, 배치 크기에 도달하면
-        즉시 GPU 임베딩+저장. 전체 청크를 메모리에 보관하지 않음.
-        """
-        vector_store = self._create_vector_store(case_id)
-        batch_size = settings.indexing_store_batch_size
-        buffer: list[Chunk] = []
-        stored_count = 0
-        batch_num = 0
-        bm25_corpus: list[str] = []
-        bm25_ids: list[str] = []
-        bm25_metadatas: list[dict[str, Any]] = []
-
-        for file_path in files:
-            if cancel_flag and cancel_flag.is_set():
-                break
-
-            try:
-                chunks = self._process_file(file_path, case_id, progress)
-                buffer.extend(chunks)
-            except Exception as e:
-                error_msg = f"파일 처리 실패 ({file_path.name}): {e}"
-                progress.errors.append(error_msg)
-                logger.warning(error_msg)
-            finally:
-                progress.processed_files += 1
-
-            def _flush(batch: list[Chunk], n: int) -> int:
-                """순차 파이프라인용 배치 플러시 — 실패 청크는 retry 큐로"""
-                try:
-                    progress.set_phase(IndexingPhase.STORING)
-                    cnt = vector_store.add_chunks(batch, rebuild_bm25=False)
-                    failed_idx_set = set(
-                        vector_store._embedding_service._last_failed_indices
-                    )
-                    for i, c in enumerate(batch):
-                        if i in failed_idx_set:
-                            continue
-                        bm25_corpus.append(c.content)
-                        bm25_ids.append(c.chunk_id)
-                        meta = dict(c.metadata) if c.metadata else {}
-                        meta["source_type"] = c.source_type
-                        if vector_store.case_id:
-                            meta["case_id"] = vector_store.case_id
-                        bm25_metadatas.append(meta)
-                    if failed_idx_set:
-                        logger.warning(
-                            f"배치 {n} 부분 실패: {len(failed_idx_set)}/{len(batch)}개 "
-                            f"임베딩 실패 (retry 큐 저장됨)"
-                        )
-                    return cnt
-                except Exception as e:
-                    try:
-                        vector_store._save_failed_chunks(batch)
-                        logger.warning(
-                            f"벡터 저장 실패 (batch {n}, {len(batch)}개 → retry 큐): {e}"
-                        )
-                    except Exception as save_e:
-                        logger.error(
-                            f"벡터 저장 실패 + retry 저장 실패 (batch {n}, "
-                            f"DATA LOSS {len(batch)}개): {e} / {save_e}"
-                        )
-                    return 0
-                finally:
-                    progress.set_phase(IndexingPhase.PARSING)
-
-            # 버퍼가 배치 크기에 도달하면 즉시 저장
-            while len(buffer) >= batch_size:
-                if cancel_flag and cancel_flag.is_set():
-                    break
-                batch_num += 1
-                batch = buffer[:batch_size]
-                buffer = buffer[batch_size:]
-                count = _flush(batch, batch_num)
-                stored_count += count
-                progress.stored_chunks = stored_count
-                progress.total_chunks = stored_count
-
-        # 남은 버퍼 플러시
-        if buffer and not (cancel_flag and cancel_flag.is_set()):
-            batch_num += 1
-
-            def _flush_final(batch: list[Chunk], n: int) -> int:
-                try:
-                    progress.set_phase(IndexingPhase.STORING)
-                    cnt = vector_store.add_chunks(batch, rebuild_bm25=False)
-                    failed_idx_set = set(
-                        vector_store._embedding_service._last_failed_indices
-                    )
-                    for i, c in enumerate(batch):
-                        if i in failed_idx_set:
-                            continue
-                        bm25_corpus.append(c.content)
-                        bm25_ids.append(c.chunk_id)
-                        meta = dict(c.metadata) if c.metadata else {}
-                        meta["source_type"] = c.source_type
-                        if vector_store.case_id:
-                            meta["case_id"] = vector_store.case_id
-                        bm25_metadatas.append(meta)
-                    return cnt
-                except Exception as e:
-                    try:
-                        vector_store._save_failed_chunks(batch)
-                        logger.warning(
-                            f"벡터 저장 실패 (batch {n}, {len(batch)}개 → retry 큐): {e}"
-                        )
-                    except Exception as save_e:
-                        logger.error(
-                            f"벡터 저장 실패 + retry 저장 실패 (batch {n}, "
-                            f"DATA LOSS {len(batch)}개): {e} / {save_e}"
-                        )
-                    return 0
-
-            count = _flush_final(buffer, batch_num)
-            stored_count += count
-            progress.stored_chunks = stored_count
-
-        # BM25 인덱스 최종 구축
-        if stored_count > 0:
-            vector_store.rebuild_bm25(
-                corpus=bm25_corpus,
-                ids=bm25_ids,
-                metadatas=bm25_metadatas,
-            )
-
-        # 임계 실패율 검사
-        store_failures = sum(
-            1 for e in progress.errors if e.startswith("벡터 저장 실패")
-        )
-        _check_failure_rate(
-            progress=progress,
-            stored=stored_count,
-            store_errors=store_failures,
-            total_files=len(files),
-        )
-
-        return stored_count
+        return n_units, len(parts)
 
     @staticmethod
     def _normalize_path(raw: str) -> Path:
@@ -1460,107 +982,6 @@ class IndexingPipeline:
             f"(PST 경로 {len(case_meta.pst_paths)}개, 문서 경로 {len(case_meta.doc_paths)}개)"
         )
         return unique_files
-
-    def _process_file(
-        self,
-        file_path: Path,
-        case_id: str,
-        progress: IndexingProgress,
-    ) -> list[Chunk]:
-        """단일 파일 처리: 파싱 → 청킹 → 메타데이터 보강
-
-        PST 파일은 이메일/채팅/첨부를 각각 적절한 청커로 처리.
-        일반 문서는 DocumentChunker로 처리.
-        """
-        suffix = file_path.suffix.lower()
-
-        if suffix in (".pst", ".ost"):
-            return self._process_pst(file_path, case_id, progress)
-        else:
-            return self._process_document(file_path, case_id, progress)
-
-    def _process_pst(
-        self,
-        pst_path: Path,
-        case_id: str,
-        progress: IndexingProgress,
-    ) -> list[Chunk]:
-        """PST 파일 처리: 파싱 → 이메일/채팅/첨부 청킹"""
-        from src.parsers.pst_parser import PSTParser
-
-        progress.set_phase(IndexingPhase.PARSING)
-        parser = PSTParser(pst_path)
-        result = parser.parse()
-
-        all_chunks: list[Chunk] = []
-        pst_meta = {"pst_file": pst_path.name}
-
-        # 이메일 청킹
-        progress.set_phase(IndexingPhase.CHUNKING)
-        if result.emails:
-            email_chunks = self._email_chunker.chunk(result.emails, metadata=pst_meta)
-            all_chunks.extend(email_chunks)
-
-        # 채팅 청킹
-        if result.chats:
-            chat_chunks = self._chat_chunker.chunk_chat_messages(
-                result.chats, extra_metadata=pst_meta
-            )
-            all_chunks.extend(chat_chunks)
-
-        # 첨부파일 청킹
-        if result.attachments:
-            att_chunks = self._attachment_chunker.chunk(
-                result.attachments, source_metadata=pst_meta
-            )
-            all_chunks.extend(att_chunks)
-
-        # 메타데이터 보강
-        progress.set_phase(IndexingPhase.ENRICHING)
-        if all_chunks:
-            enrich_chunks(all_chunks, case_id=case_id)
-
-        logger.info(
-            f"PST 처리 완료: {pst_path.name} → "
-            f"이메일 {len(result.emails)}, 채팅 {len(result.chats)}, "
-            f"첨부 {len(result.attachments)}, 청크 {len(all_chunks)}"
-        )
-        return all_chunks
-
-    def _process_document(
-        self,
-        doc_path: Path,
-        case_id: str,
-        progress: IndexingProgress,
-    ) -> list[Chunk]:
-        """문서 파일 처리: 파싱 → 청킹 → 메타데이터 보강"""
-        progress.set_phase(IndexingPhase.PARSING)
-        parsed = self._doc_parser.parse(doc_path)
-
-        progress.set_phase(IndexingPhase.CHUNKING)
-        # XLSX는 list[ParsedDocument] 반환
-        docs = parsed if isinstance(parsed, list) else [parsed]
-
-        # 본문 추출 불가 PDF 추적 (운영 가시성)
-        if docs and docs[0].file_type == "pdf":
-            meta0 = docs[0].metadata
-            if meta0.get("is_encrypted") and doc_path.name not in progress.encrypted_pdfs:
-                progress.encrypted_pdfs.append(doc_path.name)
-            if meta0.get("scan_pdf") and doc_path.name not in progress.scan_pdfs_no_ocr:
-                progress.scan_pdfs_no_ocr.append(doc_path.name)
-
-        all_chunks: list[Chunk] = []
-        for doc in docs:
-            chunks = self._doc_chunker.chunk_parsed_document(doc)
-            all_chunks.extend(chunks)
-
-        # 메타데이터 보강
-        progress.set_phase(IndexingPhase.ENRICHING)
-        if all_chunks:
-            enrich_chunks(all_chunks, case_id=case_id)
-
-        logger.info(f"문서 처리 완료: {doc_path.name} → {len(all_chunks)}개 청크")
-        return all_chunks
 
 
 # 인덱싱 실패 임계값 — 저장 시도 대비 실패 배치/파일 비율
