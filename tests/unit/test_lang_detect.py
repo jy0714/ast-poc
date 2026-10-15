@@ -56,3 +56,13 @@ def test_forwarded_header_lines_and_addresses_ignored():
     r = detect(text)
     assert r.lang == "ko"
     assert "vi" not in r.shares
+
+
+def test_codes_do_not_vote():
+    # 2단계 실측: 코드·숫자가 많은 한국어 SAP 표가 독일어로 판정되던 문제
+    rows = "\n".join(
+        f"EX2023122804{i}   2023.12.28   747962063{i}   G25N7-EB20   0AE1   FGA14   휴먼에러(입력오류)"
+        for i in range(10)
+    )
+    text = f"유관 부서에 아래와 같이 변경 요청 메일이 송부 되었습니다.\n업무에 참고 부탁 드립니다\n{rows}"
+    assert detect(text).lang == "ko"

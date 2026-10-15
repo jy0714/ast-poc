@@ -19,6 +19,9 @@ from typing import Any
 from src.text.bm25_tokenizer import tokenize
 from src.units.email_clean import is_header_line
 
+_HAS_DIGIT_RE = re.compile(r"\d")
+_HAS_LETTER_RE = re.compile(r"[^\W\d_]")
+
 # 주소·URL (mailto 포함) — 언어 판정 잡음
 _NOISE_RE = re.compile(r"<?mailto:[^\s>]+>?|https?://\S+|[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 
@@ -71,6 +74,15 @@ def _iso(language: Any) -> str:
     return language.iso_code_639_1.name.lower()
 
 
+def _word_weight(line: str) -> int:
+    """언어 판정 가중치 = 글자로 된 토큰 수 (숫자·코드형 토큰은 제외)
+
+    SAP 표처럼 코드(EX20231228043, G25N7-EB20)와 영어 열 이름이 많은 한국어 본문이
+    코드 토큰 때문에 독일어 등으로 판정되던 문제를 막는다 (2단계 실측에서 발견).
+    """
+    return sum(1 for t in tokenize(line) if not _HAS_DIGIT_RE.search(t) and _HAS_LETTER_RE.search(t))
+
+
 def detect(text: str) -> LangResult:
     """본문 텍스트의 주 언어·혼용 여부 판정
 
@@ -90,7 +102,7 @@ def detect(text: str) -> LangResult:
         cleaned = _NOISE_RE.sub(" ", raw).strip()
         if cleaned:
             lines.append(cleaned)
-    weights = [len(tokenize(ln)) for ln in lines]
+    weights = [_word_weight(ln) for ln in lines]
     if sum(weights) < MIN_TOKENS:
         return LangResult(UNDETERMINED, False, "", {})
 
