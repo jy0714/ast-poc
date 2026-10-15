@@ -574,3 +574,26 @@ class TestV4Pipeline:
         assert progress.phase == IndexingPhase.CANCELLED
         case_index._cache.clear()
         assert case_index.load(meta.case_id).n_parts == n_before
+
+
+class TestProcessPoolCrash:
+    def test_crashing_file_skipped_others_indexed(self, pipeline, case_store, tmpdir, monkeypatch):
+        """파싱 프로세스가 죽어도 인덱싱 전체가 실패하지 않는다 — 원인 파일만 건너뛰고 나머지는 색인"""
+        from tests.unit._parse_crash_helper import crash_or_parse
+
+        monkeypatch.setattr(pipeline_mod, "_PARSE_PROCESS_THRESHOLD_BYTES", 0)
+        monkeypatch.setattr(pipeline_mod, "_get_parsing_worker_count", lambda: 2)
+        monkeypatch.setattr(pipeline_mod, "_process_file_subprocess", crash_or_parse)
+        files = {f"doc{i}.txt": f"정상 문서 {i} 감사 자료 " * 20 for i in range(6)}
+        files["crash.txt"] = "이 파일은 워커를 죽인다 " * 20
+        doc_dir = _create_test_files(tmpdir, files)
+        meta = case_store.create("크래시", doc_paths=[str(doc_dir)])
+
+        progress = pipeline.run(meta.case_id)
+
+        assert progress.phase.value == "completed"
+        assert progress.processed_files == 7
+        assert [e for e in progress.errors if "crash.txt" in e and "비정상 종료" in e]
+        assert not [e for e in progress.errors if "doc" in e]
+        sources = {p.meta["source_file"].rsplit("/", 1)[-1] for p in case_index.load(meta.case_id).parts}
+        assert sources == {f"doc{i}.txt" for i in range(6)}

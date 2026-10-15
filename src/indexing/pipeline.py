@@ -31,6 +31,7 @@ import threading
 import time
 from concurrent.futures import (
     FIRST_COMPLETED,
+    BrokenExecutor,
     Future,
     ProcessPoolExecutor,
     ThreadPoolExecutor,
@@ -100,6 +101,11 @@ def _get_parsing_worker_count() -> int:
 
 # 파일 1개 처리 결과: (단위 목록, BuildStats.to_dict(), 에러 메시지 | None)
 FileResult = tuple[list[EvidenceUnit], dict[str, Any], str | None]
+
+# 파싱 프로세스가 죽어(BrokenProcessPool) 풀을 다시 만드는 최대 횟수. 넘으면 남은 큰 파일은 ThreadPool로.
+_MAX_PROCESS_POOL_RESTARTS = 5
+# 풀이 깨질 때 처리 중이던 파일은 다시 시도한다. 이 횟수만큼 깨짐에 연루되면 그 파일을 실패로 둔다.
+_MAX_CRASH_INVOLVEMENT = 2
 
 # ThreadPool 워커가 사용할 thread-local UnitBuilder — 스레드·케이스당 1회 생성
 _thread_local = threading.local()
@@ -781,32 +787,96 @@ class IndexingPipeline:
         parse_start = time.monotonic()
         try:
             with ExitStack() as stack:
-                proc_exec: ProcessPoolExecutor | None = None
-                thread_exec: ThreadPoolExecutor | None = None
+                pools: dict[str, Any] = {"proc": None, "thread": None, "restarts": 0}
                 if process_workers > 0:
-                    proc_exec = stack.enter_context(
-                        ProcessPoolExecutor(max_workers=process_workers, initializer=_subprocess_init)
-                    )
+                    pools["proc"] = ProcessPoolExecutor(max_workers=process_workers, initializer=_subprocess_init)
+                    stack.callback(lambda: pools["proc"] and pools["proc"].shutdown(wait=True, cancel_futures=True))
                 if thread_workers > 0:
-                    thread_exec = stack.enter_context(
+                    pools["thread"] = stack.enter_context(
                         ThreadPoolExecutor(max_workers=thread_workers, thread_name_prefix=f"parse-{case_id}")
                     )
 
                 large_iter = iter(large)
                 small_iter = iter(small)
-                pending: dict[Future, Path] = {}
+                retry_large: list[tuple[Path, str]] = []  # 풀이 깨질 때 처리 중이던 큰 파일
+                crash_count: dict[Path, int] = {}
+                pending: dict[Future, tuple[Path, str, bool]] = {}  # future → (파일, 상대경로, 프로세스 풀 여부)
                 max_pending = max(num_workers * 2, 4)
+
+                def _thread_pool() -> ThreadPoolExecutor:
+                    if pools["thread"] is None:
+                        pools["thread"] = stack.enter_context(
+                            ThreadPoolExecutor(max_workers=max(1, num_workers), thread_name_prefix=f"parse-{case_id}")
+                        )
+                    return pools["thread"]
+
+                def _on_pool_broken() -> None:
+                    """깨진 프로세스 풀 정리 → 처리 중이던 큰 파일 재시도 목록에 → 풀 재생성(상한까지)"""
+                    broken = pools["proc"]
+                    if broken is None:
+                        return
+                    for fut, (f, rel, in_proc) in list(pending.items()):
+                        if in_proc and not (fut.done() and not fut.cancelled() and fut.exception() is None):
+                            pending.pop(fut)
+                            crash_count[f] = crash_count.get(f, 0) + 1
+                            if crash_count[f] >= _MAX_CRASH_INVOLVEMENT:
+                                msg = f"파싱 프로세스 비정상 종료에 {crash_count[f]}회 연루되어 건너뜀 ({f.name})"
+                                with counter_lock:
+                                    progress.errors.append(msg)
+                                    progress.processed_files += 1
+                                logger.warning(msg)
+                            else:
+                                retry_large.append((f, rel))
+                    broken.shutdown(wait=False, cancel_futures=True)
+                    if pools["restarts"] < _MAX_PROCESS_POOL_RESTARTS:
+                        pools["restarts"] += 1
+                        logger.warning(
+                            f"파싱 프로세스 풀이 깨짐 → 다시 생성 ({pools['restarts']}/{_MAX_PROCESS_POOL_RESTARTS}), "
+                            f"처리 중이던 파일 재시도"
+                        )
+                        pools["proc"] = ProcessPoolExecutor(max_workers=process_workers, initializer=_subprocess_init)
+                    else:
+                        logger.warning("파싱 프로세스 풀 재생성 한도 초과 → 남은 큰 파일은 ThreadPool로 처리")
+                        pools["proc"] = None
+
+                def _next_large() -> tuple[Path, str] | None:
+                    """다음 큰 파일. 깨짐에 연루된 파일은 하나씩만(다른 프로세스 작업이 없을 때) 다시 보낸다
+                    — 혼자 돌다 또 깨지면 그 파일이 원인으로 특정된다."""
+                    if retry_large:
+                        if any(in_proc for _, _, in_proc in pending.values()):
+                            return None
+                        return retry_large.pop(0)
+                    return next(large_iter, None)
 
                 def _submit_next() -> bool:
                     """대기 중인 파일 1개를 적절한 풀에 submit. 더 없으면 False."""
-                    if proc_exec is not None:
-                        for f, rel in large_iter:
-                            pending[proc_exec.submit(_process_file_subprocess, (str(f), rel, case_id))] = f
+                    while True:
+                        item = _next_large()
+                        if item is None:
+                            break
+                        f, rel = item
+                        if pools["proc"] is None:
+                            if crash_count.get(f):
+                                # 프로세스를 죽였을 수 있는 파일을 메인 프로세스 스레드에서 돌리지 않는다
+                                msg = f"파싱 프로세스 비정상 종료에 연루되어 건너뜀 ({f.name})"
+                                with counter_lock:
+                                    progress.errors.append(msg)
+                                    progress.processed_files += 1
+                                logger.warning(msg)
+                                continue
+                            pending[_thread_pool().submit(_process_file_thread, f, rel, case_id)] = (f, rel, False)
                             return True
-                    if thread_exec is not None:
-                        for f, rel in small_iter:
-                            pending[thread_exec.submit(_process_file_thread, f, rel, case_id)] = f
-                            return True
+                        try:
+                            fut = pools["proc"].submit(_process_file_subprocess, (str(f), rel, case_id))
+                        except BrokenExecutor:
+                            retry_large.insert(0, item)
+                            _on_pool_broken()
+                            continue
+                        pending[fut] = (f, rel, True)
+                        return True
+                    for f, rel in small_iter:
+                        pending[_thread_pool().submit(_process_file_thread, f, rel, case_id)] = (f, rel, False)
+                        return True
                     return False
 
                 for _ in range(max_pending):
@@ -816,13 +886,21 @@ class IndexingPipeline:
                 while pending:
                     if cancel_flag and cancel_flag.is_set():
                         cancelled = True
-                        for ex in (proc_exec, thread_exec):
+                        for ex in (pools["proc"], pools["thread"]):
                             if ex is not None:
                                 ex.shutdown(wait=False, cancel_futures=True)
                         break
                     done, _ = wait(list(pending), return_when=FIRST_COMPLETED, timeout=1.0)
                     for future in done:
-                        file_path = pending.pop(future)
+                        if future not in pending:  # 풀 깨짐 처리에서 이미 재시도 목록으로 옮김
+                            continue
+                        file_path, _rel, in_proc = pending[future]
+                        if in_proc and not future.cancelled() and isinstance(future.exception(), BrokenExecutor):
+                            _on_pool_broken()
+                            while len(pending) < max_pending and _submit_next():
+                                pass
+                            continue
+                        pending.pop(future)
                         try:
                             units, stats, err = future.result()
                             build_stats.merge(BuildStats.from_dict(stats))
@@ -851,7 +929,8 @@ class IndexingPipeline:
                         finally:
                             with counter_lock:
                                 progress.processed_files += 1
-                        _submit_next()
+                        while len(pending) < max_pending and _submit_next():
+                            pass
         finally:
             wall_times["parse"] = time.monotonic() - parse_start
             progress.parse_wall_seconds = wall_times["parse"]
