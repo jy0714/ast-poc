@@ -59,3 +59,9 @@ def test_empty_and_many():
     assert tokenize("") == []
     assert tokenize_many(["a b", ""]) == [["a", "b"], []]
     assert TOKENIZER_VERSION.startswith("script-")
+
+
+def test_hangul_not_treated_as_cjk_bigrams():
+    # 이식 시 NFC 정규화로 CJK 범위가 한글까지 삼켜 '먼에'·'력오' 같은 한글 bigram 이 생기던 회귀
+    assert tokenize("휴먼에러(입력오류)") == ["휴먼", "에러", "입력", "오류"]
+    assert tokenize("豈") == ["豈"]  # 호환 한자는 여전히 CJK 처리

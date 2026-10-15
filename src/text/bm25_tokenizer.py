@@ -28,8 +28,10 @@ from typing import Any
 
 TOKENIZER_VERSION = "script-v1"
 
+# 문자 범위는 \u 이스케이프로 쓴다. 리터럴로 쓰면 저장 시 NFC 정규화로 U+F900(호환 한자)이
+# U+8C48 로 바뀌어 CJK 범위가 한글 음절(U+AC00~)까지 삼킨다.
 _HANGUL = "가-힣ᄀ-ᇿ㄰-㆏"
-_CJK = "一-鿿㐀-䶿豈-﫿぀-ゟ゠-ヿ"
+_CJK = "一-鿿㐀-䶿豈-﫿぀-ゟ゠-ヿ"
 
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", re.UNICODE)
 _CODE_RE = re.compile(r"(?<![\w])[A-Za-z0-9]+(?:[-_/.][A-Za-z0-9]+)+(?![\w])")
