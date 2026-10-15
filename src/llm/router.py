@@ -2,7 +2,8 @@
 
 보안 모드:
 - ON (secure):  Ollama 로컬 LLM — 데이터 외부 전송 차단
-- OFF (open):   OpenAI 외부 API — 검색된 청크만 외부 전송
+- OFF (open):   외부 API (OpenAI 또는 Anthropic) — 검색된 청크만 외부 전송
+                settings.external_llm_provider로 provider 선택
 
 RAG 프롬프트 템플릿을 사용하여 검색 결과 컨텍스트와
 사용자 질의를 조합한 응답을 생성.
@@ -68,6 +69,7 @@ class LLMRouter:
     def __init__(self) -> None:
         self._ollama_llm = None
         self._openai_llm = None
+        self._anthropic_llm = None
 
     def get_llm(self, secure_mode: bool | None = None):
         """현재 보안 모드에 맞는 LLM 인스턴스 반환"""
@@ -75,8 +77,16 @@ class LLMRouter:
 
         if is_secure:
             return self._get_ollama_llm()
-        else:
+
+        provider = (settings.external_llm_provider or "").lower()
+        if provider == "anthropic":
+            return self._get_anthropic_llm()
+        if provider == "openai":
             return self._get_openai_llm()
+        raise ValueError(
+            f"지원하지 않는 external_llm_provider: '{settings.external_llm_provider}'. "
+            f"'openai' 또는 'anthropic' 중 하나로 설정하세요."
+        )
 
     def _get_ollama_llm(self):
         """Ollama 로컬 LLM 인스턴스 (지연 생성)"""
@@ -108,9 +118,29 @@ class LLMRouter:
                 api_key=settings.openai_api_key,
                 temperature=settings.llm_temperature,
             )
-            logger.info(f"외부 LLM 초기화: {settings.openai_model}")
+            logger.info(f"외부 LLM 초기화 (OpenAI): {settings.openai_model}")
 
         return self._openai_llm
+
+    def _get_anthropic_llm(self):
+        """Anthropic Claude 외부 LLM 인스턴스 (지연 생성)"""
+        if self._anthropic_llm is None:
+            if not settings.anthropic_api_key:
+                raise ValueError(
+                    "Anthropic API 키가 설정되지 않았습니다. "
+                    ".env 파일에 ANTHROPIC_API_KEY를 설정하세요."
+                )
+
+            from langchain_anthropic import ChatAnthropic
+
+            self._anthropic_llm = ChatAnthropic(
+                model=settings.anthropic_model,
+                api_key=settings.anthropic_api_key,
+                temperature=settings.llm_temperature,
+            )
+            logger.info(f"외부 LLM 초기화 (Anthropic): {settings.anthropic_model}")
+
+        return self._anthropic_llm
 
     def _build_messages(
         self,
@@ -261,7 +291,12 @@ class LLMRouter:
         """토큰 사용량을 집계해 파일에 로깅하고 콜백을 호출 (실패해도 무해)"""
         try:
             is_secure = secure_mode if secure_mode is not None else settings.is_secure_mode
-            model = settings.ollama_llm_model if is_secure else settings.openai_model
+            if is_secure:
+                model = settings.ollama_llm_model
+            elif (settings.external_llm_provider or "").lower() == "anthropic":
+                model = settings.anthropic_model
+            else:
+                model = settings.openai_model
             usage = get_token_counter().extract_usage_from_response(response)
             system_prompt = messages[0][1] if messages else ""
 

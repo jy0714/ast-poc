@@ -27,11 +27,32 @@ class TestGetLLM:
                 mock_get.assert_called_once()
 
     def test_open_mode_uses_openai(self, router):
-        """보안 모드 OFF → OpenAI"""
-        with patch("src.llm.router.LLMRouter._get_openai_llm") as mock_get:
-            mock_get.return_value = MagicMock()
-            llm = router.get_llm(secure_mode=False)
-            mock_get.assert_called_once()
+        """보안 모드 OFF + provider=openai → OpenAI"""
+        with patch("src.llm.router.settings") as mock_settings:
+            mock_settings.is_secure_mode = False
+            mock_settings.external_llm_provider = "openai"
+            with patch("src.llm.router.LLMRouter._get_openai_llm") as mock_get:
+                mock_get.return_value = MagicMock()
+                router.get_llm(secure_mode=False)
+                mock_get.assert_called_once()
+
+    def test_open_mode_uses_anthropic(self, router):
+        """보안 모드 OFF + provider=anthropic → Anthropic"""
+        with patch("src.llm.router.settings") as mock_settings:
+            mock_settings.is_secure_mode = False
+            mock_settings.external_llm_provider = "anthropic"
+            with patch("src.llm.router.LLMRouter._get_anthropic_llm") as mock_get:
+                mock_get.return_value = MagicMock()
+                router.get_llm(secure_mode=False)
+                mock_get.assert_called_once()
+
+    def test_unknown_provider_raises(self, router):
+        """알 수 없는 provider면 ValueError"""
+        with patch("src.llm.router.settings") as mock_settings:
+            mock_settings.is_secure_mode = False
+            mock_settings.external_llm_provider = "bogus"
+            with pytest.raises(ValueError, match="external_llm_provider"):
+                router.get_llm(secure_mode=False)
 
     def test_openai_no_key_raises(self, router):
         """OpenAI API 키 없으면 에러"""
@@ -39,6 +60,13 @@ class TestGetLLM:
             mock_settings.openai_api_key = ""
             with pytest.raises(ValueError, match="API 키"):
                 router._get_openai_llm()
+
+    def test_anthropic_no_key_raises(self, router):
+        """Anthropic API 키 없으면 에러"""
+        with patch("src.llm.router.settings") as mock_settings:
+            mock_settings.anthropic_api_key = ""
+            with pytest.raises(ValueError, match="API 키"):
+                router._get_anthropic_llm()
 
 
 class TestBuildMessages:

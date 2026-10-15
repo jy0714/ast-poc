@@ -17,8 +17,12 @@ class Settings(BaseSettings):
     ollama_embed_model: str = "bge-m3"
 
     # === External LLM ===
+    # 보안 모드 OFF 일 때 사용할 provider — "openai" | "anthropic"
+    external_llm_provider: str = "anthropic"
     openai_api_key: str = ""
     openai_model: str = "o3"
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-sonnet-4-5-20250929"
 
     # === LLM 생성 파라미터 ===
     # RAG에서 temperature가 높으면 할루시네이션 증가. 0.1로 결정적 답변 유도.
