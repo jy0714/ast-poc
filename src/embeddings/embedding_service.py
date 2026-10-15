@@ -864,8 +864,6 @@ class EmbeddingService:
         # === ConnectError 전용: 3회 exponential backoff ===
         connect_attempts = 0
         server_error_attempts = 0
-        last_err: Exception | None = None
-        last_type: str = "unknown"
 
         while True:
             # 매 반복 시작 시 cancel/deadline 체크
@@ -884,8 +882,6 @@ class EmbeddingService:
                 return embeddings, "ok"
 
             err_type, err_obj = err_info
-            last_err = err_obj
-            last_type = err_type
 
             if err_type == "http_4xx":
                 # 4xx는 즉시 실패 (재시도해도 같은 결과)

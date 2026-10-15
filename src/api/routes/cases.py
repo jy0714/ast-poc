@@ -138,7 +138,7 @@ async def list_cases(status: str | None = None):
             raise HTTPException(
                 status_code=400,
                 detail=f"잘못된 상태 값: {status} (허용: created, indexing, ready, archived, error)",
-            )
+            ) from None
 
     return [_to_response(c) for c in cases]
 
@@ -150,7 +150,7 @@ async def get_case(case_id: str):
     try:
         meta = store.get(case_id)
     except CaseNotFoundError:
-        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}")
+        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}") from None
 
     return _to_response(meta)
 
@@ -166,9 +166,9 @@ async def update_case_sources(case_id: str, request: CaseUpdateSources):
             doc_paths=request.doc_paths or None,
         )
     except CaseNotFoundError:
-        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}")
+        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}") from None
     except InvalidStatusTransitionError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
     return _to_response(meta)
 
@@ -186,7 +186,7 @@ async def delete_case(case_id: str):
     try:
         store.get(case_id)
     except CaseNotFoundError:
-        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}")
+        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}") from None
 
     # 인덱싱 실행 중이면 워커부터 정지 (orphan write 방지)
     from src.api.routes.indexing import get_pipeline
@@ -231,8 +231,8 @@ async def archive_case(case_id: str):
     try:
         meta = store.update_status(case_id, CaseStatus.ARCHIVED)
     except CaseNotFoundError:
-        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}")
+        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}") from None
     except InvalidStatusTransitionError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
     return _to_response(meta)

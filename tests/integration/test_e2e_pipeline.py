@@ -105,7 +105,7 @@ def env(tmp_path, monkeypatch):
         b"Content-Type: text/plain; charset=utf-8\r\n"
         b"Content-Transfer-Encoding: 8bit\r\n"
         b"\r\n"
-        + "김감사님,\n\n1분기 감사 결과를 첨부합니다.\n비용 승인 프로세스 관련 이슈가 가장 심각합니다.\n다음 주 회의에서 논의하시죠.\n\n홍길동 드림".encode("utf-8")
+        + "김감사님,\n\n1분기 감사 결과를 첨부합니다.\n비용 승인 프로세스 관련 이슈가 가장 심각합니다.\n다음 주 회의에서 논의하시죠.\n\n홍길동 드림".encode()
     )
 
     client = TestClient(app)

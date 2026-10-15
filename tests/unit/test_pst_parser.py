@@ -3,19 +3,16 @@
 pypff/libratom 없이도 Mock 파서로 전체 데이터 모델과 로직을 검증
 """
 
-import pytest
 from datetime import datetime
 
 from src.parsers.pst_parser import (
     Attachment,
-    ChatMessage,
     EmailMessage,
     MockPSTParser,
     PSTParseResult,
     _safe_str,
     _strip_html,
 )
-
 
 # === 데이터 모델 테스트 ===
 
@@ -92,7 +89,7 @@ class TestSafeStr:
         assert _safe_str("hello") == "hello"
 
     def test_korean_bytes(self):
-        assert _safe_str("한글".encode("utf-8")) == "한글"
+        assert _safe_str("한글".encode()) == "한글"
 
     def test_integer(self):
         assert _safe_str(42) == "42"
@@ -109,7 +106,7 @@ class TestStripHtml:
     def test_br_to_newline(self):
         html = "Line1<br>Line2<br/>Line3"
         result = _strip_html(html)
-        assert "Line1\nLine2\nLine3" == result
+        assert result == "Line1\nLine2\nLine3"
 
     def test_style_removal(self):
         html = "<style>body{color:red}</style><p>Text</p>"

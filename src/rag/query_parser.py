@@ -203,9 +203,8 @@ def _extract_source_types(text: str) -> list[str]:
     """소스 타입 키워드 추출"""
     found: list[str] = []
     for pattern, source_type in _SOURCE_TYPE_PATTERNS:
-        if pattern.search(text):
-            if source_type not in found:
-                found.append(source_type)
+        if pattern.search(text) and source_type not in found:
+            found.append(source_type)
     return found
 
 

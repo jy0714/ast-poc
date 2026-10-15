@@ -87,7 +87,7 @@ class TestListAPI:
 
     def test_list_filter_by_status(self, client: TestClient, store: CaseStore):
         """GET /?status=created — 상태 필터"""
-        r1 = client.post("/api/admin/cases/", json={"name": "A"})
+        client.post("/api/admin/cases/", json={"name": "A"})
         r2 = client.post("/api/admin/cases/", json={"name": "B"})
         # B를 archived로 변경
         case_b_id = r2.json()["case_id"]

@@ -23,7 +23,7 @@ class TestGetLLM:
             # ChatOllama import 모킹
             with patch("src.llm.router.LLMRouter._get_ollama_llm") as mock_get:
                 mock_get.return_value = MagicMock()
-                llm = router.get_llm(secure_mode=True)
+                router.get_llm(secure_mode=True)
                 mock_get.assert_called_once()
 
     def test_open_mode_uses_openai(self, router):
@@ -128,14 +128,15 @@ class TestGenerate:
         mock_llm.ainvoke.return_value = response
 
         captured: dict = {}
-        with patch.object(router, "get_llm", return_value=mock_llm):
-            with patch("src.llm.router.log_token_usage"), patch(
-                "src.llm.router.log_token_usage_detail"
-            ):
-                await router.generate(
-                    "질문", ["컨텍스트"], secure_mode=False,
-                    case_id="case1", on_complete=captured.update,
-                )
+        with (
+            patch.object(router, "get_llm", return_value=mock_llm),
+            patch("src.llm.router.log_token_usage"),
+            patch("src.llm.router.log_token_usage_detail"),
+        ):
+            await router.generate(
+                "질문", ["컨텍스트"], secure_mode=False,
+                case_id="case1", on_complete=captured.update,
+            )
 
         assert captured["input_tokens"] == 200
         assert captured["output_tokens"] == 30
@@ -148,9 +149,11 @@ class TestGenerate:
         mock_llm = AsyncMock()
         mock_llm.ainvoke.side_effect = Exception("connection refused")
 
-        with patch.object(router, "get_llm", return_value=mock_llm):
-            with pytest.raises(ConnectionError, match="응답 생성 실패"):
-                await router.generate("질문", ["컨텍스트"])
+        with (
+            patch.object(router, "get_llm", return_value=mock_llm),
+            pytest.raises(ConnectionError, match="응답 생성 실패"),
+        ):
+            await router.generate("질문", ["컨텍스트"])
 
 
 class TestGenerateStream:
@@ -197,14 +200,15 @@ class TestGenerateStream:
         mock_llm.astream = mock_astream
 
         captured: dict = {}
-        with patch.object(router, "get_llm", return_value=mock_llm):
-            with patch("src.llm.router.log_token_usage"), patch(
-                "src.llm.router.log_token_usage_detail"
+        with (
+            patch.object(router, "get_llm", return_value=mock_llm),
+            patch("src.llm.router.log_token_usage"),
+            patch("src.llm.router.log_token_usage_detail"),
+        ):
+            async for _ in router.generate_stream(
+                "질문", ["컨텍스트"], case_id="c2", on_complete=captured.update
             ):
-                async for _ in router.generate_stream(
-                    "질문", ["컨텍스트"], case_id="c2", on_complete=captured.update
-                ):
-                    pass
+                pass
 
         assert captured["case_id"] == "c2"
         assert captured["input_source"] == "estimated"

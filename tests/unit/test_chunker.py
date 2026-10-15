@@ -4,9 +4,6 @@
 """
 
 from datetime import datetime, timedelta
-
-import pytest
-
 from unittest.mock import patch
 
 from src.chunkers.chunker import (
@@ -19,7 +16,6 @@ from src.chunkers.chunker import (
     clean_email_body,
 )
 from src.parsers.pst_parser import Attachment, ChatMessage, EmailMessage
-
 
 # === Chunk 데이터 모델 테스트 ===
 
@@ -292,7 +288,7 @@ class TestChatChunker:
     def test_window_split(self):
         """시간 간격으로 윈도우 분할"""
         chunker = ChatChunker(window_minutes=10)
-        msgs = self._make_messages(6, gap_minutes=5)  # 0, 5, 10, 15, 20, 25분
+        self._make_messages(6, gap_minutes=5)  # 0, 5, 10, 15, 20, 25분
         # 10분 윈도우: [0,5,10] [15,20,25] — 10분 gap at 10→15
         # Actually: gap between msg[2](10min) and msg[3](15min) = 5min < 10 → same group
         # gap between each = 5min, all < 10min → single group

@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from src.cases.case_store import CaseNotFoundError, CaseStore, InvalidStatusTransitionError
-from src.indexing.pipeline import IndexingPipeline, IndexingPhase
+from src.indexing.pipeline import IndexingPipeline
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -119,7 +119,7 @@ async def start_indexing(request: IndexingRequest):
     try:
         case_meta = store.get(request.case_id)
     except CaseNotFoundError:
-        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {request.case_id}")
+        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {request.case_id}") from None
 
     # 보관 상태 체크
     if case_meta.status == CaseStatus.ARCHIVED:
@@ -180,7 +180,7 @@ async def get_indexing_progress(case_id: str):
     try:
         store.get(case_id)
     except CaseNotFoundError:
-        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}")
+        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}") from None
 
     progress = pipeline.get_progress(case_id)
     return IndexingProgress(**progress.to_dict())
@@ -196,7 +196,7 @@ async def add_incremental_data(case_id: str, request: IncrementalRequest):
     try:
         store.get(case_id)
     except CaseNotFoundError:
-        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}")
+        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}") from None
 
     # 이미 실행 중인지 확인
     if pipeline.is_running(case_id):
@@ -213,7 +213,7 @@ async def add_incremental_data(case_id: str, request: IncrementalRequest):
             doc_paths=request.doc_paths or None,
         )
     except InvalidStatusTransitionError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
     # 인덱싱 시작
     progress = pipeline.run_async(case_id)

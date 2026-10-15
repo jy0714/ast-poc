@@ -33,7 +33,7 @@ from src.chunkers.metadata_enricher import (
     deserialize_metadata_from_chroma,
     serialize_metadata_for_chroma,
 )
-from src.embeddings.embedding_service import EmbeddingDimensionError, EmbeddingService
+from src.embeddings.embedding_service import EmbeddingService
 from src.utils.config import settings
 from src.utils.logger import get_logger
 
@@ -385,7 +385,7 @@ class VectorStoreService:
         # 마지막에 rebuild_bm25(corpus=..., ids=...) 호출로 일괄 토큰화.
         if rebuild_bm25:
             existing_id_set = set(self._bm25_ids)
-            for cid, text, meta in zip(ids, texts, metadatas):
+            for cid, text, meta in zip(ids, texts, metadatas, strict=False):
                 if cid in existing_id_set:
                     continue
                 self._bm25_corpus.append(text)
@@ -455,7 +455,7 @@ class VectorStoreService:
 
         if rebuild_bm25:
             existing_id_set = set(self._bm25_ids)
-            for cid, text, meta in zip(ids, texts, metadatas):
+            for cid, text, meta in zip(ids, texts, metadatas, strict=False):
                 if cid in existing_id_set:
                     continue
                 self._bm25_corpus.append(text)
@@ -853,7 +853,7 @@ class VectorStoreService:
 
         # 기존 데이터가 있으면 신규만 추가 (증분)
         existing_id_set = set(self._bm25_ids)
-        for i, (text, cid) in enumerate(zip(corpus, ids)):
+        for i, (text, cid) in enumerate(zip(corpus, ids, strict=False)):
             if cid in existing_id_set:
                 continue
             self._bm25_corpus.append(text)
@@ -905,7 +905,7 @@ class VectorStoreService:
         self._bm25_corpus = list(documents)
         self._bm25_tokenized = [self._tokenize(doc) for doc in self._bm25_corpus]
         self._bm25_metadata = {
-            cid: (meta or {}) for cid, meta in zip(ids, metadatas)
+            cid: (meta or {}) for cid, meta in zip(ids, metadatas, strict=False)
         }
         self._bm25_index = BM25Okapi(self._bm25_tokenized)
 
@@ -975,15 +975,15 @@ class VectorStoreService:
             return {}
 
         # 이미 ChromaDB 연산자 형태면 그대로 사용
-        if any(k.startswith("$") for k in filters.keys()):
+        if any(k.startswith("$") for k in filters):
             return filters
 
         # 날짜 범위 키를 분리하여 $gte/$lte로 변환
-        _DATE_FILTER_KEYS = {"_date_gte", "_date_lte", "_date_eq"}
+        date_filter_keys = {"_date_gte", "_date_lte", "_date_eq"}
 
         conditions: list[dict] = []
         for key, value in filters.items():
-            if key in _DATE_FILTER_KEYS:
+            if key in date_filter_keys:
                 # ISO 문자열("2025-03-01")을 YYYYMMDD 정수로 변환
                 int_val = int(str(value)[:10].replace("-", ""))
                 if key == "_date_gte":

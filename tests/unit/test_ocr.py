@@ -6,8 +6,6 @@
 from __future__ import annotations
 
 import io
-import tempfile
-from pathlib import Path
 
 import pytest
 

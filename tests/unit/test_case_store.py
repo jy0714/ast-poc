@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from src.cases.case_store import (
-    CaseMetadata,
     CaseNotFoundError,
     CaseStatus,
     CaseStore,

@@ -3,7 +3,6 @@
 토픽 추출, 메타데이터 보강, ChromaDB 직렬화/역직렬화 검증.
 """
 
-import pytest
 
 from src.chunkers.chunker import Chunk
 from src.chunkers.metadata_enricher import (
@@ -12,7 +11,6 @@ from src.chunkers.metadata_enricher import (
     extract_topics,
     serialize_metadata_for_chroma,
 )
-
 
 # === 토픽 추출 테스트 ===
 

@@ -1,6 +1,6 @@
 """문서 업로드 및 인덱싱 엔드포인트"""
 
-from fastapi import APIRouter, UploadFile, File
+from fastapi import APIRouter, File, UploadFile
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -14,7 +14,7 @@ class IndexingStatus(BaseModel):
 
 
 @router.post("/upload")
-async def upload_documents(files: list[UploadFile] = File(...)):
+async def upload_documents(files: list[UploadFile] = File(...)):  # noqa: B008 — FastAPI 관용구
     """문서 파일 업로드 (PST, PDF, DOCX, PPTX, XLSX)"""
     # TODO: 파일 저장 + 파싱 파이프라인 트리거
     return {

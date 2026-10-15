@@ -15,7 +15,7 @@ import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from src.utils.logger import get_logger
@@ -23,7 +23,7 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-class CaseStatus(str, Enum):
+class CaseStatus(StrEnum):
     """케이스 상태"""
 
     CREATED = "created"

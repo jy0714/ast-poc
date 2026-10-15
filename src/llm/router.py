@@ -12,7 +12,7 @@ RAG 프롬프트 템플릿을 사용하여 검색 결과 컨텍스트와
 from __future__ import annotations
 
 import time
-from typing import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable
 
 from src.utils.config import settings
 from src.utils.logger import get_logger

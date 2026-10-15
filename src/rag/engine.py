@@ -14,8 +14,9 @@ retrieve() 결과를 그대로 평가한다.
 from __future__ import annotations
 
 import re
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import Any
 
 from src.index import case_index
 from src.llm.router import LLMRouter
@@ -230,15 +231,18 @@ class RAGEngine:
 
         # #5 관련성 체크
         extra_warning: str | None = None
-        if settings.enable_relevance_check and filtered:
-            if not self._has_keyword_overlap(search_query, filtered):
-                logger.warning(
-                    f"검색 결과와 질문의 키워드 일치도가 낮습니다 (case={self.case_id})"
-                )
-                extra_warning = (
-                    "주의: 검색 결과가 질문과 직접적으로 관련되지 않을 수 있습니다. "
-                    "확실한 근거가 없으면 반드시 '찾을 수 없습니다'로 답하세요."
-                )
+        if (
+            settings.enable_relevance_check
+            and filtered
+            and not self._has_keyword_overlap(search_query, filtered)
+        ):
+            logger.warning(
+                f"검색 결과와 질문의 키워드 일치도가 낮습니다 (case={self.case_id})"
+            )
+            extra_warning = (
+                "주의: 검색 결과가 질문과 직접적으로 관련되지 않을 수 있습니다. "
+                "확실한 근거가 없으면 반드시 '찾을 수 없습니다'로 답하세요."
+            )
 
         return filtered, extra_warning
 

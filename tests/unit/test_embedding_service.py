@@ -155,7 +155,7 @@ class TestEmbeddingServiceWithOllama:
         v3 = service.embed_text("오늘 점심 메뉴 추천")
 
         def cosine_sim(a: list[float], b: list[float]) -> float:
-            dot = sum(x * y for x, y in zip(a, b))
+            dot = sum(x * y for x, y in zip(a, b, strict=False))
             na = math.sqrt(sum(x * x for x in a))
             nb = math.sqrt(sum(x * x for x in b))
             return dot / (na * nb) if na and nb else 0.0

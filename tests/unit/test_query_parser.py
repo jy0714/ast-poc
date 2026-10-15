@@ -1,9 +1,7 @@
 """질의 파서 유닛 테스트"""
 
-import pytest
 
-from src.rag.query_parser import ParsedQuery, parse_query
-
+from src.rag.query_parser import parse_query
 
 # === 기본 동작 ===
 

@@ -14,8 +14,6 @@ OpenCV(opencv-python-headless) 사용. import 실패 시 원본 이미지를 그
 
 from __future__ import annotations
 
-import io
-
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -79,10 +77,8 @@ def preprocess_image(image_bytes: bytes) -> bytes:
         # 3. deskew — 텍스트 영역 contour의 minAreaRect 기울기 추정
         try:
             angle = _estimate_skew_angle(denoised)
-            if abs(angle) > 0.5:  # 0.5도 이상 기울었을 때만 회전 (불필요한 보간 방지)
-                deskewed = _rotate(denoised, angle)
-            else:
-                deskewed = denoised
+            # 0.5도 이상 기울었을 때만 회전 (불필요한 보간 방지)
+            deskewed = _rotate(denoised, angle) if abs(angle) > 0.5 else denoised
         except Exception as e:
             logger.debug(f"deskew 실패 (skip): {e}")
             deskewed = denoised

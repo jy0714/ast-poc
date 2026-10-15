@@ -202,7 +202,7 @@ async def chat(request: ChatRequest):
     try:
         case_meta = store.get(request.case_id)
     except CaseNotFoundError:
-        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {request.case_id}")
+        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {request.case_id}") from None
 
     if case_meta.status not in (CaseStatus.READY, CaseStatus.ARCHIVED):
         raise HTTPException(
@@ -290,7 +290,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
     try:
         case_meta = store.get(request.case_id)
     except CaseNotFoundError:
-        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {request.case_id}")
+        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {request.case_id}") from None
 
     if case_meta.status not in (CaseStatus.READY, CaseStatus.ARCHIVED):
         raise HTTPException(
@@ -476,7 +476,7 @@ async def get_chat_history(case_id: str, limit: int = 50):
     try:
         store.get(case_id)
     except CaseNotFoundError:
-        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}")
+        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}") from None
 
     try:
         from src.db.database import get_session

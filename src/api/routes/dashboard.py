@@ -236,7 +236,7 @@ async def get_dashboard(case_id: str):
     try:
         case_meta = store.get(case_id)
     except CaseNotFoundError:
-        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}")
+        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}") from None
 
     if case_meta.status not in (CaseStatus.READY, CaseStatus.ARCHIVED):
         raise HTTPException(

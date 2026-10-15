@@ -5,7 +5,6 @@ ChromaDB + BM25 하이브리드 검색, 메타데이터 필터, 통계 검증.
 """
 
 import tempfile
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -45,20 +44,22 @@ def store(mock_embedding):
     _collection_counter += 1
     collection_name = f"test_col_{_collection_counter}"
 
-    with tempfile.TemporaryDirectory() as bm25_dir:
-        with patch("src.utils.config.settings") as mock_settings:
-            mock_settings.bm25_index_dir = bm25_dir
-            mock_settings.embed_batch_size = 50
-            mock_settings.search_top_k = 10
-            mock_settings.rrf_k = 60
-            mock_settings.rrf_min_score = 0.0141
+    with (
+        tempfile.TemporaryDirectory() as bm25_dir,
+        patch("src.utils.config.settings") as mock_settings,
+    ):
+        mock_settings.bm25_index_dir = bm25_dir
+        mock_settings.embed_batch_size = 50
+        mock_settings.search_top_k = 10
+        mock_settings.rrf_k = 60
+        mock_settings.rrf_min_score = 0.0141
 
-            svc = VectorStoreService(
-                collection_name=collection_name,
-                ephemeral=True,
-            )
-            svc._embedding_service = mock_embedding
-            yield svc
+        svc = VectorStoreService(
+            collection_name=collection_name,
+            ephemeral=True,
+        )
+        svc._embedding_service = mock_embedding
+        yield svc
 
 
 def _make_chunks(texts: list[str], source_type: str = "document", **extra_meta) -> list[Chunk]:

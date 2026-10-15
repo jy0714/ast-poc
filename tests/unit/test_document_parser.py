@@ -4,8 +4,8 @@
 파서 로직과 메타데이터 추출을 검증할 수 있도록 테스트 파일을 동적 생성.
 """
 
+import contextlib
 import io
-import os
 import tempfile
 from pathlib import Path
 
@@ -25,10 +25,8 @@ def setup_test_dir():
     yield
     # 정리: 테스트 파일 삭제
     for f in TEST_DIR.iterdir():
-        try:
+        with contextlib.suppress(OSError):
             f.unlink()
-        except OSError:
-            pass
 
 
 @pytest.fixture
@@ -110,7 +108,7 @@ class TestTxtParser:
         assert result.metadata["filename"].endswith(".txt")
 
     def test_parse_txt_bytes(self, parser: DocumentParser):
-        content = "Hello 안녕하세요".encode("utf-8")
+        content = "Hello 안녕하세요".encode()
         result = parser.parse_bytes(content, "test.txt")
         assert isinstance(result, ParsedDocument)
         assert "안녕하세요" in result.content
@@ -285,8 +283,8 @@ class TestPdfParser:
 
         # OCR 엔진 싱글톤 리셋 + 가용성을 False로 강제
         from src.parsers.ocr import reset_engine_cache
-        from src.parsers.ocr.tesseract import TesseractEngine
         from src.parsers.ocr.paddle import PaddleEngine
+        from src.parsers.ocr.tesseract import TesseractEngine
 
         reset_engine_cache()
         monkeypatch.setattr(TesseractEngine, "_available", False)
@@ -756,7 +754,7 @@ class TestCommonMetadata:
 
     def test_parse_bytes_source_metadata(self, parser: DocumentParser):
         """parse_bytes에 source_metadata가 첨부되는지 확인"""
-        content = "첨부파일 내용입니다. 이메일에서 추출한 문서를 파싱합니다.".encode("utf-8")
+        content = "첨부파일 내용입니다. 이메일에서 추출한 문서를 파싱합니다.".encode()
         source = {"email_subject": "회의록", "sender": "hong@example.com"}
 
         result = parser.parse_bytes(content, "attachment.txt", source_metadata=source)
@@ -779,10 +777,10 @@ def _make_eml(
     extra_headers: dict[str, str] | None = None,
 ) -> bytes:
     """테스트용 EML 바이트 생성"""
+    from email import encoders
+    from email.mime.base import MIMEBase
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
-    from email.mime.base import MIMEBase
-    from email import encoders
 
     if attachments or html_body:
         msg = MIMEMultipart()
@@ -962,10 +960,7 @@ class TestEmlParser:
 class TestMsgParser:
     def test_parse_msg_bytes(self, parser: DocumentParser):
         """MSG 바이트 파싱 (extract-msg로 생성된 실제 MSG)"""
-        try:
-            import extract_msg
-        except ImportError:
-            pytest.skip("extract-msg가 설치되지 않았습니다")
+        pytest.importorskip("extract_msg", reason="extract-msg가 설치되지 않았습니다")
 
         # extract-msg는 MSG 생성 기능이 제한적이므로
         # OLE 구조의 최소 MSG를 직접 생성하여 테스트
@@ -978,12 +973,9 @@ class TestMsgParser:
 
     def test_msg_unsupported_bytes_error(self, parser: DocumentParser):
         """잘못된 MSG 바이트는 에러 발생"""
-        try:
-            import extract_msg
-        except ImportError:
-            pytest.skip("extract-msg가 설치되지 않았습니다")
+        pytest.importorskip("extract_msg", reason="extract-msg가 설치되지 않았습니다")
 
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017 — extract-msg 버전마다 예외 종류가 다름
             parser.parse_bytes(b"this is not a valid msg file", "bad.msg")
 
 

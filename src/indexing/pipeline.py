@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import queue
@@ -38,7 +39,7 @@ from concurrent.futures import (
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -197,7 +198,7 @@ def _save_failed_parts(
 _DOCUMENT_EXTENSIONS = DocumentParser.SUPPORTED_TYPES
 
 
-class IndexingPhase(str, Enum):
+class IndexingPhase(StrEnum):
     """인덱싱 진행 단계"""
 
     IDLE = "idle"
@@ -618,10 +619,8 @@ class IndexingPipeline:
             progress.set_phase(IndexingPhase.ERROR)
             progress.errors.append(str(e))
             progress.completed_at = datetime.now()
-            try:
+            with contextlib.suppress(Exception):  # 케이스 자체가 없을 수 있음
                 self.case_store.set_error(case_id, str(e))
-            except Exception:
-                pass  # 케이스 자체가 없을 수 있음
 
             # 에러 이력 저장
             _save_indexing_log(progress, "error")
@@ -653,7 +652,7 @@ class IndexingPipeline:
         embed_batch_size = settings.embed_batch_size
         embed_concurrent = max(1, settings.embed_max_concurrent)
         super_batch_size = embed_batch_size * embed_concurrent
-        _SENTINEL = None
+        sentinel = None
 
         spec = profile_spec(settings.service_index_profile)
         embedder = self._create_embedding_service(spec.embed_model)
@@ -742,7 +741,7 @@ class IndexingPipeline:
                     item = part_queue.get(timeout=1.0)
                 except queue.Empty:
                     continue
-                if item is _SENTINEL:
+                if item is sentinel:
                     flush(buffer)
                     break
                 buffer.extend(item)
@@ -853,7 +852,7 @@ class IndexingPipeline:
         finally:
             wall_times["parse"] = time.monotonic() - parse_start
             progress.parse_wall_seconds = wall_times["parse"]
-            part_queue.put(_SENTINEL)
+            part_queue.put(sentinel)
             embed_thread.join()
 
         progress.errors.extend(state["embed_errors"])
@@ -996,7 +995,7 @@ def collect_case_files(case_meta: CaseMetadata) -> list[Path]:
     return IndexingPipeline._collect_files_impl(case_meta)
 
 
-class IndexingFailureRateExceeded(Exception):
+class IndexingFailureRateExceeded(Exception):  # noqa: N818 — 공개 이름 유지
     """저장 실패율이 임계치를 초과해 인덱싱을 중단해야 함"""
 
 
