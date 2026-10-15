@@ -1,0 +1,31 @@
+# AuditRAG v4 실행 목록 (지시서 §6.4)
+# k값(k_bm25/k_dense/rrf_k/rerank_candidates = 50/50/60/30)은 RetrievalConfig 기본값을 쓰고 여기서 덮어쓰지 않는다.
+case_id: "b392e4f27760"   # 평가 코퍼스 케이스 (A5000 재색인 후 확정)
+depth: 100
+pool_depth: 10
+seed: 20261015
+b_ratio: 0.25             # B 판정자 질의 비율 (유형별 층화) — 체크포인트 2 미정, 초안 값
+text_max_chars: 6000      # 판정 시트 text 열 상한
+latency_warmup: 3
+latency_repeats: 5
+generation_run: R8        # 생성 시간 측정 컨텍스트 (상위 5개 단위)
+failure_run: R8           # 실패 분석 기준
+failure_rank_runs: [R2, R4, R6, R7, R8]
+breakdown_runs: [R2, R4, R6, R8, R9]
+runs:
+  R1: {profile: nohdr-qwen3, use_bm25: true,  use_dense: false, rerank: false}
+  R2: {profile: hdr-qwen3,   use_bm25: true,  use_dense: false, rerank: false}
+  R3: {profile: nohdr-qwen3, use_bm25: false, use_dense: true,  rerank: false}
+  R4: {profile: hdr-qwen3,   use_bm25: false, use_dense: true,  rerank: false}
+  R5: {profile: nohdr-qwen3, use_bm25: true,  use_dense: true,  rerank: false}
+  R6: {profile: hdr-qwen3,   use_bm25: true,  use_dense: true,  rerank: false}
+  R7: {profile: nohdr-qwen3, use_bm25: true,  use_dense: true,  rerank: true, reranker: qwen3}
+  R8: {profile: hdr-qwen3,   use_bm25: true,  use_dense: true,  rerank: true, reranker: qwen3}
+  R9: {profile: hdr-bgem3,   use_bm25: true,  use_dense: true,  rerank: true, reranker: bge}
+pool_runs: [R1, R2, R3, R4, R5, R6, R7, R8, R9]
+comparisons:            # 주 지표 nDCG@10, 전체를 한 계열로 Holm 보정
+  ladder_hdr:   [[R2, R6], [R4, R6], [R6, R8]]
+  ladder_nohdr: [[R1, R5], [R3, R5], [R5, R7]]
+  header:       [[R1, R2], [R3, R4], [R5, R6], [R7, R8]]
+  model:        [[R9, R8]]
+latency_runs: [R6, R8, R9]
