@@ -1,0 +1,35 @@
+{
+  "_note": "0단계 실데이터의 중국어 인용 헤더 메일 5건(DBCN 공장 방문 초청장 등)의 '구조'만 남긴 가명 사본. 이름·주소·내용은 모두 지어낸 것이다.",
+  "cases": [
+    {
+      "id": "zh1_ko_reply_zh_block",
+      "subject": "回复: 공장 방문용 초청장 발급 요청",
+      "body": "안녕하세요.\n\n초청장 발급 일정 확인했습니다.\n방문 인원 명단을 금일 중 보내드리겠습니다.\n\n감사합니다.\n홍길동 드림\n\n发件人: 王小明(Xiaoming Wang) Example Corp <xm.wang@example.com>\n发送时间: 2023年8月7日 10:15\n收件人: 홍길동(Gildong Hong) 수석 <gd.hong@example.com>; 김철수(Cheolsu Kim) 선임 <cs.kim@example.com>\n抄送: 李华(Hua Li) <hua.li@example.com>; 이영희(Younghee Lee) <yh.lee@example.com>\n主题: RE: 공장 방문용 초청장 발급 요청\n\n您好，\n\n邀请函需要以下资料：\n1. 护照复印件\n2. 访问日程\n\n谢谢。",
+      "expected": "안녕하세요.\n\n초청장 발급 일정 확인했습니다.\n방문 인원 명단을 금일 중 보내드리겠습니다.\n\n감사합니다.\n홍길동 드림"
+    },
+    {
+      "id": "zh2_zh_reply_zh_block",
+      "subject": "回复: 출장 문의",
+      "body": "您好，\n\n酒店已经预订好了，请确认附件。\n\n发件人: 홍길동(Gildong Hong) <gd.hong@example.com>\n发送时间: 2023年8月22日 9:02\n收件人: 王小明(Xiaoming Wang) <xm.wang@example.com>\n主题: 출장 문의\n\n출장 일정과 숙소 예약 부탁드립니다.",
+      "expected": "您好，\n\n酒店已经预订好了，请确认附件。"
+    },
+    {
+      "id": "zh3_fullwidth_colon",
+      "subject": "回复：공장 방문 상세 일정",
+      "body": "收到，谢谢。\n\n发件人：李华(Hua Li)\n发送时间：2023年8月22日 14:30\n收件人：홍길동(Gildong Hong)\n主题：공장 방문 상세 일정\n\n상세 일정 첨부드립니다.",
+      "expected": "收到，谢谢。"
+    },
+    {
+      "id": "zh4_zh_block_then_en_block",
+      "subject": "回复: 공장 방문용 초청장 발급 요청",
+      "body": "명단 보내드립니다.\n\n发件人: 王小明(Xiaoming Wang)\n发送时间: 2023年7月28日 16:40\n收件人: 홍길동(Gildong Hong)\n主题: RE: 공장 방문용 초청장 발급 요청\n\n请提供名单。\n\nFrom: 홍길동(Gildong Hong)\nSent: Friday, July 28, 2023 9:10 AM\nTo: 王小明(Xiaoming Wang)\nSubject: 공장 방문용 초청장 발급 요청\n\n초청장 발급 부탁드립니다.",
+      "expected": "명단 보내드립니다."
+    },
+    {
+      "id": "zh5_forwarded_keeps_quote",
+      "subject": "转发: 공장 방문용 초청장 발급 요청",
+      "body": "참고 부탁드립니다.\n\n发件人: 王小明(Xiaoming Wang)\n发送时间: 2023年8月7日 10:15\n收件人: 홍길동(Gildong Hong)\n主题: 공장 방문용 초청장 발급 요청\n\n邀请函已发送。",
+      "expected": "참고 부탁드립니다.\n\n发件人: 王小明(Xiaoming Wang)\n发送时间: 2023年8月7日 10:15\n收件人: 홍길동(Gildong Hong)\n主题: 공장 방문용 초청장 발급 요청\n\n邀请函已发送。"
+    }
+  ]
+}

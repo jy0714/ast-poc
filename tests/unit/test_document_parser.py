@@ -985,3 +985,154 @@ class TestMsgParser:
 
         with pytest.raises(Exception):
             parser.parse_bytes(b"this is not a valid msg file", "bad.msg")
+
+
+# === v4 보강: 페이지 보존 · PPTX 버그 · 형식 판별 · XLS · HTML · EML 첨부 ===
+
+
+@pytest.fixture
+def no_ocr_parser(monkeypatch: pytest.MonkeyPatch) -> DocumentParser:
+    """OCR 엔진을 끈 파서 (빈 페이지에서 OCR을 시도하지 않게)"""
+
+    class _NoOcr:
+        name = "none"
+
+        def is_available(self) -> bool:
+            return False
+
+    p = DocumentParser(ocr_languages="eng+kor")
+    monkeypatch.setattr(p, "_get_ocr_engine", lambda: _NoOcr())
+    return p
+
+
+def _pdf_bytes(pages: list[str]) -> bytes:
+    import fitz
+
+    doc = fitz.open()
+    for text in pages:
+        page = doc.new_page()
+        if text:
+            page.insert_text((72, 72), text)
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+class TestV4ParserFields:
+    def test_pdf_pages_keep_empty_slots(self, no_ocr_parser: DocumentParser):
+        """빈 페이지도 자리를 지켜 pages[i] 가 원본 i+1 쪽"""
+        long_a = "Page one text about invoice approval " * 3
+        long_c = "Page three text about payment schedule " * 3
+        doc = no_ocr_parser.parse_bytes(_pdf_bytes([long_a, "", long_c]), "x.pdf")
+        assert len(doc.pages) == 3
+        assert "Page one" in doc.pages[0]
+        assert doc.pages[1] == ""
+        assert "Page three" in doc.pages[2]
+        # 기존 content 는 비어 있지 않은 페이지만 이어붙인 형태로 유지
+        assert "Page one" in doc.content and "Page three" in doc.content
+
+    def test_pptx_non_placeholder_shape_regression(self, parser: DocumentParser):
+        """0단계: 플레이스홀더가 아닌 도형에서 placeholder_format ValueError 로 파일 전체 실패"""
+        from pptx import Presentation
+        from pptx.util import Inches
+
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[5])  # Title Only
+        slide.shapes.title.text = "정산 기준"
+        box = slide.shapes.add_textbox(Inches(1), Inches(2), Inches(4), Inches(1))
+        box.text_frame.text = "일반 텍스트 상자 (플레이스홀더 아님)"
+        prs.slides.add_slide(prs.slide_layouts[6])  # 빈 슬라이드
+        buf = io.BytesIO()
+        prs.save(buf)
+
+        doc = parser.parse_bytes(buf.getvalue(), "deck.pptx")
+        assert len(doc.pages) == 2
+        assert "일반 텍스트 상자" in doc.pages[0]
+        assert doc.pages[1] == ""
+        assert doc.metadata["sections"][0]["title"] == "정산 기준"
+
+    def test_docx_heading_sections(self, parser: DocumentParser):
+        from docx import Document
+
+        d = Document()
+        d.add_paragraph("서문 문단")
+        d.add_heading("1. 목적", level=1)
+        d.add_paragraph("목적 본문")
+        d.add_heading("2. 범위", level=2)
+        d.add_paragraph("범위 본문")
+        buf = io.BytesIO()
+        d.save(buf)
+        doc = parser.parse_bytes(buf.getvalue(), "rule.docx")
+        assert doc.pages == ["서문 문단", "1. 목적\n목적 본문", "2. 범위\n범위 본문"]
+
+    def test_xlsx_row_numbers(self, parser: DocumentParser):
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws["A1"] = "품목"
+        ws["B1"] = "금액"
+        ws["A3"] = "부품"  # 2행은 비어 있음
+        ws["B3"] = 1000
+        buf = io.BytesIO()
+        wb.save(buf)
+        sheets = parser.parse_bytes(buf.getvalue(), "q.xlsx")
+        assert sheets[0].row_numbers == [1, 3]
+        assert sheets[0].content.split("\n")[1] == "부품\t1000"
+
+    def test_xls_legacy(self, parser: DocumentParser):
+        import xlwt
+
+        book = xlwt.Workbook()
+        sh = book.add_sheet("견적")
+        sh.write(0, 0, "품목")
+        sh.write(0, 1, "수량")
+        sh.write(2, 0, "부품A")
+        sh.write(2, 1, 3)
+        buf = io.BytesIO()
+        book.save(buf)
+        sheets = parser.parse_bytes(buf.getvalue(), "old.xls")
+        assert sheets[0].file_type == "xls"
+        assert sheets[0].row_numbers == [1, 3]
+        assert sheets[0].content == "품목\t수량\n부품A\t3"
+
+    def test_html(self, parser: DocumentParser):
+        html = "<html><head><style>p{}</style></head><body><p>결재 요청</p><p>금액 1,000</p></body></html>"
+        doc = parser.parse_bytes(html.encode("utf-8"), "mail.html")
+        assert doc.file_type == "html"
+        assert "결재 요청" in doc.content and "<p>" not in doc.content
+
+    def test_extensionless_detection(self, no_ocr_parser: DocumentParser):
+        from src.parsers.document_parser import UnsupportedFormatError, detect_format
+
+        pdf = _pdf_bytes(["Detected without extension " * 3])
+        assert detect_format(pdf) == ".pdf"
+        assert no_ocr_parser.parse_bytes(pdf, "noext").file_type == "pdf"
+        eml = b"From: a@x.com\r\nTo: b@x.com\r\nSubject: hi\r\n\r\nbody"
+        assert detect_format(eml) == ".eml"
+        assert detect_format(b"\x89PNG\r\n\x1a\n....") is None
+        with pytest.raises(UnsupportedFormatError):
+            no_ocr_parser.parse_bytes(b"\x89PNG\r\n\x1a\n....", "image")
+
+    def test_eml_attachments_bytes_and_names(self, parser: DocumentParser):
+        from email.message import EmailMessage as PyEmail
+
+        inner = PyEmail()
+        inner["Subject"] = "inner"
+        inner.set_content("inner body")
+        m = PyEmail()
+        m["From"] = '"Kim, Cheolsu" <cs@x.com>'
+        m["To"] = '"Lee, Younghee" <yh@x.com>, hong@x.com'
+        m["Subject"] = "RE: 견적"
+        m["Message-ID"] = "<abc@x.com>"
+        m.set_content("본문입니다")
+        m.add_attachment(b"col1\tcol2", maintype="text", subtype="plain", filename="a.txt")
+        m.add_attachment(inner)
+        doc = parser.parse_bytes(m.as_bytes(), "m.eml")
+        names = [a.filename for a in doc.attachments]
+        assert names[0] == "a.txt" and names[1].endswith(".eml")
+        assert doc.attachments[0].content == b"col1\tcol2"
+        assert doc.metadata["recipient_names"] == ["Lee, Younghee", "hong@x.com"]
+        assert doc.metadata["sender_name"] == "Kim, Cheolsu"
+        # 첨부된 메일의 본문은 부모 본문에 섞이지 않는다
+        assert "inner body" not in doc.content

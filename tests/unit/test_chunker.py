@@ -577,17 +577,15 @@ class TestCleanEmailBody:
         result = clean_email_body(body)
         assert result == body
 
-    def test_fallback_on_overcleaning(self):
-        """정제 결과가 너무 짧으면 원본으로 fallback"""
-        # 전체가 인용이고 최신 본문이 극히 짧은 경우
+    def test_short_reply_kept(self):
+        """v4: 짧은 회신("OK")도 하나의 증거 단위 — 결과가 비었을 때만 원본으로 fallback"""
         body = (
             "OK\n"
             "On Mon, Jan 6, 2025 at 10:00 AM John wrote:\n"
             "> 원본 내용이 매우 길고 중요한 내용입니다. " * 5
         )
         result = clean_email_body(body)
-        # "OK"만 남으면 너무 짧으므로 원본으로 fallback
-        assert len(result) > 10
+        assert result == "OK"
 
     def test_quoted_lines_block_removal(self):
         """> 인용 라인이 연속 2줄 이상일 때만 제거"""

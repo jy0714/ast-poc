@@ -5,8 +5,10 @@
 - DOCX: python-docx
 - PPTX: python-pptx (발표자 노트 제외)
 - XLSX: openpyxl (시트별 구분)
-- TXT: 직접 읽기
-- EML: Python email 모듈 (RFC 5322)
+- XLS: xlrd (레거시, 시트별 구분)
+- TXT / HTML: 직접 읽기 (HTML은 태그 제거)
+- EML: Python email 모듈 (RFC 5322), 첨부 원본 바이트 보존
+- 확장자 없음: 매직 바이트로 형식 판별 (detect_format)
 
 메타데이터:
 - 공통: filename, file_path, file_size, file_type, file_hash, language, char_count
@@ -29,13 +31,13 @@ import email.policy
 import hashlib
 import io
 import re
-import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from email.utils import parseaddr, parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
+from src.parsers.pst_parser import Attachment
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -45,14 +47,78 @@ logger = get_logger(__name__)
 class ParsedDocument:
     """파싱된 문서
 
-    XLSX의 경우 시트별로 별도 ParsedDocument가 생성됨.
+    XLSX/XLS의 경우 시트별로 별도 ParsedDocument가 생성됨.
+
+    v4 증거 단위용 필드 (기존 `content`는 호환을 위해 유지):
+    - pages: PDF 페이지 / PPTX 슬라이드 / DOCX 제목 구간별 텍스트.
+      PDF·PPTX는 빈 페이지도 자리를 지켜 인덱스+1이 원본 페이지 번호와 같다.
+    - row_numbers: XLSX/XLS 시트에서 `content`의 각 줄이 원본 몇 번째 행인지 (1부터)
+    - attachments: EML/MSG의 첨부 원본 바이트 (부모 메일과의 연결은 이 리스트로 유지)
     """
 
     filename: str
     content: str
-    file_type: str  # "pdf" | "docx" | "pptx" | "xlsx" | "txt" | "eml" | "msg"
+    file_type: str  # "pdf" | "docx" | "pptx" | "xlsx" | "xls" | "txt" | "html" | "eml" | "msg"
     page_count: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
+    pages: list[str] = field(default_factory=list)
+    row_numbers: list[int] = field(default_factory=list)
+    attachments: list[Attachment] = field(default_factory=list)
+
+
+class UnsupportedFormatError(ValueError):
+    """지원하지 않는 파일 형식 (기존 호출자 호환을 위해 ValueError 하위 클래스)"""
+
+
+# 확장자 없는 첨부의 형식 판별용 매직 바이트
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_EML_HEADER_RE = re.compile(
+    rb"^(?:Received|From|To|Subject|Date|Message-ID|MIME-Version|Return-Path|X-[\w-]+):",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def detect_format(content: bytes) -> str | None:
+    """매직 바이트로 파일 형식을 판별하여 확장자(".pdf" 등)를 반환. 판별 불가면 None.
+
+    - %PDF → .pdf
+    - ZIP(OOXML) → 내부 경로로 .docx / .pptx / .xlsx 구분
+    - OLE 복합 문서 → 스트림 이름으로 .msg / .xls 구분 (doc/ppt는 미지원 → None)
+    - 앞부분에 RFC 5322 헤더 줄이 2개 이상 → .eml
+    - HTML 태그로 시작 → .html
+    """
+    head = content[:8]
+    if content.startswith(b"%PDF"):
+        return ".pdf"
+    if head.startswith(b"PK\x03\x04"):
+        import zipfile
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as zf:
+                names = zf.namelist()
+        except Exception:
+            return None
+        if any(n.startswith("word/") for n in names):
+            return ".docx"
+        if any(n.startswith("ppt/") for n in names):
+            return ".pptx"
+        if any(n.startswith("xl/") for n in names):
+            return ".xlsx"
+        return None
+    if head == _OLE_MAGIC:
+        # OLE 디렉터리 엔트리 이름은 UTF-16LE로 저장됨
+        sample = content[: 1 << 20]
+        if "__substg1.0_".encode("utf-16-le") in sample:
+            return ".msg"
+        if "Workbook".encode("utf-16-le") in sample or "Book".encode("utf-16-le") in sample:
+            return ".xls"
+        return None
+    text_head = content[:4096].lstrip()
+    if len(_EML_HEADER_RE.findall(text_head)) >= 2:
+        return ".eml"
+    if text_head[:15].lower().startswith((b"<!doctype html", b"<html", b"<head", b"<body")):
+        return ".html"
+    return None
 
 
 class DocumentParser:
@@ -70,7 +136,9 @@ class DocumentParser:
         result = parser.parse_bytes(raw_bytes, "attachment.docx")
     """
 
-    SUPPORTED_TYPES = {".pdf", ".docx", ".pptx", ".xlsx", ".txt", ".eml", ".msg"}
+    SUPPORTED_TYPES = {
+        ".pdf", ".docx", ".pptx", ".xlsx", ".xls", ".txt", ".html", ".htm", ".eml", ".msg",
+    }
 
     def __init__(self, ocr_languages: str | None = None) -> None:
         """DocumentParser 초기화
@@ -116,7 +184,13 @@ class DocumentParser:
 
         suffix = path.suffix.lower()
         if suffix not in self.SUPPORTED_TYPES:
-            raise ValueError(f"지원하지 않는 파일 형식: {suffix}")
+            # 확장자가 없거나 낯선 경우 매직 바이트로 판별 (판별 불가 시 기존과 같이 거부)
+            with open(path, "rb") as f:
+                detected = detect_format(f.read(1 << 20))
+            if detected is None:
+                raise UnsupportedFormatError(f"지원하지 않는 파일 형식: {suffix}")
+            logger.info(f"형식 판별: {path.name} → {detected}")
+            suffix = detected
 
         logger.info(f"문서 파싱 시작: {path.name} ({suffix})")
 
@@ -125,7 +199,10 @@ class DocumentParser:
             ".docx": self._parse_docx,
             ".pptx": self._parse_pptx,
             ".xlsx": self._parse_xlsx,
+            ".xls": self._parse_xls,
             ".txt": self._parse_txt,
+            ".html": self._parse_html,
+            ".htm": self._parse_html,
             ".eml": self._parse_eml,
             ".msg": self._parse_msg,
         }
@@ -158,7 +235,12 @@ class DocumentParser:
         """
         suffix = Path(filename).suffix.lower()
         if suffix not in self.SUPPORTED_TYPES:
-            raise ValueError(f"지원하지 않는 파일 형식: {suffix}")
+            # 확장자 없는 첨부 등 — 매직 바이트로 판별
+            detected = detect_format(content)
+            if detected is None:
+                raise UnsupportedFormatError(f"지원하지 않는 파일 형식: {suffix or '(확장자 없음)'}")
+            logger.info(f"형식 판별: {filename} → {detected}")
+            suffix = detected
 
         # 메모리에서 직접 처리 가능한 타입
         memory_parsers = {
@@ -166,7 +248,10 @@ class DocumentParser:
             ".docx": self._parse_docx_bytes,
             ".pptx": self._parse_pptx_bytes,
             ".xlsx": self._parse_xlsx_bytes,
+            ".xls": self._parse_xls_bytes,
             ".txt": self._parse_txt_bytes,
+            ".html": self._parse_html_bytes,
+            ".htm": self._parse_html_bytes,
             ".eml": self._parse_eml_bytes,
             ".msg": self._parse_msg_bytes,
         }
@@ -285,13 +370,15 @@ class DocumentParser:
             )
             ocr_used = any(t for t in ocr_text_map.values())
 
-        # 결과 합치기 — 텍스트 레이어 우선, 없는 페이지는 OCR 결과
-        pages_text: list[str] = []
+        # 결과 합치기 — 텍스트 레이어 우선, 없는 페이지는 OCR 결과.
+        # pages_full은 빈 페이지도 자리를 지켜 인덱스+1 = 원본 페이지 번호 (v4 증거 단위)
+        pages_full: list[str] = []
         for i, t in enumerate(text_layer):
             if t:
-                pages_text.append(t)
-            elif i in ocr_text_map and ocr_text_map[i]:
-                pages_text.append(ocr_text_map[i])
+                pages_full.append(t)
+            else:
+                pages_full.append((ocr_text_map.get(i) or "").strip())
+        pages_text = [t for t in pages_full if t]
 
         if page_failures:
             logger.warning(
@@ -355,12 +442,16 @@ class DocumentParser:
         if modified_date:
             metadata["modified_date"] = self._parse_pdf_date(modified_date)
 
+        if ocr_used:
+            metadata["ocr_pages"] = sum(1 for t in ocr_text_map.values() if t)
+
         return ParsedDocument(
             filename=filename,
             content=full_text,
             file_type="pdf",
             page_count=len(doc),
             metadata=metadata,
+            pages=pages_full,
         )
 
     @staticmethod
@@ -556,8 +647,17 @@ class DocumentParser:
 
         본문 단락 + 테이블 텍스트를 포함.
         """
-        # 본문 단락 추출
-        paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+        # 본문 단락 추출 + 제목(Heading 1~3) 경계로 구간 나누기 (v4 가상 페이지의 1차 경계)
+        paragraphs: list[str] = []
+        sections_text: list[list[str]] = [[]]
+        for p in doc.paragraphs:
+            text = p.text
+            if not text.strip():
+                continue
+            if self._is_docx_heading(p) and sections_text[-1]:
+                sections_text.append([])
+            sections_text[-1].append(text)
+            paragraphs.append(text)
 
         # 테이블 텍스트 추출
         table_texts: list[str] = []
@@ -570,6 +670,10 @@ class DocumentParser:
         full_text = "\n".join(paragraphs)
         if table_texts:
             full_text += "\n\n[표]\n" + "\n".join(table_texts)
+
+        pages = ["\n".join(sec) for sec in sections_text if sec]
+        if table_texts:
+            pages.append("[표]\n" + "\n".join(table_texts))
 
         # 메타데이터 추출
         props = doc.core_properties
@@ -589,7 +693,17 @@ class DocumentParser:
             file_type="docx",
             page_count=0,  # DOCX는 페이지 개념이 명확하지 않음
             metadata=metadata,
+            pages=pages,
         )
+
+    @staticmethod
+    def _is_docx_heading(paragraph: Any) -> bool:
+        """Heading 1~3 (한국어 Word '제목 1~3' 포함) 스타일 여부"""
+        try:
+            name = (paragraph.style.name or "").strip().lower()
+        except Exception:
+            return False
+        return bool(re.match(r"^(?:heading|제목)\s*[123]$", name)) or name == "title"
 
     # ==================== PPTX ====================
 
@@ -614,6 +728,7 @@ class DocumentParser:
         sections 메타데이터에 슬라이드 단위 경계 정보를 포함.
         """
         slides_text: list[str] = []
+        slide_pages: list[str] = []  # 빈 슬라이드도 자리 유지 (인덱스+1 = 슬라이드 번호)
         sections: list[dict[str, Any]] = []
         char_offset = 0
 
@@ -627,11 +742,15 @@ class DocumentParser:
                         text = paragraph.text.strip()
                         if text:
                             texts.append(text)
-                    # 슬라이드 제목 추출 (첫 번째 텍스트 또는 title placeholder)
-                    if not slide_title and hasattr(shape, "placeholder_format"):
-                        ph = shape.placeholder_format
-                        if ph and ph.idx == 0:  # title placeholder
-                            slide_title = shape.text_frame.text.strip()
+                    # 슬라이드 제목 추출 (title placeholder). placeholder_format은
+                    # 플레이스홀더가 아닌 도형에서 ValueError를 내므로(hasattr로는 못 거름)
+                    # is_placeholder로 먼저 확인한다.
+                    if not slide_title and getattr(shape, "is_placeholder", False):
+                        try:
+                            if shape.placeholder_format.idx == 0:  # title placeholder
+                                slide_title = shape.text_frame.text.strip()
+                        except ValueError:
+                            pass
 
                 # 테이블 내 텍스트 추출
                 if shape.has_table:
@@ -655,6 +774,8 @@ class DocumentParser:
 
                 slides_text.append(slide_content)
                 char_offset += len(slide_content) + 2  # +2 for \n\n separator
+
+            slide_pages.append("\n".join(texts))
 
         full_text = "\n\n".join(slides_text)
 
@@ -680,6 +801,7 @@ class DocumentParser:
             file_type="pptx",
             page_count=len(prs.slides),
             metadata=metadata,
+            pages=slide_pages,
         )
 
     # ==================== XLSX ====================
@@ -733,13 +855,17 @@ class DocumentParser:
         for sheet_name in sheet_names:
             ws = wb[sheet_name]
             rows_text: list[str] = []
+            row_numbers: list[int] = []
             row_count = 0
 
-            for row in ws.iter_rows(values_only=True):
+            start_row = getattr(ws, "min_row", 1) or 1
+            for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=start_row):
                 cell_values = [str(cell) if cell is not None else "" for cell in row]
-                row_text = "\t".join(cell_values)
+                # 오른쪽 빈 셀의 탭은 토큰만 늘리므로 제거
+                row_text = "\t".join(cell_values).rstrip("\t")
                 if row_text.strip():
                     rows_text.append(row_text)
+                    row_numbers.append(row_idx)
                     row_count += 1
 
             content = "\n".join(rows_text)
@@ -759,10 +885,87 @@ class DocumentParser:
                     file_type="xlsx",
                     page_count=0,
                     metadata=metadata,
+                    row_numbers=row_numbers,
                 )
             )
 
         return documents
+
+    # ==================== XLS (레거시, xlrd) ====================
+
+    def _parse_xls(self, path: Path) -> list[ParsedDocument]:
+        """레거시 XLS 텍스트 추출 (xlrd, 시트별 구분)"""
+        return self._parse_xls_bytes(path.read_bytes(), path.name)
+
+    def _parse_xls_bytes(self, content: bytes, filename: str) -> list[ParsedDocument]:
+        """레거시 XLS 바이트에서 시트별 ParsedDocument 생성 (XLSX와 같은 구조)"""
+        import xlrd
+
+        book = xlrd.open_workbook(file_contents=content, on_demand=True)
+        try:
+            sheet_names = book.sheet_names()
+            documents: list[ParsedDocument] = []
+            for sheet_idx, sheet_name in enumerate(sheet_names):
+                sheet = book.sheet_by_index(sheet_idx)
+                rows_text: list[str] = []
+                row_numbers: list[int] = []
+                for r in range(sheet.nrows):
+                    values = [
+                        self._xls_cell_str(sheet.cell(r, c), book.datemode)
+                        for c in range(sheet.ncols)
+                    ]
+                    row_text = "\t".join(values).rstrip("\t")
+                    if row_text.strip():
+                        rows_text.append(row_text)
+                        row_numbers.append(r + 1)
+                documents.append(
+                    ParsedDocument(
+                        filename=f"{filename} [{sheet_name}]",
+                        content="\n".join(rows_text),
+                        file_type="xls",
+                        page_count=0,
+                        metadata={
+                            "sheet_name": sheet_name,
+                            "sheet_names": sheet_names,
+                            "sheet_count": len(sheet_names),
+                            "row_count": len(rows_text),
+                        },
+                        row_numbers=row_numbers,
+                    )
+                )
+            return documents
+        finally:
+            book.release_resources()
+
+    @staticmethod
+    def _xls_cell_str(cell: Any, datemode: int) -> str:
+        """xlrd 셀 → 문자열 (날짜는 ISO, 정수형 실수는 정수로)"""
+        import xlrd
+
+        if cell.ctype in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK):
+            return ""
+        if cell.ctype == xlrd.XL_CELL_DATE:
+            try:
+                return xlrd.xldate.xldate_as_datetime(cell.value, datemode).isoformat(sep=" ")
+            except Exception:
+                return str(cell.value)
+        if cell.ctype == xlrd.XL_CELL_NUMBER and float(cell.value).is_integer():
+            return str(int(cell.value))
+        return str(cell.value)
+
+    # ==================== HTML ====================
+
+    def _parse_html(self, path: Path) -> ParsedDocument:
+        """HTML 파일 → 태그 제거 텍스트"""
+        return self._parse_html_bytes(path.read_bytes(), path.name)
+
+    def _parse_html_bytes(self, content: bytes, filename: str) -> ParsedDocument:
+        """HTML 바이트 → 태그 제거 텍스트 (인코딩은 TXT와 같은 순서로 시도)"""
+        raw = self._parse_txt_bytes(content, filename).content
+        text = self._strip_html(raw).strip()
+        return ParsedDocument(
+            filename=filename, content=text, file_type="html", metadata={}, pages=[text]
+        )
 
     # ==================== TXT ====================
 
@@ -880,19 +1083,14 @@ class DocumentParser:
             except (ValueError, TypeError):
                 parsed_date = date_str  # 원본 보존
 
-        # 첨부파일 목록 수집 (walk 자체가 corrupted part에서 예외 가능)
-        attachment_filenames: list[str] = []
-        try:
-            for part in msg.walk():
-                try:
-                    if part.get_content_disposition() == "attachment":
-                        att_name = part.get_filename() or "unnamed"
-                        attachment_filenames.append(att_name)
-                except Exception as e:
-                    logger.debug(f"EML part 메타 읽기 실패 (계속): {filename} ({e})")
-                    continue
-        except Exception as e:
-            logger.warning(f"EML 첨부파일 walk 실패: {filename} ({e})")
+        # 첨부파일 수집 — 원본 바이트까지 보존 (v4: 첨부 단위가 부모 메일을 알 수 있게)
+        attachments = self._collect_eml_attachments(msg, filename)
+        attachment_filenames = [a.filename for a in attachments]
+
+        # 표시 이름 (헤더용). 기존 sender/recipients/cc 값은 그대로 둔다.
+        sender_name = self._display_names([sender])
+        recipient_names = self._display_names(msg.get_all("To") or [])
+        cc_names = self._display_names(msg.get_all("Cc") or [])
 
         # 통합 참여자 (검색/UI에서 단일 리스트로 사용)
         participants = self._merge_participants(sender, recipients, cc)
@@ -924,6 +1122,9 @@ class DocumentParser:
             "reply_to": reply_to,
             "has_attachments": len(attachment_filenames) > 0,
             "attachment_filenames": attachment_filenames,
+            "sender_name": sender_name[0] if sender_name else "",
+            "recipient_names": recipient_names,
+            "cc_names": cc_names,
         }
 
         return ParsedDocument(
@@ -932,7 +1133,78 @@ class DocumentParser:
             file_type="eml",
             page_count=0,
             metadata=metadata,
+            attachments=attachments,
         )
+
+    @staticmethod
+    def _collect_eml_attachments(msg: Any, filename: str) -> list[Attachment]:
+        """EML MIME 트리에서 첨부 파트를 원본 바이트와 함께 수집
+
+        첨부된 메일(message/rfc822)은 통째로 하나의 .eml 첨부로 보고,
+        그 안의 파트로는 내려가지 않는다(중첩 첨부가 부모 첨부로 섞이지 않게).
+        """
+        found: list[Attachment] = []
+
+        def visit(part: Any) -> None:
+            try:
+                ctype = part.get_content_type()
+                disp = part.get_content_disposition()
+            except Exception as e:
+                logger.debug(f"EML part 메타 읽기 실패 (계속): {filename} ({e})")
+                return
+            if ctype == "message/rfc822":
+                try:
+                    inner = part.get_payload(0)
+                    data = inner.as_bytes(policy=email.policy.default)
+                except Exception:
+                    data = b""
+                name = part.get_filename() or "attached_message.eml"
+                if not Path(name).suffix:
+                    name += ".eml"
+                found.append(Attachment(filename=name, content=data, mime_type=ctype))
+                return
+            if disp == "attachment":
+                try:
+                    data = part.get_payload(decode=True) or b""
+                except Exception:
+                    data = b""
+                found.append(
+                    Attachment(
+                        filename=part.get_filename() or "unnamed",
+                        content=data if isinstance(data, bytes) else b"",
+                        mime_type=ctype,
+                    )
+                )
+                return
+            if part.is_multipart():
+                try:
+                    children = part.iter_parts()
+                except Exception:
+                    return
+                for child in children:
+                    visit(child)
+
+        try:
+            visit(msg)
+        except Exception as e:
+            logger.warning(f"EML 첨부파일 순회 실패: {filename} ({e})")
+        return found
+
+    @staticmethod
+    def _display_names(header_values: list[Any]) -> list[str]:
+        """주소 헤더 → 표시 이름 리스트 (이름이 없으면 주소). 따옴표 안 쉼표도 안전하게 처리"""
+        from email.utils import getaddresses
+
+        try:
+            pairs = getaddresses([str(v) for v in header_values if v])
+        except Exception:
+            return []
+        out: list[str] = []
+        for name, addr in pairs:
+            label = (name or addr or "").strip()
+            if label:
+                out.append(label)
+        return out
 
     @staticmethod
     def _extract_eml_body(msg: Any) -> str:
@@ -945,11 +1217,22 @@ class DocumentParser:
         html_parts: list[str] = []
 
         try:
-            walker = msg.walk()
+            walker = list(msg.walk())
         except Exception:
             return ""
 
+        # 첨부된 메일(message/rfc822) 안의 본문은 부모 본문에 섞지 않는다 (첨부 단위로 처리)
+        nested: set[int] = set()
         for part in walker:
+            try:
+                if part is not msg and part.get_content_type() == "message/rfc822":
+                    nested.update(id(p) for p in part.walk() if p is not part)
+            except Exception:
+                continue
+
+        for part in walker:
+            if id(part) in nested:
+                continue
             try:
                 content_type = part.get_content_type()
                 if part.get_content_disposition() == "attachment":
@@ -1151,17 +1434,22 @@ class DocumentParser:
         except Exception as e:
             logger.debug(f"MSG cc 헤더 파싱 실패: {filename} ({e})")
 
-        # 첨부파일 목록 (각 첨부 처리 격리)
+        # 첨부파일 (각 첨부 처리 격리). v4: 원본 바이트도 보존한다.
+        # 첨부된 MSG(embedded message)는 바이트가 아니므로 파일명만 남긴다.
         attachment_filenames: list[str] = []
+        attachments: list[Attachment] = []
         try:
             for att in msg.attachments:
                 try:
-                    att_name = (
+                    att_name = str(
                         getattr(att, "longFilename", None)
                         or getattr(att, "shortFilename", None)
                         or "unnamed"
                     )
-                    attachment_filenames.append(str(att_name))
+                    attachment_filenames.append(att_name)
+                    data = getattr(att, "data", None)
+                    if isinstance(data, bytes):
+                        attachments.append(Attachment(filename=att_name, content=data))
                 except Exception as e:
                     logger.debug(f"MSG 첨부파일 읽기 실패 (skip): {filename} ({e})")
                     continue
@@ -1195,6 +1483,9 @@ class DocumentParser:
             "reply_to": reply_to,
             "has_attachments": len(attachment_filenames) > 0,
             "attachment_filenames": attachment_filenames,
+            "sender_name": (self._display_names([sender]) or [""])[0],
+            "recipient_names": self._display_names(recipients),
+            "cc_names": self._display_names(cc),
         }
 
         return ParsedDocument(
@@ -1203,6 +1494,7 @@ class DocumentParser:
             file_type="msg",
             page_count=0,
             metadata=metadata,
+            attachments=attachments,
         )
 
     @staticmethod

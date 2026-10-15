@@ -48,6 +48,18 @@ class Settings(BaseSettings):
     # False로 설정 시 기존 동작과 동일 (벤치마크 공정 비교·롤백용).
     email_clean_enabled: bool = True
 
+    # === v4 증거 단위 (src/units) ===
+    # 이 토큰 수(Qwen3 토크나이저 기준, 헤더 제외)를 넘는 단위는 줄·문단 경계에서 파트로 나눈다.
+    # XLSX 행 블록·DOCX 가상 페이지는 애초에 이 상한 이하로 만든다.
+    unit_max_part_tokens: int = 2048
+    # 같은 방에서 메시지 간격이 이 값(분)을 넘으면 새 채팅 세션
+    chat_session_gap_minutes: int = 30
+    # 토큰 수 기준 토크나이저 (HF 이름). 로컬 캐시·온라인 모두 실패하면 문자 수 근사로 떨어지고
+    # 그 사실을 TokenCounter.kind에 기록한다.
+    unit_token_hf_name: str = "Qwen/Qwen3-Embedding-4B"
+    # 헤더에 표시할 시각의 시간대 (메타데이터 date는 원본 오프셋 그대로 ISO 8601로 저장)
+    unit_header_tz: str = "Asia/Seoul"
+
     # === BM25 ===
     bm25_index_dir: str = "./data/bm25_index"
 

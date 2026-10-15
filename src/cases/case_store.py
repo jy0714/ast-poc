@@ -140,7 +140,7 @@ class CaseStore:
         Args:
             db_url: 커스텀 DB URL (테스트용). None이면 기본 data/ast.db 사용.
         """
-        from src.db.database import init_db, get_session_factory
+        from src.db.database import get_session_factory, init_db
 
         self._engine = init_db(db_url)
         self._session_factory = get_session_factory(self._engine)

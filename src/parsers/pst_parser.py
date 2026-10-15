@@ -68,9 +68,14 @@ class EmailMessage:
     body: str
     date: datetime | None
     attachments: list[Attachment] = field(default_factory=list)
+    # RFC 5322 Message-ID (transport header). 없으면 PST 내부 식별자로 대체된다.
     message_id: str = ""
     folder_path: str = ""
     html_body: str = ""
+    cc: list[str] = field(default_factory=list)
+    in_reply_to: str = ""
+    references: list[str] = field(default_factory=list)
+    pff_identifier: str = ""  # PST 내부 노드 ID (PST마다 달라서 중복 제거 키로 쓰지 않음)
 
     @property
     def has_attachments(self) -> bool:
@@ -88,6 +93,8 @@ class ChatMessage:
     chat_type: str = "1:1"
     participants: list[str] = field(default_factory=list)
     attachments: list[Attachment] = field(default_factory=list)
+    conversation_topic: str = ""  # MAPI ConversationTopic (방 이름)
+    folder_path: str = ""
 
 
 @dataclass
@@ -227,6 +234,8 @@ class PSTParser:
             date = _extract_pypff_date(message)
             recipients = _extract_pypff_recipients(message)
             attachments = _extract_pypff_attachments(message)
+            headers = _parse_transport_headers(message)
+            pff_id = str(message.identifier)
 
             return EmailMessage(
                 subject=subject,
@@ -236,8 +245,12 @@ class PSTParser:
                 html_body=html_body,
                 date=date,
                 attachments=attachments,
-                message_id=str(message.identifier),
+                message_id=headers.get("message_id") or pff_id,
                 folder_path=folder_path,
+                cc=headers.get("cc", []),
+                in_reply_to=headers.get("in_reply_to", ""),
+                references=headers.get("references", []),
+                pff_identifier=pff_id,
             )
         except Exception as e:
             logger.warning(f"이메일 변환 오류: {e}")
@@ -256,17 +269,19 @@ class PSTParser:
             recipients = _extract_pypff_recipients(message)
             participants = list(set(p for p in [sender] + recipients if p))
             chat_type = "group" if len(participants) > 2 else "1:1"
-            conv_id = f"{folder_path}__{'_'.join(sorted(participants))}"
+            topic = _safe_str(getattr(message, "conversation_topic", None)).strip()
             attachments = _extract_pypff_attachments(message)
 
             return ChatMessage(
                 sender=sender,
                 body=body,
                 timestamp=timestamp,
-                conversation_id=conv_id,
+                conversation_id=chat_room_key(folder_path, topic),
                 chat_type=chat_type,
                 participants=participants,
                 attachments=attachments,
+                conversation_topic=topic,
+                folder_path=folder_path,
             )
         except Exception as e:
             logger.warning(f"채팅 변환 오류: {e}")
@@ -350,6 +365,41 @@ def _strip_html(html: str) -> str:
     text = re.sub(r"&gt;", ">", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def chat_room_key(folder_path: str, topic: str) -> str:
+    """채팅 방 키 = 폴더 경로 + 대화 주제 (주제가 없으면 폴더 경로).
+
+    참여자 목록은 넣지 않는다 — 한 명만 들고 나도 다른 방으로 갈라지기 때문 (v4 V13).
+    """
+    return f"{folder_path}__{topic}" if topic else folder_path
+
+
+def _parse_transport_headers(message: Any) -> dict[str, Any]:
+    """pypff transport_headers(RFC 5322 헤더 원문)에서 Message-ID·Cc·In-Reply-To·References 추출"""
+    try:
+        raw = _safe_str(getattr(message, "transport_headers", None))
+    except Exception:
+        return {}
+    if not raw:
+        return {}
+    from email.parser import HeaderParser
+    from email.utils import getaddresses
+
+    try:
+        hdr = HeaderParser(policy=email.policy.default).parsestr(raw)
+    except Exception:
+        return {}
+    out: dict[str, Any] = {}
+    try:
+        out["message_id"] = str(hdr.get("message-id", "") or "").strip()
+        out["in_reply_to"] = str(hdr.get("in-reply-to", "") or "").strip()
+        out["references"] = str(hdr.get("references", "") or "").split()
+        cc_values = [str(v) for v in hdr.get_all("cc") or []]
+        out["cc"] = [name or addr for name, addr in getaddresses(cc_values) if name or addr]
+    except Exception:
+        pass
+    return out
 
 
 def _extract_pypff_date(message: Any) -> datetime | None:
@@ -438,11 +488,15 @@ def _eml_to_email(msg: email.message.Message, folder: str) -> EmailMessage | Non
                 pass
 
         attachments = _extract_eml_attachments(msg)
+        cc = [r.strip() for r in str(msg.get("cc", "") or "").split(",") if r.strip()]
+        references = str(msg.get("references", "") or "").split()
 
         return EmailMessage(
             subject=subject, sender=sender, recipients=recipients,
             body=body, html_body=html_body, date=date,
             attachments=attachments, message_id=message_id, folder_path=folder,
+            cc=cc, in_reply_to=str(msg.get("in-reply-to", "") or "").strip(),
+            references=references,
         )
     except Exception as e:
         logger.warning(f"eml 이메일 변환 오류: {e}")
@@ -475,13 +529,14 @@ def _eml_to_chat(msg: email.message.Message, folder: str) -> ChatMessage | None:
 
         participants = list(set([sender] + recipients))
         chat_type = "group" if len(participants) > 2 else "1:1"
-        conv_id = f"{folder}__{'_'.join(sorted(participants))}"
+        topic = str(msg.get("thread-topic", "") or "").strip()
         attachments = _extract_eml_attachments(msg)
 
         return ChatMessage(
             sender=sender, body=body, timestamp=date,
-            conversation_id=conv_id, chat_type=chat_type,
+            conversation_id=chat_room_key(folder, topic), chat_type=chat_type,
             participants=participants, attachments=attachments,
+            conversation_topic=topic, folder_path=folder,
         )
     except Exception as e:
         logger.warning(f"eml 채팅 변환 오류: {e}")
