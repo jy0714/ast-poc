@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     # === Ollama ===
     ollama_base_url: str = "http://localhost:11434"
     ollama_llm_model: str = "gemma4:e4b"
-    ollama_embed_model: str = "bge-m3"
+    ollama_embed_model: str = "qwen3-embedding:4b-q8_0"
 
     # === External LLM ===
     # 보안 모드 OFF 일 때 사용할 provider — "openai" | "anthropic"
@@ -82,6 +82,19 @@ class Settings(BaseSettings):
     # 매우 짧은 텍스트(N자 미만)를 길이가 큰 텍스트와 분리. attention softmax NaN /
     # padding overhead로 인한 5xx 예방.
     embed_short_text_threshold: int = 5
+    # v4 (지시서 §5.3): Qwen3 임베딩은 질의에만 영어 지시문을 붙이고 문서에는 붙이지 않는다.
+    embed_dim: int = 2560
+    # Ollama 요청 옵션 num_ctx. 파트는 2,048토큰 이하라 잘리지 않아야 하고, 넘으면 경고 로그를 남긴다.
+    embed_num_ctx: int = 8192
+    embed_query_task: str = (
+        "Given an internal audit investigation query, retrieve emails, chat messages, "
+        "and documents in any language that contain evidence relevant to the query"
+    )
+
+    # === 가짜 모델 (AST_FAKE_MODELS=1) ===
+    # 해시 기반 가짜 임베더와 토큰 겹침 기반 가짜 재순위기를 쓴다. GPU·Ollama 없이
+    # 단위·통합 테스트와 실험 selftest를 돌리기 위한 것이다.
+    ast_fake_models: bool = False
 
     # === OCR ===
     # 사용할 OCR 엔진. "tesseract" | "paddle" | "auto"(paddle 가능 시 우선, 아니면 tesseract).
@@ -133,12 +146,26 @@ class Settings(BaseSettings):
     # 벤치마크 경로는 VectorStoreService.search()를 직접 호출하므로 영향 없음.
     # 필요시 API 요청별 rerank=false 또는 환경변수 RERANK_ENABLED=false로 비활성화 가능.
     rerank_enabled: bool = True
-    rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    # qwen3 백엔드 모델. 개발 PC(Turing, BF16 미지원)는 Qwen/Qwen3-Reranker-0.6B + fp16
+    rerank_model: str = "Qwen/Qwen3-Reranker-4B"
+    # bge 백엔드 모델 (R9 비교 실험 전용)
+    rerank_bge_model: str = "BAAI/bge-reranker-v2-m3"
     rerank_top_k_candidates: int = 50  # reranker에 넘길 초기 후보 수
     rerank_top_n: int = 5  # reranker가 최종 선별할 결과 수
     # reranker top_n 선별 후 이 점수 이하 결과는 제거 (관련 없는 결과가 LLM에
     # 들어가 억지 답변을 만드는 것 방지). normalize=True 기준 0~1 점수.
     rerank_min_score: float = 0.1
+    # v4 (지시서 §5.4): 백엔드 qwen3(서비스 기본) | bge(R9 비교 실험 전용)
+    rerank_backend: str = "qwen3"
+    # 템플릿·질의·문서를 합친 토큰 상한. qwen3·bge 두 백엔드에 같은 값을 쓴다(R9 공정성).
+    rerank_max_length: int = 4096
+    rerank_dtype: str = "bf16"  # bf16 | fp16 | fp32
+    rerank_batch_size: int = 4
+    rerank_candidates: int = 30
+    rerank_instruction: str = (
+        "Judge whether this email, chat session, or document page contains evidence "
+        "relevant to the internal audit investigation query. The document may be in any language."
+    )
 
     # === 할루시네이션 제어 ===
     # LLM에 전달하기 전 content가 이 길이 미만인 소스 제거 (과도한 맥락 생성 방지).

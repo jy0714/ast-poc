@@ -4,11 +4,19 @@
 외부 API로 임베딩을 전송하지 않음.
 
 모델별 벡터 차원:
+- qwen3-embedding:4b: 2560 (v4 기본, 지시서 §5.3)
 - nomic-embed-text: 768
-- bge-m3: 1024
+- bge-m3: 1024 (v4에서는 R9 비교 프로필 전용)
 - mxbai-embed-large: 1024
 
-모델 변경 시 기존 컬렉션과 벡터 차원 불일치가 발생할 수 있으므로
+v4 규칙 (지시서 §5.3):
+- Qwen3 계열은 질의에만 영어 지시문(`EMBED_QUERY_TASK`)을 붙인다 — embed_query().
+  문서(증거 단위 파트)는 지시문 없이 embed_texts()로 보낸다.
+- 반환 벡터는 우리 쪽에서 다시 L2 정규화한다.
+- Ollama 요청에 num_ctx(EMBED_NUM_CTX)를 넘기고, 이를 넘는 입력은 경고 로그를 남긴다.
+- AST_FAKE_MODELS=1이면 Ollama 대신 해시 기반 가짜 임베더를 쓴다.
+
+모델 변경 시 기존 색인과 벡터 차원 불일치가 발생할 수 있으므로
 validate_dimension()으로 호환성을 검증해야 함.
 """
 
@@ -16,6 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
+import math
 import re
 import threading
 import time
@@ -41,6 +51,11 @@ _SERVER_ERROR_RETRY_WAIT = 2.0
 # bge-m3 컨텍스트 한도(`/api/ps` 응답상 4096 토큰)에 맞춘 보수적 절단.
 # 한글 평균 1자 ≈ 1토큰, 영문 1자 ≈ 0.3토큰. 헤더/마진 고려 2500자에서 절단.
 _MAX_CHARS_PER_TEXT = 2500
+
+# Qwen3 계열은 num_ctx(8,192) 기준으로 문자·바이트 안전망을 넓게 잡는다. 파트는 2,048토큰
+# 이하라 이 안전망에 걸리지 않아야 한다. 실제 토큰 초과는 _warn_over_context가 따로 경고한다.
+_QWEN3_CHARS_PER_CTX_TOKEN = 4
+_QWEN3_BYTES_PER_CTX_TOKEN = 6
 
 # 배치 실패 시 binary subdivide 최소 단위 — 이 이하로는 더 못 쪼갬
 _MIN_SUBDIVIDE_SIZE = 1
@@ -102,8 +117,11 @@ def _format_text_stats(stats: dict[str, object]) -> str:
         f"CJK={stats['cjk_pct']}% 기타={stats['other_pct']}%"
     )
 
-# 모델별 알려진 벡터 차원 (Ollama 기준)
+# 모델별 알려진 벡터 차원 (Ollama 기준). 태그가 붙은 이름은 가장 긴 키부터 부분 일치로 찾는다.
 KNOWN_DIMENSIONS: dict[str, int] = {
+    "qwen3-embedding:0.6b": 1024,
+    "qwen3-embedding:4b": 2560,
+    "qwen3-embedding:8b": 4096,
     "nomic-embed-text": 768,
     "bge-m3": 1024,
     "mxbai-embed-large": 1024,
@@ -114,6 +132,41 @@ KNOWN_DIMENSIONS: dict[str, int] = {
 
 class EmbeddingDimensionError(Exception):
     """임베딩 벡터 차원 불일치 에러"""
+
+
+def is_qwen3_embed_model(model: str) -> bool:
+    """Qwen3 임베딩 계열인지 (질의 지시문·넓은 컨텍스트 적용 대상)"""
+    name = model.lower()
+    return "qwen3-embedding" in name or "qwen3_embedding" in name
+
+
+def format_embed_query(query: str, task: str | None = None) -> str:
+    """Qwen3-Embedding 질의 형식 — `Instruct: {task}\nQuery:{query}` (모델 카드 형식)"""
+    return f"Instruct: {task or settings.embed_query_task}\nQuery:{query}"
+
+
+def l2_normalize(vec: list[float]) -> list[float]:
+    """L2 정규화. 영벡터는 그대로 돌려준다."""
+    norm = math.sqrt(sum(v * v for v in vec))
+    if norm == 0.0:
+        return list(vec)
+    return [v / norm for v in vec]
+
+
+def fake_embed(text: str, dim: int) -> list[float]:
+    """해시 기반 가짜 임베딩 (AST_FAKE_MODELS=1)
+
+    BM25 토크나이저 토큰을 부호 있는 해시 버킷에 더한 뒤 정규화한다. 토큰이 겹치는
+    텍스트끼리 코사인이 높게 나오므로 검색 흐름 테스트에 쓸 수 있다. 결정적이다.
+    """
+    from src.text.bm25_tokenizer import tokenize
+
+    vec = [0.0] * dim
+    for tok in tokenize(text) or [text.strip().lower()]:
+        h = hashlib.blake2b(tok.encode("utf-8"), digest_size=8).digest()
+        idx = int.from_bytes(h[:4], "little") % dim
+        vec[idx] += 1.0 if h[4] & 1 else -1.0
+    return l2_normalize(vec)
 
 
 class EmbeddingService:
@@ -167,15 +220,20 @@ class EmbeddingService:
         if self._cached_dimension is not None:
             return self._cached_dimension
 
+        if settings.ast_fake_models:
+            self._cached_dimension = settings.embed_dim
+            return self._cached_dimension
+
         # 알려진 모델이면 바로 반환
         if self.model in KNOWN_DIMENSIONS:
             self._cached_dimension = KNOWN_DIMENSIONS[self.model]
             return self._cached_dimension
 
-        # 모델명에 알려진 키가 포함되어 있는지 확인 (tag 포함 모델명 대응)
-        for known_model, dim in KNOWN_DIMENSIONS.items():
+        # 모델명에 알려진 키가 포함되어 있는지 확인 (tag 포함 모델명 대응).
+        # 긴 키부터 봐서 "qwen3-embedding:4b-q8_0"이 다른 키에 잘못 걸리지 않게 한다.
+        for known_model in sorted(KNOWN_DIMENSIONS, key=len, reverse=True):
             if known_model in self.model:
-                self._cached_dimension = dim
+                self._cached_dimension = KNOWN_DIMENSIONS[known_model]
                 return self._cached_dimension
 
         # 알 수 없는 모델 → probe
@@ -201,11 +259,50 @@ class EmbeddingService:
                 f"모델 변경 후에는 기존 케이스를 재인덱싱해야 합니다."
             )
 
-    def embed_text(self, text: str) -> list[float]:
-        """단일 텍스트 임베딩
+    @property
+    def is_qwen3(self) -> bool:
+        """Qwen3 임베딩 계열 여부"""
+        return is_qwen3_embed_model(self.model)
+
+    def format_query(self, query: str) -> str:
+        """질의 형식 — Qwen3 계열이면 지시문을 붙이고, 그 외(bge-m3 등)는 그대로"""
+        return format_embed_query(query) if self.is_qwen3 else query
+
+    def embed_query(self, query: str) -> list[float]:
+        """검색 질의 임베딩 (Qwen3면 지시문 포함, L2 정규화)
 
         Args:
-            text: 임베딩할 텍스트
+            query: 사용자 질의 원문
+
+        Returns:
+            정규화된 임베딩 벡터
+
+        Raises:
+            ConnectionError: Ollama 서버 연결·응답 실패
+        """
+        text = self.format_query(query)
+        if settings.ast_fake_models:
+            return fake_embed(text, self.get_dimension())
+        try:
+            resp = httpx.post(
+                f"{self.base_url}/api/embed",
+                json=self._payload([text]),
+                timeout=_REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            vec = resp.json()["embeddings"][0]
+        except Exception as e:
+            raise ConnectionError(
+                f"Ollama 질의 임베딩 실패 ({self.base_url}, 모델: {self.model}): {e}"
+            ) from e
+        self._last_success_at = time.time()
+        return l2_normalize(vec)
+
+    def embed_text(self, text: str) -> list[float]:
+        """검색 질의 임베딩 — embed_query()의 이전 이름 (기존 호출부 호환)
+
+        Args:
+            text: 질의 텍스트
 
         Returns:
             임베딩 벡터 (float 리스트)
@@ -213,13 +310,48 @@ class EmbeddingService:
         Raises:
             ConnectionError: Ollama 서버 연결 실패
         """
-        embeddings = self.get_langchain_embeddings()
-        try:
-            return embeddings.embed_query(text)
-        except Exception as e:
-            raise ConnectionError(
-                f"Ollama 임베딩 실패 ({self.base_url}, 모델: {self.model}): {e}"
-            ) from e
+        return self.embed_query(text)
+
+    def _payload(self, batch: list[str]) -> dict[str, object]:
+        """Ollama /api/embed 요청 본문 (num_ctx 옵션 포함)"""
+        return {
+            "model": self.model,
+            "input": batch,
+            "keep_alive": -1,
+            "options": {"num_ctx": settings.embed_num_ctx},
+        }
+
+    def _text_limits(self) -> tuple[int, int]:
+        """(최대 문자 수, 최대 바이트 수) — 모델 계열별 사전 절단 안전망"""
+        if self.is_qwen3:
+            ctx = settings.embed_num_ctx
+            return ctx * _QWEN3_CHARS_PER_CTX_TOKEN, ctx * _QWEN3_BYTES_PER_CTX_TOKEN
+        return _MAX_CHARS_PER_TEXT, settings.embed_max_bytes
+
+    def _warn_over_context(self, texts: list[str]) -> int:
+        """num_ctx를 넘는 입력(Ollama가 잘라 버림)을 세고 경고한다. Qwen3 계열만 검사.
+
+        문자 수가 num_ctx/2 이하인 텍스트는 토큰 수가 num_ctx를 넘지 않는다고 보고 건너뛴다.
+
+        Returns:
+            num_ctx를 넘는 입력 수
+        """
+        if not self.is_qwen3:
+            return 0
+        ctx = settings.embed_num_ctx
+        suspects = [t for t in texts if len(t) > ctx // 2]
+        if not suspects:
+            return 0
+        from src.units.tokens import get_token_counter
+
+        counter = get_token_counter()
+        over = [n for n in counter.count_many(suspects) if n > ctx]
+        if over:
+            logger.warning(
+                f"임베딩 입력 {len(over)}개가 num_ctx {ctx}토큰을 넘어 잘림 "
+                f"(최대 {max(over)}토큰, 토큰 기준 {counter.kind})"
+            )
+        return len(over)
 
     # 제어 문자 제거용 패턴 (탭 \x09, 줄바꿈 \x0a, 캐리지리턴 \x0d 는 유지)
     _CONTROL_CHAR_RE = re.compile(
@@ -328,6 +460,18 @@ class EmbeddingService:
             self._last_failed_diagnostics = {}
             return [[] for _ in texts]
 
+        if settings.ast_fake_models:
+            dim = self.get_dimension()
+            fake_vectors: list[list[float]] = [[] for _ in texts]
+            for orig_idx, t in cleaned:
+                fake_vectors[orig_idx] = fake_embed(t, dim)
+            self._last_failed_indices = []
+            self._last_failed_diagnostics = {}
+            self._last_success_at = time.time()
+            return fake_vectors
+
+        self._warn_over_context([t for _, t in cleaned])
+
         # === 2. 배치 분할 (적응형 + 길이 편차 관리) ===
         batch_size = self._initial_batch_size()
         max_concurrent = max(1, settings.embed_max_concurrent)
@@ -405,14 +549,14 @@ class EmbeddingService:
                 if vec_idx in failure_diag:
                     failed_orig_diag[orig_idx] = failure_diag[vec_idx]
                 continue
-            all_vectors[orig_idx] = v
+            all_vectors[orig_idx] = l2_normalize(v)
 
         if skipped:
             logger.warning(f"빈 텍스트 {skipped}개 스킵 (총 {len(texts)}개 중)")
         if truncated:
+            max_chars, max_bytes = self._text_limits()
             logger.warning(
-                f"긴 텍스트 {truncated}개 truncate ({_MAX_CHARS_PER_TEXT}자 또는 "
-                f"{settings.embed_max_bytes}B 초과)"
+                f"긴 텍스트 {truncated}개 truncate ({max_chars}자 또는 {max_bytes}B 초과)"
             )
 
         success_count = len(cleaned) - len(failed_orig_indices)
@@ -457,7 +601,7 @@ class EmbeddingService:
         if sanitized_count:
             logger.info(f"텍스트 전처리: {sanitized_count}/{len(texts)}개 정제됨")
 
-        max_bytes = settings.embed_max_bytes
+        max_chars, max_bytes = self._text_limits()
         cleaned: list[tuple[int, str]] = []
         truncated = 0
         for idx, t in enumerate(sanitized_texts):
@@ -466,8 +610,8 @@ class EmbeddingService:
                 continue
             was_truncated = False
             # 1차: 문자 수 컷
-            if len(stripped) > _MAX_CHARS_PER_TEXT:
-                stripped = stripped[:_MAX_CHARS_PER_TEXT]
+            if len(stripped) > max_chars:
+                stripped = stripped[:max_chars]
                 was_truncated = True
             # 2차: 바이트 수 컷 (한자/일본어/특수기호로 토큰 폭증 방지). utf-8 기준.
             if max_bytes > 0 and len(stripped.encode("utf-8", errors="ignore")) > max_bytes:
@@ -692,11 +836,7 @@ class EmbeddingService:
             ConnectionError with attribute _embed_error_type:
                 "timeout" | "http_500" | "http_4xx" | "connection"
         """
-        payload = {
-            "model": self.model,
-            "input": batch,
-            "keep_alive": -1,
-        }
+        payload = self._payload(batch)
 
         # === HTTP 호출을 한 번 시도하고 결과/에러 분류 ===
         async def attempt_post() -> tuple[list[list[float]], None] | tuple[None, tuple[str, Exception]]:

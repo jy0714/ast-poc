@@ -23,8 +23,9 @@ def _ollama_model_available() -> bool:
         req = urllib.request.Request("http://localhost:11434/api/tags", method="GET")
         with urllib.request.urlopen(req, timeout=2) as resp:
             data = json.loads(resp.read())
-            model_names = [m.get("name", "").split(":")[0] for m in data.get("models", [])]
-            return settings.ollama_embed_model in model_names
+            names = [m.get("name", "") for m in data.get("models", [])]
+            target = settings.ollama_embed_model
+            return any(n == target or n.split(":")[0] == target for n in names)
     except Exception:
         return False
 
@@ -38,8 +39,10 @@ requires_ollama = pytest.mark.skipif(
 class TestEmbeddingServiceInit:
     def test_default_settings(self):
         """기본 설정값으로 초기화"""
+        from src.utils.config import settings
+
         service = EmbeddingService()
-        assert service.model == "bge-m3"
+        assert service.model == settings.ollama_embed_model
         assert "localhost" in service.base_url
 
     def test_custom_settings(self):
@@ -214,7 +217,7 @@ class TestPrepareTexts:
 
         # 한자 1자 = 3바이트. 1000자 = 3000바이트지만 byte 한도 1000으로 낮추면 truncate
         monkeypatch.setattr(settings, "embed_max_bytes", 1000)
-        service = EmbeddingService()
+        service = EmbeddingService(model="bge-m3")
         text = "漢" * 1000  # 1000자, 3000바이트
         cleaned, skipped, truncated = service._prepare_texts([text])
         assert len(cleaned) == 1
@@ -444,3 +447,120 @@ class TestSubdivideDepthLimit:
             assert diag[i]["error_type"] in (
                 "subdivide_exhausted", "timeout"
             )
+
+
+# === v4: Qwen3 질의 지시문 / 정규화 / num_ctx / 가짜 모델 (지시서 §5.3, §5.10) ===
+
+
+class TestQwen3Embedding:
+    def test_qwen3_dimension_from_tag(self):
+        """qwen3-embedding:4b-q8_0 → 2560 (긴 키 우선 매칭)"""
+        assert EmbeddingService(model="qwen3-embedding:4b-q8_0").get_dimension() == 2560
+        assert EmbeddingService(model="qwen3-embedding:0.6b").get_dimension() == 1024
+        assert EmbeddingService(model="qwen3-embedding:8b-fp16").get_dimension() == 4096
+
+    def test_query_instruction_only_for_qwen3(self, monkeypatch):
+        """Qwen3만 질의에 지시문을 붙인다 (bge-m3는 그대로)"""
+        from src.utils.config import settings
+
+        monkeypatch.setattr(settings, "embed_query_task", "TASK")
+        q3 = EmbeddingService(model="qwen3-embedding:4b-q8_0")
+        assert q3.format_query("3월 정산") == "Instruct: TASK\nQuery:3월 정산"
+        assert EmbeddingService(model="bge-m3").format_query("3월 정산") == "3월 정산"
+
+    def test_documents_have_no_instruction(self, monkeypatch):
+        """문서(embed_texts) 경로에는 지시문을 붙이지 않는다"""
+        import asyncio
+
+        import httpx
+
+        sent: list[list[str]] = []
+
+        async def fake_post(self, url, json=None, timeout=None):
+            sent.append(json["input"])
+            assert json["options"]["num_ctx"] == 8192
+            req = httpx.Request("POST", url)
+            return httpx.Response(
+                200, json={"embeddings": [[3.0, 4.0] for _ in json["input"]]}, request=req
+            )
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+        service = EmbeddingService(model="qwen3-embedding:4b-q8_0")
+        vecs = asyncio.run(service.embed_texts_async(["[이메일] 헤더\n\n본문"]))
+        assert sent == [["[이메일] 헤더\n\n본문"]]
+        # 우리 쪽에서 다시 L2 정규화
+        assert vecs[0] == pytest.approx([0.6, 0.8])
+
+    def test_embed_query_payload_and_normalized(self, monkeypatch):
+        """embed_query는 지시문 포함 입력 + num_ctx로 요청하고 정규화해 돌려준다"""
+        import httpx
+
+        from src.utils.config import settings
+
+        monkeypatch.setattr(settings, "embed_query_task", "TASK")
+        captured: dict = {}
+
+        def fake_post(url, json=None, timeout=None):
+            captured.update(json)
+            return httpx.Response(
+                200, json={"embeddings": [[0.0, 2.0]]}, request=httpx.Request("POST", url)
+            )
+
+        monkeypatch.setattr(httpx, "post", fake_post)
+        vec = EmbeddingService(model="qwen3-embedding:4b-q8_0").embed_query("q")
+        assert captured["input"] == ["Instruct: TASK\nQuery:q"]
+        assert captured["options"] == {"num_ctx": settings.embed_num_ctx}
+        assert vec == pytest.approx([0.0, 1.0])
+
+    def test_qwen3_limits_wider_than_bge(self):
+        """Qwen3는 2,048토큰 파트가 사전 절단에 걸리지 않게 안전망을 넓게 잡는다"""
+        q3_chars, q3_bytes = EmbeddingService(model="qwen3-embedding:4b-q8_0")._text_limits()
+        bge_chars, _ = EmbeddingService(model="bge-m3")._text_limits()
+        assert q3_chars > bge_chars
+        service = EmbeddingService(model="qwen3-embedding:4b-q8_0")
+        text = "가" * 6000  # 한국어 약 2,000~6,000토큰 — 기존 2,500자 컷에 걸리던 길이
+        cleaned, _, truncated = service._prepare_texts([text])
+        assert truncated == 0 and len(cleaned[0][1]) == 6000
+
+    def test_over_context_warning_counts(self, monkeypatch):
+        """num_ctx를 넘는 입력 수를 센다 (토큰 수 근사 카운터로)"""
+        from src.units import tokens as tokens_mod
+        from src.utils.config import settings
+
+        monkeypatch.setattr(settings, "embed_num_ctx", 100)
+        monkeypatch.setattr(tokens_mod, "_counter", tokens_mod.TokenCounter(hf_name=None))
+        service = EmbeddingService(model="qwen3-embedding:4b-q8_0")
+        # 근사 2자/토큰: 400자 = 200토큰 > 100, 40자 = 20토큰
+        assert service._warn_over_context(["a" * 400, "b" * 40]) == 1
+        assert EmbeddingService(model="bge-m3")._warn_over_context(["a" * 400]) == 0
+
+
+class TestFakeEmbedding:
+    def test_fake_deterministic_normalized(self, monkeypatch):
+        """AST_FAKE_MODELS=1: 결정적·정규화·설정 차원, Ollama 호출 없음"""
+        import math
+
+        from src.utils.config import settings
+
+        monkeypatch.setattr(settings, "ast_fake_models", True)
+        monkeypatch.setattr(settings, "embed_dim", 64)
+        service = EmbeddingService(model="qwen3-embedding:4b-q8_0", base_url="http://localhost:19876")
+        v1 = service.embed_texts(["payment approval March"])[0]
+        v2 = service.embed_texts(["payment approval March"])[0]
+        assert v1 == v2 and len(v1) == 64
+        assert math.isclose(sum(x * x for x in v1), 1.0, rel_tol=1e-9)
+        assert len(service.embed_query("payment")) == 64
+        assert service.get_dimension() == 64
+
+    def test_fake_overlap_similarity(self, monkeypatch):
+        """토큰이 겹치는 텍스트끼리 코사인이 더 높다"""
+        from src.embeddings.embedding_service import fake_embed
+
+        a = fake_embed("결재 누락 정산 payment", 512)
+        b = fake_embed("정산 결재 payment approval", 512)
+        c = fake_embed("점심 메뉴 lunch", 512)
+
+        def cos(x, y):
+            return sum(i * j for i, j in zip(x, y, strict=True))
+
+        assert cos(a, b) > cos(a, c)
