@@ -686,6 +686,9 @@ class IndexingPipeline:
                 for p in batch:
                     text = embed_input(p, spec.header)
                     v = reuse.get((p.part_id, input_hash(text)))
+                    if v is None and not text.strip():
+                        # 입력이 빈 파트(본문 없는 메일의 nohdr 입력 등) → 영벡터 (cos 0, 색인에는 남김)
+                        v = np.zeros(embedder.get_dimension(), dtype=np.float16)
                     if v is not None:
                         vectors[p.part_id] = v
                         n_reused += 1

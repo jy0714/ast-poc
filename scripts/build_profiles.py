@@ -56,7 +56,7 @@ def build_profile(case_id: str, profile: str, batch: int, embedder: EmbeddingSer
         embedder: 임베딩 서비스 (테스트 주입용, 기본은 프로필 모델)
 
     Returns:
-        {profile, n_parts, embedded, reused, seconds}
+        {profile, n_parts, embedded, reused, empty_input, seconds}
 
     Raises:
         ProfileBuildError: 영구 실패 파트가 있을 때
@@ -69,6 +69,12 @@ def build_profile(case_id: str, profile: str, batch: int, embedder: EmbeddingSer
     rows: list[np.ndarray | None] = [
         reuse.get((p.part_id, input_hash(t))) for p, t in zip(idx.parts, texts, strict=True)
     ]
+    # 입력이 빈 파트(본문 없는 메일의 nohdr 입력) → 영벡터 (cos 0, 행은 유지)
+    n_empty = 0
+    for i, t in enumerate(texts):
+        if rows[i] is None and not t.strip():
+            rows[i] = np.zeros(embedder.get_dimension(), dtype=np.float16)
+            n_empty += 1
     todo = [i for i, r in enumerate(rows) if r is None]
     t0 = time.monotonic()
     failed: list[int] = []
@@ -96,7 +102,8 @@ def build_profile(case_id: str, profile: str, batch: int, embedder: EmbeddingSer
         "profile": profile,
         "n_parts": idx.n_parts,
         "embedded": len(todo),
-        "reused": idx.n_parts - len(todo),
+        "reused": idx.n_parts - len(todo) - n_empty,
+        "empty_input": n_empty,
         "seconds": round(time.monotonic() - t0, 1),
     }
 
