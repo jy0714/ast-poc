@@ -10,12 +10,17 @@ v3.x 의 파일 단위 langdetect 는 한국어 메일 약 950건(12%)을 vi·et
 
 from __future__ import annotations
 
+import re
 import threading
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
 from src.text.bm25_tokenizer import tokenize
+from src.units.email_clean import is_header_line
+
+# 주소·URL (mailto 포함) — 언어 판정 잡음
+_NOISE_RE = re.compile(r"<?mailto:[^\s>]+>?|https?://\S+|[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 
 # 후보 언어 (지시서 §5.1.8) — lingua Language 이름
 CANDIDATE_LANGUAGES = (
@@ -75,7 +80,16 @@ def detect(text: str) -> LangResult:
     Returns:
         LangResult
     """
-    lines = [ln.strip() for ln in (text or "").split("\n") if ln.strip()]
+    # 인용 헤더 줄(From:/To:/Cc: …)과 주소·URL은 본문 언어가 아니므로 판정에서 뺀다.
+    # 전달 메일은 인용을 지우지 않아서, 로마자 이름이 줄줄이 나오는 수신자 줄이
+    # 베트남어 등으로 오판정되어 주 언어를 뒤집는 문제가 있었다.
+    lines = []
+    for raw in (text or "").split("\n"):
+        if not raw.strip() or is_header_line(raw):
+            continue
+        cleaned = _NOISE_RE.sub(" ", raw).strip()
+        if cleaned:
+            lines.append(cleaned)
     weights = [len(tokenize(ln)) for ln in lines]
     if sum(weights) < MIN_TOKENS:
         return LangResult(UNDETERMINED, False, "", {})

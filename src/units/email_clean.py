@@ -97,6 +97,11 @@ _HEADER_LINE_RE = re.compile(
 )
 
 
+def is_header_line(line: str) -> bool:
+    """줄 맨 앞이 인용 헤더 레이블(From:/To:/보낸 사람:/发件人: …)인지"""
+    return bool(_HEADER_LINE_RE.match(line))
+
+
 def is_forwarded(subject: str) -> bool:
     """제목이 전달 접두어로 시작하는지 (RE: FW: 처럼 회신이 먼저면 False)"""
     return bool(subject) and bool(_FORWARD_SUBJECT_RE.match(subject))

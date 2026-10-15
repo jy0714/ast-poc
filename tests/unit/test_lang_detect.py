@@ -39,3 +39,20 @@ def test_mixed_threshold_boundary():
     assert r.lang == "ko"
     assert r.shares.get("en", 0) < MIXED_THRESHOLD
     assert not r.mixed
+
+
+def test_forwarded_header_lines_and_addresses_ignored():
+    # 전달 메일은 인용 헤더가 남는다. 로마자 이름이 줄줄이 나오는 수신자 줄이
+    # 베트남어 등으로 오판정되어 주 언어를 뒤집던 문제 (1단계 표본 검증에서 발견)
+    names = "; ".join(
+        f"김조현(Johyeon Kim{i}) 팀장 <johyeon{i}.kim@example.com<mailto:johyeon{i}.kim@example.com>>"
+        for i in range(30)
+    )
+    text = (
+        "매뉴얼 업데이트 현황 공유드립니다.\n금주 중 마무리 부탁드립니다.\n\n"
+        f"From: 박화성(Hwasung Park) 수석\nSent: Thursday, August 24, 2023 8:06 AM\nTo: {names}\n"
+        f"Cc: {names}\nSubject: DBPS Manual Up-date Guide\n\n업로드 부탁드립니다."
+    )
+    r = detect(text)
+    assert r.lang == "ko"
+    assert "vi" not in r.shares
