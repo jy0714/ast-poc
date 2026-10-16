@@ -15,7 +15,8 @@ class Settings(BaseSettings):
     )
 
     # === Ollama ===
-    ollama_base_url: str = "http://localhost:11434"
+    # localhost는 Windows에서 IPv6(::1) 우선이라 IPv4로만 듣는 Ollama 요청마다 ~2초 지연
+    ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_llm_model: str = "gemma4:12b"  # v4 (지시서 §5.9). 개발 PC .env는 gemma4:e4b
     ollama_embed_model: str = "qwen3-embedding:4b-q8_0"
 
@@ -30,6 +31,9 @@ class Settings(BaseSettings):
     # === LLM 생성 파라미터 ===
     # RAG에서 temperature가 높으면 할루시네이션 증가. 0.1로 결정적 답변 유도.
     llm_temperature: float = 0.1
+    # 로컬 LLM(Ollama) num_ctx. 지정하지 않으면 Ollama가 모델 최대(gemma4 262k)로 KV 캐시를 잡아
+    # 24GB에서 임베딩 모델을 밀어낸다. 출처 5단위 × 2,048토큰 + 프롬프트·답변 기준 16k.
+    llm_num_ctx: int = 16384
 
     # === Data Paths ===
     data_input_pst_dir: str = "./data/input/pst"

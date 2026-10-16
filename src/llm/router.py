@@ -97,6 +97,7 @@ class LLMRouter:
                 model=settings.ollama_llm_model,
                 base_url=settings.ollama_base_url,
                 temperature=settings.llm_temperature,
+                num_ctx=settings.llm_num_ctx,
             )
             logger.info(f"로컬 LLM 초기화: {settings.ollama_llm_model}")
 

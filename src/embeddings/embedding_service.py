@@ -205,6 +205,15 @@ class EmbeddingService:
         self._adaptive_batch_size: int | None = None
         # 마지막 임베딩 성공 시각 (epoch 초). 모니터링/stalled 판단용.
         self._last_success_at: float | None = None
+        # 질의 임베딩용 연결 재사용 클라이언트. httpx.post()는 호출마다 클라이언트·SSL 컨텍스트를
+        # 새로 만들어(Windows ~0.25초) 질의 지연(T7)을 키운다. httpx.Client는 스레드 안전.
+        self._client: httpx.Client | None = None
+
+    def _sync_client(self) -> httpx.Client:
+        """질의 임베딩용 httpx.Client (지연 생성, 인스턴스 수명 동안 재사용)"""
+        if self._client is None:
+            self._client = httpx.Client(timeout=_REQUEST_TIMEOUT)
+        return self._client
 
     def get_dimension(self) -> int:
         """현재 모델의 벡터 차원 반환
@@ -284,10 +293,9 @@ class EmbeddingService:
         if settings.ast_fake_models:
             return fake_embed(text, self.get_dimension())
         try:
-            resp = httpx.post(
+            resp = self._sync_client().post(
                 f"{self.base_url}/api/embed",
                 json=self._payload([text]),
-                timeout=_REQUEST_TIMEOUT,
             )
             resp.raise_for_status()
             vec = resp.json()["embeddings"][0]

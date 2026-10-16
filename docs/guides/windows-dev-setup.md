@@ -114,7 +114,7 @@ copy .env.prod.example .env
 OLLAMA_BASE_URL=http://<LLM서버IP>:11434
 
 # 또는 개발 PC에 Ollama를 설치한 경우
-OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_BASE_URL=http://127.0.0.1:11434
 
 # 외부 API (테스트용)
 OPENAI_API_KEY=sk-your-key-here

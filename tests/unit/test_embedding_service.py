@@ -43,7 +43,7 @@ class TestEmbeddingServiceInit:
 
         service = EmbeddingService()
         assert service.model == settings.ollama_embed_model
-        assert "localhost" in service.base_url
+        assert service.base_url == settings.ollama_base_url
 
     def test_custom_settings(self):
         """커스텀 설정값"""
@@ -500,13 +500,13 @@ class TestQwen3Embedding:
         monkeypatch.setattr(settings, "embed_query_task", "TASK")
         captured: dict = {}
 
-        def fake_post(url, json=None, timeout=None):
+        def fake_post(self, url, json=None, timeout=None):
             captured.update(json)
             return httpx.Response(
                 200, json={"embeddings": [[0.0, 2.0]]}, request=httpx.Request("POST", url)
             )
 
-        monkeypatch.setattr(httpx, "post", fake_post)
+        monkeypatch.setattr(httpx.Client, "post", fake_post)
         vec = EmbeddingService(model="qwen3-embedding:4b-q8_0").embed_query("q")
         assert captured["input"] == ["Instruct: TASK\nQuery:q"]
         assert captured["options"] == {"num_ctx": settings.embed_num_ctx}

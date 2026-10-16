@@ -64,7 +64,7 @@ copy .env.prod.example .env      # 운영 환경 (A5000 24GB)
 
 ```env
 # Ollama 주소 (로컬이면 그대로, 원격이면 IP 변경)
-OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_BASE_URL=http://127.0.0.1:11434
 
 # 보안 모드 (on=로컬 전용, off=외부 API 허용)
 SECURITY_MODE=on

@@ -46,6 +46,17 @@ class TestGetLLM:
                 router.get_llm(secure_mode=False)
                 mock_get.assert_called_once()
 
+    def test_ollama_passes_num_ctx(self, router):
+        """로컬 LLM에 LLM_NUM_CTX를 넘긴다 (미지정 시 Ollama가 모델 최대 컨텍스트로 VRAM을 잡음)"""
+        with patch("src.llm.router.settings") as mock_settings, \
+                patch("langchain_ollama.ChatOllama") as mock_chat:
+            mock_settings.ollama_llm_model = "test-model"
+            mock_settings.ollama_base_url = "http://localhost:11434"
+            mock_settings.llm_temperature = 0.1
+            mock_settings.llm_num_ctx = 16384
+            router._get_ollama_llm()
+            assert mock_chat.call_args.kwargs["num_ctx"] == 16384
+
     def test_unknown_provider_raises(self, router):
         """알 수 없는 provider면 ValueError"""
         with patch("src.llm.router.settings") as mock_settings:
