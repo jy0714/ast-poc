@@ -83,7 +83,7 @@ ollama pull gemma4:12b
 ### 환경 설정
 
 ```bash
-cp .env.prod.example .env   # A5000 24GB (gemma4:12b, Reranker-4B bf16, EMBED_BATCH_SIZE=16)
+cp .env.prod.example .env   # RTX 3090 24GB (gemma4:12b, Reranker-4B bf16, EMBED_BATCH_SIZE=16)
 # cp .env.dev.example .env  # 구 개발 PC RTX 2060 12GB (gemma4:e4b, Reranker-0.6B fp16)
 ```
 

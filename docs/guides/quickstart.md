@@ -12,7 +12,7 @@
 
 | 항목 | 최소 버전 | 확인 명령 |
 |------|----------|----------|
-| NVIDIA GPU | A5000 24GB 권장 | `nvidia-smi` |
+| NVIDIA GPU | RTX 3090 24GB 권장 | `nvidia-smi` |
 | Ollama | 0.3+ | `ollama --version` |
 
 Ollama 모델 다운로드 (최초 1회):
@@ -25,7 +25,7 @@ ollama pull gpt-oss:20b          # 운영 LLM (~12GB)
 ```
 
 > 개발 환경(RTX 3060 12GB) 기본값: `gemma4:e4b`
-> 운영 환경(A5000 24GB) 기본값: `gpt-oss:20b`
+> 운영 환경(RTX 3090 24GB) 기본값: `gpt-oss:20b`
 > `.env`에서 `OLLAMA_LLM_MODEL`로 변경 가능
 
 ---
@@ -57,7 +57,7 @@ pip install -e ".[dev]"
 # 환경변수 파일 생성 (개발/운영 중 선택)
 copy .env.dev.example .env       # 개발 환경 (3060 12GB)
 # 또는
-copy .env.prod.example .env      # 운영 환경 (A5000 24GB)
+copy .env.prod.example .env      # 운영 환경 (RTX 3090 24GB)
 ```
 
 `.env` 파일을 열어 필요시 수정:

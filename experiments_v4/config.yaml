@@ -1,6 +1,6 @@
 # AuditRAG v4 실행 목록 (지시서 §6.4)
 # k값(k_bm25/k_dense/rrf_k/rerank_candidates = 50/50/60/30)은 RetrievalConfig 기본값을 쓰고 여기서 덮어쓰지 않는다.
-case_id: "b392e4f27760"   # 평가 코퍼스 케이스 (A5000 재색인 후 확정)
+case_id: "b392e4f27760"   # 평가 코퍼스 케이스 (RTX 3090 재색인 후 확정)
 depth: 100
 pool_depth: 10
 seed: 20261015

@@ -1,7 +1,7 @@
 """Qwen3-Embedding / Qwen3-Reranker 입력 형식 — AuditRAG v4 참조 구현.
 
 형식은 Hugging Face 모델 카드(Qwen/Qwen3-Embedding-4B, Qwen/Qwen3-Reranker-4B)의 예제를 따른다.
-실제 모델로 동작 확인은 Claude Code 가 A5000 환경에서 수행한다(§5.3, §5.4 완료 기준).
+실제 모델로 동작 확인은 Claude Code 가 RTX 3090 환경에서 수행한다(§5.3, §5.4 완료 기준).
 
 - 임베딩: 질의에만 지시문을 붙이고, 문서(증거 단위)에는 붙이지 않는다. 지시문은 영어로 쓴다.
 - 재순위: system/user/assistant 템플릿에 <Instruct>/<Query>/<Document> 를 넣고,

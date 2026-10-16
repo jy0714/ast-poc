@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     service_index_profile: str = "hdr-qwen3"
 
     # === Embedding ===
-    embed_batch_size: int = 256  # VRAM에 따라 조정 (3060 12GB: 256, A5000 24GB: 512+)
+    embed_batch_size: int = 256  # VRAM에 따라 조정 (3060 12GB: 256, RTX 3090 24GB: 512+)
     embed_max_concurrent: int = 2  # 동시 배치 요청 수 (Ollama OLLAMA_NUM_PARALLEL과 맞춰 조정)
     # 한 super-batch 전체에 허용되는 최대 시간(초). 초과 시 재시도/분할을 즉시 중단하고
     # 성공한 것만 반환 — "어떤 상황에서도 인덱싱이 N초 이상 같은 배치에 멈춰있으면 안 된다"

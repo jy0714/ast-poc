@@ -4,7 +4,7 @@
 
 **AST (Audit Support Tool) PoC — v4 (AuditRAG)**
 내부 이메일(PST·EML), Teams 채팅(PST), 문서(PDF/DOCX/PPTX/XLSX/XLS/HTML/EML/MSG)를 통합 검색하는 로컬 RAG 시스템.
-1TB PoC 규모 · GPU: NVIDIA RTX A5000 24GB (2026-10-16부터 개발·실험 PC) · 케이스 기반 운영
+1TB PoC 규모 · GPU: NVIDIA GeForce RTX 3090 24GB (2026-10-16부터 개발·실험 PC) · 케이스 기반 운영
 
 v4 구현 지시서: `docs/CLAUDE_CODE_v4_구현지시서.md` (v4.1). 참조 코드: `docs/v4/ref/`.
 
@@ -20,7 +20,7 @@ v4 구현 지시서: `docs/CLAUDE_CODE_v4_구현지시서.md` (v4.1). 참조 코
 상태 머신 (`src/cases/case_store.py` `_VALID_TRANSITIONS`):
 `CREATED → INDEXING → READY → ARCHIVED`, 각 상태에서 `ERROR` 전이 가능, `ARCHIVED → CREATED` 복구 가능.
 
-### GPU 자원 (A5000 24GB)
+### GPU 자원 (RTX 3090 24GB)
 - 서비스 조건: 임베딩(qwen3-embedding 4B q8) + 재순위(Qwen3-Reranker-4B bf16) + LLM(gemma4:12b) 동시 적재
 - 검색 실험(R1~R9)은 LLM을 내린 상태에서 실행 (`ollama stop gemma4:12b`, 지시서 V11)
 
@@ -141,13 +141,13 @@ docker compose up --build                             # Docker 전체 스택
 
 ## 현재 상태 (2026-10-16 기준)
 
-- **브랜치**: `v4-simplify` (지시서 1~5단계 완료, 체크포인트 3 삭제 반영). 다음: 6단계(A5000 실데이터)
-- **테스트**: tests 527 + experiments_v4 11
-- **GPU**: RTX A5000 24GB. **드라이버 462.31(CUDA 11.2)이 낮아 torch(cu126)·Ollama 모두 GPU 미사용 상태** → CUDA 12.x 지원 드라이버로 업데이트 필요
+- **브랜치**: `v4-simplify` (지시서 1~5단계 완료, 체크포인트 3 삭제 반영). 다음: 6단계(RTX 3090 실데이터)
+- **테스트**: tests 528 + experiments_v4 11
+- **GPU**: NVIDIA GeForce RTX 3090 24GB, 드라이버 617.42(CUDA 13.4). 임베딩 일치 통과(cos 0.995), 세 모델 동시 적재 ≈24.1/24.6GB (`LLM_NUM_CTX=16384` 필수)
 - **케이스**: b392e4f27760, 8cdadf2ab3db 모두 ARCHIVED → 재색인 전 ARCHIVED→CREATED 전환 필요
 
 ### 환경 설정 파일
-- `.env.prod.example` — A5000 24GB (gemma4:12b, Qwen3-Reranker-4B bf16, EMBED_BATCH_SIZE=16)
+- `.env.prod.example` — RTX 3090 24GB (gemma4:12b, Qwen3-Reranker-4B bf16, EMBED_BATCH_SIZE=16)
 - `.env.dev.example` — 구 개발 PC RTX 2060 12GB (gemma4:e4b, Reranker-0.6B fp16, EMBED_BATCH_SIZE=8)
 - 설정은 모르는 키를 무시(`extra="ignore"`)하므로 v3 키가 남은 `.env`도 기동된다
 

@@ -103,7 +103,7 @@ pip install -e ".[dev]"
 # 개발 환경 (3060 12GB 권장)
 copy .env.dev.example .env
 
-# 또는 운영 환경 (A5000 24GB)
+# 또는 운영 환경 (RTX 3090 24GB)
 copy .env.prod.example .env
 ```
 
@@ -172,7 +172,7 @@ ollama pull bge-m3
 # LLM (개발 환경)
 ollama pull gemma4:e4b
 
-# LLM (운영 환경, A5000 24GB)
+# LLM (운영 환경, RTX 3090 24GB)
 ollama pull gpt-oss:20b
 ```
 

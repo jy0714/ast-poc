@@ -5,7 +5,7 @@
 AST(Audit Support Tool)는 내부 커뮤니케이션(이메일, Teams 채팅)과 문서를 통합 검색하는 로컬 RAG 시스템.
 
 - **규모**: 1TB PoC (본 프로젝트 4TB 대응 설계)
-- **GPU**: 개발 NVIDIA RTX 3060 12GB / 운영 NVIDIA A5000 24GB
+- **GPU**: 개발 NVIDIA RTX 3060 12GB / 운영 NVIDIA GeForce RTX 3090 24GB
 - **운영**: 케이스 단위 격리 · Phase A/B 순차 실행
 
 ## 케이스 라이프사이클

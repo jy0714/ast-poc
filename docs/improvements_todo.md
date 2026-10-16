@@ -32,7 +32,7 @@
 
 **제안**
 - HuggingFace TEI(`ghcr.io/huggingface/text-embeddings-inference`)는 bge-m3 전용 최적화.
-- 동일 GPU(A5000 24GB)에서 Ollama 대비 처리량 2~3배 보고됨 (벤치마크 필요).
+- 동일 GPU(RTX 3090 24GB)에서 Ollama 대비 처리량 2~3배 보고됨 (벤치마크 필요).
 
 **고려 사항**
 - `EmbeddingService.embed_texts()` 내부 HTTP 호출 부분만 교체하면 적용 가능.

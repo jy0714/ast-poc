@@ -10,7 +10,7 @@
         [--candidates 30] [--doc-tokens 2000] [--out result.json]
 
 개발 PC(RTX 2060): RERANK_MODEL=Qwen/Qwen3-Reranker-0.6B RERANK_DTYPE=fp16
-A5000: RERANK_MODEL=Qwen/Qwen3-Reranker-4B RERANK_DTYPE=bf16 (세 모델 동시 적재는 ev4 latency에서)
+RTX 3090: RERANK_MODEL=Qwen/Qwen3-Reranker-4B RERANK_DTYPE=bf16 (세 모델 동시 적재는 ev4 latency에서)
 """
 
 from __future__ import annotations

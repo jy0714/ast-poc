@@ -1,6 +1,6 @@
 # v4 모델 오프라인 반입 절차
 
-사내망(A5000)에서 인터넷 없이 v4 모델을 쓰기 위한 절차다. 인터넷이 되는 PC에서 받아
+사내망(RTX 3090 PC)에서 인터넷 없이 v4 모델을 쓰기 위한 절차다. 인터넷이 되는 PC에서 받아
 복사한 뒤, 사내 PC에서는 오프라인 모드로만 연다. 조사 데이터는 이 과정에서 밖으로 나가지 않는다.
 
 ## 필요한 모델
@@ -55,7 +55,7 @@ OLLAMA_EMBED_MODEL=qwen3-embedding:4b-q8_0
 ```bash
 ollama list                                   # 세 태그가 보이는지
 python -m scripts.check_models                # 임베딩 차원 2560, 재순위 점수 방향, 시간·VRAM
-python -m scripts.check_embed_parity <case_id> --dtype bf16   # 평균 코사인 ≥ 0.99 (A5000, 1회)
+python -m scripts.check_embed_parity <case_id> --dtype bf16   # 평균 코사인 ≥ 0.99 (RTX 3090, 1회)
 ```
 
 `HF_HUB_OFFLINE=1`에서 모델 로드가 실패하면 `hub\models--…\snapshots\` 아래에 가중치(`*.safetensors`)가
