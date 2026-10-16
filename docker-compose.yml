@@ -12,11 +12,8 @@ services:
       - .env
     environment:
       - OLLAMA_BASE_URL=http://ollama:11434
-      - CHROMA_PERSIST_DIR=/app/data/vectordb
-      - BM25_INDEX_DIR=/app/data/bm25_index
+      - INDEX_DIR=/app/data/index
     depends_on:
-      chromadb:
-        condition: service_started
       ollama:
         condition: service_started
     restart: unless-stopped
@@ -32,20 +29,6 @@ services:
       - "80:80"
     depends_on:
       - backend
-    restart: unless-stopped
-    networks:
-      - ast-network
-
-  # === ChromaDB ===
-  chromadb:
-    image: chromadb/chroma:latest
-    ports:
-      - "8100:8000"
-    volumes:
-      - chroma-data:/chroma/chroma
-    environment:
-      - IS_PERSISTENT=TRUE
-      - ANONYMIZED_TELEMETRY=FALSE
     restart: unless-stopped
     networks:
       - ast-network
@@ -73,7 +56,6 @@ services:
       - ast-network
 
 volumes:
-  chroma-data:
   ollama-models:
 
 networks:

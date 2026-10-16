@@ -28,8 +28,8 @@ RUN pip install --no-cache-dir . && \
 COPY src/ src/
 
 # Data directories (ocr_cache 포함 — 페이지 hash → 인식 텍스트 디스크 캐시)
-RUN mkdir -p data/input/pst data/input/documents data/processed data/vectordb \
-    data/cases data/bm25_index data/ocr_cache
+RUN mkdir -p data/input/pst data/input/documents data/processed data/index \
+    data/cases data/ocr_cache
 
 EXPOSE 8000
 

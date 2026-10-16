@@ -196,7 +196,7 @@ class EmbeddingService:
         self._langchain_embeddings = None
         self._cached_dimension: int | None = None
         # 가장 최근 embed_texts 호출에서 영구 실패한 텍스트의 원본 인덱스
-        # → 호출측(VectorStoreService)이 retry 큐 저장 시 사용
+        # → 호출측(인덱싱 파이프라인)이 failed_embeddings 저장 시 사용
         self._last_failed_indices: list[int] = []
         # 영구 실패 텍스트의 진단 정보 (failed_embeddings JSONL에 저장하기 위함).
         # 인덱스별 dict: {error_type, error_message, text_stats}

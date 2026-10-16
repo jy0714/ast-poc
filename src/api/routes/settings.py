@@ -30,8 +30,8 @@ class SettingsResponse(BaseModel):
     ollama_llm_model: str
     ollama_embed_model: str
     openai_model: str
-    chunk_size_docs: int
-    chat_window_minutes: int
+    unit_max_part_tokens: int
+    chat_session_gap_minutes: int
     rerank_enabled: bool
 
 
@@ -50,8 +50,8 @@ async def get_settings():
         ollama_llm_model=settings.ollama_llm_model,
         ollama_embed_model=settings.ollama_embed_model,
         openai_model=settings.openai_model,
-        chunk_size_docs=settings.chunk_size_docs,
-        chat_window_minutes=settings.chat_window_minutes,
+        unit_max_part_tokens=settings.unit_max_part_tokens,
+        chat_session_gap_minutes=settings.chat_session_gap_minutes,
         rerank_enabled=settings.rerank_enabled,
     )
 

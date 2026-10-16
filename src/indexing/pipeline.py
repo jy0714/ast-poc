@@ -229,7 +229,7 @@ class IndexingProgress:
     total_chunks: int = 0
     parsed_chunks: int = 0  # 파싱→chunk_queue로 전달된 누적 청크 수
     embedded_chunks: int = 0  # GPU 임베딩 완료된 청크 수 (저장 큐로 넘어간 청크)
-    stored_chunks: int = 0  # ChromaDB 저장 완료된 청크 수
+    stored_chunks: int = 0  # 색인에 저장된 파트 수
     errors: list[str] = field(default_factory=list)
     started_at: datetime | None = None
     completed_at: datetime | None = None

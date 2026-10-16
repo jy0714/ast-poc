@@ -6,8 +6,8 @@
 3. 참여자 추출    (예: "홍길동이 보낸", "김철수 관련")
 4. 작성자/수정자 추출 (예: "홍길동이 만든 견적서", "alice가 수정한 문서",
                        "작성자: 김철수", "modified by bob")
-   → 메타필터(author, last_modified_by)로 변환되어 ChromaDB 검색에 적용됨.
-   ChromaDB는 정확 매칭이므로 메타데이터의 author와 정확히 일치해야 함
+   → 메타필터(author, last_modified_by)로 변환되어 케이스 색인 필터(filter_mask)에 적용됨.
+   정확 매칭이므로 메타데이터의 author와 정확히 일치해야 함
    (Office/PDF는 일반적으로 사용자 이름 그대로 저장됨).
 5. 검색 쿼리 정제  (필터 표현 제거 후 핵심 질의만 남김)
 
@@ -171,7 +171,7 @@ def parse_query(query: str, year_hint: int = 2025) -> ParsedQuery:
         filters["participants"] = participants
         # 참여자 이름은 검색 쿼리에 남겨둠 (검색에도 유용)
 
-    # 4. 작성자/수정자 추출 (ChromaDB 메타필터로 직결)
+    # 4. 작성자/수정자 추출 (색인 메타필터로 직결)
     authors = _extract_authors(original)
     if authors:
         filters["author"] = authors[0] if len(authors) == 1 else authors
@@ -212,7 +212,7 @@ def _extract_date_filters(text: str, year_hint: int) -> dict[str, str]:
     """날짜 범위 필터 추출
 
     반환 키:
-    - _date_gte / _date_lte: 범위 질의용. _build_chroma_filter에서
+    - _date_gte / _date_lte: 범위 질의용. 필터 변환 단계에서
       date_sortable 필드에 대한 $gte/$lte 조건으로 변환됨.
       기존 date_range_start/date_range_end 키와 이름이 달라야 메타 필드와 충돌하지 않음
       (메타의 date_range_start는 스레드 시작 날짜, 여기서의 의미는 검색 범위 하한).

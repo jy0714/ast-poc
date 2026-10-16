@@ -10,6 +10,8 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        # v3 설정(CHROMA_*, BM25_INDEX_DIR 등)이 남은 기존 .env 도 기동되게 모르는 키는 무시한다
+        extra="ignore",
     )
 
     # === Ollama ===
@@ -29,24 +31,14 @@ class Settings(BaseSettings):
     # RAG에서 temperature가 높으면 할루시네이션 증가. 0.1로 결정적 답변 유도.
     llm_temperature: float = 0.1
 
-    # === ChromaDB ===
-    chroma_persist_dir: str = "./data/vectordb"
-    chroma_collection_name: str = "ast_documents"
-
     # === Data Paths ===
     data_input_pst_dir: str = "./data/input/pst"
     data_input_docs_dir: str = "./data/input/documents"
     data_processed_dir: str = "./data/processed"
 
-    # === Chunking ===
-    chunk_size_docs: int = 1000
-    chunk_overlap_docs: int = 200
-    chat_window_minutes: int = 30
-    email_thread_max_chars: int = 2000  # 스레드 청크 최대 문자 수
+    # === 이메일 정제 ===
     # 이메일 본문에서 인용 답장 체인, 서명, 법적 면책고지를 제거하여
-    # 임베딩 벡터가 보일러플레이트에 오염되는 것을 방지. EmailChunker에만 적용,
-    # FixedSizeChunker(벤치마크 baseline)에는 영향 없음.
-    # False로 설정 시 기존 동작과 동일 (벤치마크 공정 비교·롤백용).
+    # 임베딩 벡터가 보일러플레이트에 오염되는 것을 방지 (src/units/email_clean.py).
     email_clean_enabled: bool = True
 
     # === v4 증거 단위 (src/units) ===
@@ -60,9 +52,6 @@ class Settings(BaseSettings):
     unit_token_hf_name: str = "Qwen/Qwen3-Embedding-4B"
     # 헤더에 표시할 시각의 시간대 (메타데이터 date는 원본 오프셋 그대로 ISO 8601로 저장)
     unit_header_tz: str = "Asia/Seoul"
-
-    # === BM25 ===
-    bm25_index_dir: str = "./data/bm25_index"
 
     # === v4 케이스 색인 (src/index) ===
     # 케이스별 폴더 색인 (units.jsonl + BM25 + 프로필별 dense.npy). 기존 vectordb/bm25_index는 건드리지 않는다.
@@ -141,28 +130,17 @@ class Settings(BaseSettings):
     # v4 retrieve(): 검색기별 상위 단위 수 (RRF 입력). 지시서 §5.6 고정값.
     search_k_bm25: int = 50
     search_k_dense: int = 50
-    # 아래 search_top_k·rrf_min_score·rrf_*_weight·rerank_top_k_candidates는 v3 Chroma 경로 전용.
-    # v4 경로는 쓰지 않으며 체크포인트 3에서 삭제한다.
-    search_top_k: int = 20  # 하이브리드 검색 초기 후보 수
     rrf_k: int = 60  # Reciprocal Rank Fusion 파라미터
-    rrf_min_score: float = 0.0141  # RRF 최소 스코어 임계값 (한쪽만 10위 이하 필터링)
-    # 가중 RRF: 벡터/BM25 기여를 가중치로 조절. 기본 1.0/1.0은 기존 동등 합산과
-    # 수학적으로 동일 (no-op). 감사 용도에서 엔티티/금액/고유명 검색이 많으면
-    # BM25 가중을 올리는 게 유리할 수 있음. 실제 튜닝은 평가셋 Recall@K 측정 후 결정.
-    rrf_vector_weight: float = 1.0
-    rrf_bm25_weight: float = 1.0
 
     # === Reranker ===
     # cross-encoder reranker가 검색 품질에 가장 큰 영향을 주므로 기본 ON.
     # FlagEmbedding 미설치 시 런타임에 경고 로그 후 rerank 건너뜀 (graceful degradation).
-    # 벤치마크 경로는 VectorStoreService.search()를 직접 호출하므로 영향 없음.
     # 필요시 API 요청별 rerank=false 또는 환경변수 RERANK_ENABLED=false로 비활성화 가능.
     rerank_enabled: bool = True
     # qwen3 백엔드 모델. 개발 PC(Turing, BF16 미지원)는 Qwen/Qwen3-Reranker-0.6B + fp16
     rerank_model: str = "Qwen/Qwen3-Reranker-4B"
     # bge 백엔드 모델 (R9 비교 실험 전용)
     rerank_bge_model: str = "BAAI/bge-reranker-v2-m3"
-    rerank_top_k_candidates: int = 50  # reranker에 넘길 초기 후보 수
     rerank_top_n: int = 5  # reranker가 최종 선별할 결과 수
     # reranker top_n 선별 후 이 점수 이하 결과는 제거 (관련 없는 결과가 LLM에
     # 들어가 억지 답변을 만드는 것 방지). normalize=True 기준 0~1 점수.

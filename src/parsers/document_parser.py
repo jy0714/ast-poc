@@ -146,7 +146,7 @@ class DocumentParser:
         Args:
             ocr_languages: OCR 언어 설정 ('+' 구분자, tesseract 형식).
                 None이면 settings.ocr_languages 사용.
-            detect_language: 파일 단위 langdetect 메타(language) 계산 여부.
+            detect_language: 파일 단위 언어 메타(language) 계산 여부.
                 v4 단위 빌더는 단위별 lingua 감지를 쓰므로 False로 끈다.
         """
         from src.utils.config import settings as _settings
@@ -1557,14 +1557,15 @@ class DocumentParser:
     def _detect_language(text: str) -> str:
         """텍스트 언어 감지
 
-        langdetect 사용. 감지 실패 시 'unknown' 반환.
+        단위 언어 감지와 같은 lingua 판정(src.units.lang_detect)을 쓴다. 판정 불가면 'unknown'.
         """
         if not text or len(text.strip()) < 20:
             return "unknown"
 
         try:
-            from langdetect import detect
+            from src.units.lang_detect import UNDETERMINED, detect
 
-            return detect(text)
+            lang = detect(text).lang
+            return "unknown" if lang == UNDETERMINED else lang
         except Exception:
             return "unknown"

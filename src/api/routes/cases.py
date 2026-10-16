@@ -175,11 +175,10 @@ async def update_case_sources(case_id: str, request: CaseUpdateSources):
 
 @router.delete("/{case_id}", response_model=DeleteResponse)
 async def delete_case(case_id: str):
-    """케이스 삭제 (케이스 색인 data/index/{case_id} + v3 벡터DB 잔여 데이터 + 메타데이터 삭제)
+    """케이스 삭제 (케이스 색인 data/index/{case_id} + 메타데이터 삭제)
 
     인덱싱이 실행 중이면 워커를 먼저 cancel하고 종료될 때까지 대기.
-    그렇지 않으면 워커가 삭제 직후 stale 청크를 vectorstore에 다시 upsert하는
-    race가 발생할 수 있음.
+    그렇지 않으면 워커가 삭제 직후 색인을 다시 쓰는 race가 발생할 수 있음.
     """
     store = get_store()
 
@@ -207,16 +206,6 @@ async def delete_case(case_id: str):
         case_index.delete(case_id)
     except Exception as e:
         logger.warning(f"케이스 색인 삭제 실패 (무시): {e}")
-
-    # v3 Chroma에 남은 케이스 청크 삭제 (체크포인트 3에서 Chroma 제거 시 함께 삭제)
-    try:
-        from src.vectorstore.vector_store import VectorStoreService
-
-        vs = VectorStoreService(case_id=case_id)
-        deleted = vs.delete_case_data()
-        logger.info(f"벡터DB 케이스 데이터 삭제: case={case_id}, {deleted}개 청크")
-    except Exception as e:
-        logger.warning(f"벡터DB 케이스 데이터 삭제 실패 (무시): {e}")
 
     # 케이스 디렉토리 삭제
     store.delete(case_id)

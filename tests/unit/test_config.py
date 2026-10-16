@@ -31,9 +31,8 @@ def test_security_mode_toggle():
     assert s.is_secure_mode is False
 
 
-def test_chunk_settings():
-    """청킹 설정 기본값 확인"""
+def test_unit_settings():
+    """증거 단위 설정 기본값 확인"""
     s = Settings(_env_file=None)
-    assert s.chunk_size_docs == 1000
-    assert s.chunk_overlap_docs == 200
-    assert s.chat_window_minutes == 30
+    assert s.unit_max_part_tokens == 2048
+    assert s.chat_session_gap_minutes == 30

@@ -1,6 +1,6 @@
 """키워드 기반 토픽 추출 (한국어/영어, LLM 의존 없음) — 대시보드용 단위 메타데이터
 
-`src/chunkers/metadata_enricher.py`에서 이동 (v4: chunkers/ 는 체크포인트 3 이후 삭제).
+`src/chunkers/metadata_enricher.py`(v3, 삭제됨)에서 이동.
 """
 
 from __future__ import annotations

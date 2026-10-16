@@ -7,7 +7,6 @@
 component는 모듈 이름(`__name__`)의 두 번째 세그먼트로 자동 추출:
 - `src.embeddings.embedding_service` → `embeddings.log`
 - `src.llm.router`                   → `llm.log`
-- `src.vectorstore.vector_store`     → `vectorstore.log`
 - `src.indexing.pipeline`            → `indexing.log`
 """
 
