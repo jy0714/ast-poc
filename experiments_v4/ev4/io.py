@@ -2,7 +2,8 @@
 
 경로는 모두 실험 루트(기본 `experiments_v4/`) 기준이다. selftest 는 임시 폴더를 루트로 쓴다.
 
-- 질의: `data/queries.jsonl` — {qid, text, type, split, query_lang, note}
+- 질의: `data/queries.jsonl` — {qid, text, type, split, query_lang, target_evidence_lang, source_question, note}
+  (`target_evidence_lang`·`source_question` 은 선택 필드, v4.2 Q2)
 - 최종 qrels: `data/qrels.txt` — `qid 0 unit_id grade`
 - 실행: `runs/{RUN}.trec` (test), `runs/dev/{RUN}.trec` (dev) — `qid Q0 unit_id rank score RUN`
 """
@@ -20,6 +21,15 @@ import yaml
 from ev4 import EXPERIMENTS_ROOT
 
 QUERY_TYPES = ("exact", "semantic", "relation")
+# 논문 부록 [표 A-1] 이름·정의 (v4.2 Q1) — README·판정 기준 문서·표 머리에 그대로 쓴다
+QUERY_TYPE_NAMES = {"exact": "정확 일치", "semantic": "정황", "relation": "관계"}
+QUERY_TYPE_DEFS = {
+    "exact": ("인명, 업체명, 계약번호, 금액, 특정 문구처럼 본문이나 파일명에 같은 문자열로 나타나는 대상을 찾는 질의",
+              "문자열 일치(BM25)"),
+    "semantic": ("본문에 직접 드러나지 않는 행위, 회피 표현, 사내 은어를 서술하여 찾는 질의", "의미 유사도(밀집 검색)"),
+    "relation": ("특정 인물이나 업체 사이 소통, 또는 날짜 선후를 조건으로 하는 질의", "메타데이터 헤더와 의미 유사도"),
+}
+LOCAL_EXCLUDE_LANGS = ("ko", "en")  # 이 둘이 아닌 증거 언어 = 현지어 증거
 SPLITS = ("test", "dev")
 GRADES = (0, 1, 2)
 
@@ -181,6 +191,13 @@ class Query:
     split: str
     query_lang: str = "ko"
     note: str = ""
+    target_evidence_lang: str = ""  # 질의를 쓸 때 예상한 결정적 증거 언어 (선택, v4.2 Q2)
+    source_question: str = ""       # 부록 A 감사인 질문 번호, 예 "1.3" (선택)
+
+    @property
+    def expects_local_evidence(self) -> bool:
+        """판정 전 기준 현지어 증거 질의 여부 (target_evidence_lang 이 ko·en 이 아님)"""
+        return bool(self.target_evidence_lang) and self.target_evidence_lang not in LOCAL_EXCLUDE_LANGS
 
 
 def read_queries(path: Path, split: str | None = None) -> list[Query]:
@@ -203,6 +220,8 @@ def read_queries(path: Path, split: str | None = None) -> list[Query]:
             split=str(r.get("split", "test")).strip(),
             query_lang=str(r.get("query_lang", "ko")).strip() or "ko",
             note=str(r.get("note", "")),
+            target_evidence_lang=str(r.get("target_evidence_lang") or "").strip(),
+            source_question=str(r.get("source_question") or "").strip(),
         )
         if not q.qid or not q.text:
             raise ConfigError(f"{path}:{i}: qid·text 가 비어 있습니다")
@@ -215,6 +234,39 @@ def read_queries(path: Path, split: str | None = None) -> list[Query]:
         seen.add(q.qid)
         out.append(q)
     return [q for q in out if split is None or q.split == split]
+
+
+# 입력 검증 기준 (v4.2 Q2) — 벗어나면 경고만 하고 실행은 계속한다
+TEST_RANGE = (60, 80)
+DEV_COUNT = 20
+MIN_PER_TYPE = 20
+MIN_LOCAL_EVIDENCE = 5
+
+
+def query_warnings(queries: list[Query]) -> list[str]:
+    """질의 구성 경고 목록 (질의 문장은 넣지 않는다)
+
+    - test 질의가 60~80개 범위를 벗어남
+    - dev 가 20개가 아님
+    - test 에서 유형별 질의가 20개 미만인 유형
+    - target_evidence_lang 이 ko·en 이 아닌 test 질의가 5개 미만
+    """
+    test = [q for q in queries if q.split == "test"]
+    dev = [q for q in queries if q.split == "dev"]
+    out: list[str] = []
+    if not TEST_RANGE[0] <= len(test) <= TEST_RANGE[1]:
+        out.append(f"test 질의 {len(test)}개 — 권장 범위 {TEST_RANGE[0]}~{TEST_RANGE[1]}개를 벗어남")
+    if len(dev) != DEV_COUNT:
+        out.append(f"dev 질의 {len(dev)}개 — {DEV_COUNT}개가 아님")
+    for t in QUERY_TYPES:
+        n = sum(1 for q in test if q.type == t)
+        if n < MIN_PER_TYPE:
+            out.append(f"test {t}({QUERY_TYPE_NAMES[t]}) 질의 {n}개 — {MIN_PER_TYPE}개 미만")
+    n_local = sum(1 for q in test if q.expects_local_evidence)
+    if n_local < MIN_LOCAL_EVIDENCE:
+        out.append(f"현지어 증거 예상(target_evidence_lang ∉ ko·en) test 질의 {n_local}개 — "
+                   f"{MIN_LOCAL_EVIDENCE}개 미만")
+    return out
 
 
 # ─────────────────────────── qrels ───────────────────────────

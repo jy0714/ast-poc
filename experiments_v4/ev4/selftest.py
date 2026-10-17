@@ -124,8 +124,15 @@ def _write_inputs(root: Path) -> None:
     src_cfg.update({"case_id": CASE_ID, "latency_warmup": 1, "latency_repeats": 2})
     (root / "config.yaml").write_text(yaml.safe_dump(src_cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
     write_jsonl(root / "data" / "queries.jsonl",
-                ({"qid": q, "text": t, "type": ty, "split": sp, "query_lang": "ko", "note": ""}
+                ({"qid": q, "text": t, "type": ty, "split": sp, "query_lang": "ko",
+                  "target_evidence_lang": _TARGET_LANG.get(q, "ko"), "source_question": _SOURCE_Q.get(q, ""),
+                  "note": ""}
                  for q, t, ty, sp, _g2, _g1 in _QUERIES))
+
+
+# 선택 필드 (v4.2 Q2) — 예상 증거 언어, 부록 A 질문 번호
+_TARGET_LANG = {"q02": "en", "q07": "zh", "q08": "en", "q10": "en", "d02": "en"}
+_SOURCE_Q = {"q01": "1.3", "q02": "1.8", "q05": "1.8", "q07": "2.6", "q10": "1.10"}
 
 
 def _grade(qid: str, uid: str) -> int:
@@ -167,9 +174,37 @@ def _adjudicate(path: Path) -> int:
     return len(rows)
 
 
-EXPECTED = ["T1_corpus.md", "tables.md", "per_query.csv", "comparisons.csv", "T7_latency.md",
-            "F1_failures.csv", "F1_summary.md", "E1_env.md", "env.json", "agreement.json"]
-TABLE_HEADINGS = ["## T2", "## T3", "## T4", "## T5", "## T6"]
+EXPECTED = ["T0_queries.md", "T1_corpus.md", "tables.md", "per_query.csv", "comparisons.csv", "T7_latency.md",
+            "F1_failures.csv", "F1_summary.md", "E1_env.md", "env.json", "agreement.json",
+            "J1_pool.md", "J3_agreement.md", "J4_qrels.md"]
+TABLE_HEADINGS = ["## T2", "## T3", "## 사전 지정 비교", "## T4", "## T5", "## T6"]
+
+
+def _check_v42(cfg: Any, ev: dict[str, Any]) -> None:
+    """v4.2 T4 — T0, T3 유형별 열, T5 Recall@10, E2 차이 CI, F1 category_hint·요약, J2 문서"""
+    from ev4.pool import CRITERIA_NAME
+
+    t0 = (cfg.results_dir / "T0_queries.md").read_text(encoding="utf-8")
+    assert "## T0 질의 구성" in t0 and "현지어 증거(정답)" in t0 and "source_question" in t0, "T0 형식 이상"
+    assert "| 계 | 10 | 3 |" in t0, "T0 계 행(평가용 10, 개발용 3) 이상"
+    tables = (cfg.results_dir / "tables.md").read_text(encoding="utf-8")
+    assert all(f"{t} 차이" in tables for t in ("exact", "semantic", "relation")), "T3 유형별 열 없음"
+    t5 = tables.split("## T5", 1)[1].split("## T6", 1)[0]
+    assert "Recall@10" in t5.splitlines()[0], "T5 지표가 Recall@10 이 아님"
+    assert "증거 영어" in t5 and "교차 언어 질의" in t5, "T5 행 이상"
+    assert "†사례 수준" in tables, "작은 그룹 표시(E8) 없음"
+    with open(cfg.results_dir / "comparisons.csv", encoding="utf-8-sig", newline="") as f:
+        comps = list(csv.DictReader(f))
+    assert len(comps) == 11 and all(c["ci_lo"] and c["ci_hi"] and c["p_check"] for c in comps), "E2 CI 없음"
+    assert all(float(c["ci_lo"]) <= float(c["diff"]) <= float(c["ci_hi"]) for c in comps), "E2 CI 가 차이를 안 감쌈"
+    with open(cfg.results_dir / "F1_failures.csv", encoding="utf-8-sig", newline="") as f:
+        frows = list(csv.DictReader(f))
+    assert frows and "category_hint" in frows[0], "F1 category_hint 열 없음"
+    assert any(r["category_hint"] for r in frows), "F1 힌트가 하나도 없음"
+    f1 = (cfg.results_dir / "F1_summary.md").read_text(encoding="utf-8")
+    assert "| 분류 | 단위 수 | 비율" in f1, "F1 요약 형식 이상"
+    assert (cfg.judgments_dir / CRITERIA_NAME).exists(), "판정 기준 문서 없음"
+    assert ev["n_l2"] == 9, "등급 2 단위 있는 질의 수 이상 (q09 제외)"
 
 
 def selftest(root: Path | None = None, keep: bool = False, log: Callable[[str], None] = print) -> dict[str, Any]:
@@ -185,7 +220,7 @@ def selftest(root: Path | None = None, keep: bool = False, log: Callable[[str], 
     Raises:
         AssertionError: 산출물이 빠졌을 때
     """
-    from ev4 import corpus, evaluate, failures, judgments, latency, pool, run
+    from ev4 import corpus, evaluate, failures, judgments, latency, pool, querystats, run
     from ev4 import env as env_mod
 
     tmp = Path(root) if root else Path(tempfile.mkdtemp(prefix="ev4_selftest_"))
@@ -196,6 +231,7 @@ def selftest(root: Path | None = None, keep: bool = False, log: Callable[[str], 
             _write_inputs(tmp)
             cfg = load_config(root=tmp)
             corpus.build_corpus(cfg, log=log)
+            querystats.write_t0(cfg, read_queries(cfg.queries_path), log=log)
             dev = read_queries(cfg.queries_path, split="dev")
             test = read_queries(cfg.queries_path, split="test")
             run.run_all(cfg, dev, ["R2", "R4", "R6", "R8", "R9"], "dev", log=log)
@@ -227,7 +263,8 @@ def selftest(root: Path | None = None, keep: bool = False, log: Callable[[str], 
             absent = [h for h in TABLE_HEADINGS if h not in tables]
             assert not absent, f"tables.md 에 표 없음: {absent}"
             assert len(ev["comparisons"]) == len(cfg.comparison_pairs()), "비교 수 불일치"
-            log(f"[selftest] 통과 — T1~T7·F1·E1 생성 ({cfg.results_dir})")
+            _check_v42(cfg, ev)
+            log(f"[selftest] 통과 — T0~T7·J1·J3·J4·F1·E1 생성 ({cfg.results_dir})")
             return {"root": str(tmp), "results": sorted(p.name for p in cfg.results_dir.iterdir()),
                     "evaluation": ev, "failures": fl}
     finally:

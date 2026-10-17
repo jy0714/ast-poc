@@ -61,3 +61,44 @@ def percentile(values: Iterable[float], q: float) -> float:
     """백분위 (q: 0~100). 값이 없으면 NaN"""
     v = _clean(values)
     return float(np.percentile(v, q)) if v.size else math.nan
+
+
+def paired_bootstrap_ci(
+    a: Iterable[float], b: Iterable[float], n: int = 1000, alpha: float = 0.05, seed: int = 0
+) -> tuple[float, float, float]:
+    """짝지은 bootstrap — 같은 질의 재표집에서 (b − a) 평균 차이 → (diff, lo, hi) (v4.2 E2)
+
+    a·b 는 같은 질의 순서로 정렬된 질의별 값이다. 둘 중 하나가 NaN 인 질의는 뺀다.
+    """
+    x, y = np.asarray(list(a), dtype=float), np.asarray(list(b), dtype=float)
+    if x.shape != y.shape:
+        raise ValueError(f"짝지은 값의 길이가 다릅니다 ({x.size} vs {y.size})")
+    keep = ~(np.isnan(x) | np.isnan(y))
+    d = (y - x)[keep]
+    if d.size == 0:
+        return (math.nan, math.nan, math.nan)
+    rng = np.random.default_rng(seed)
+    means = d[rng.integers(0, d.size, size=(n, d.size))].mean(axis=1)
+    lo, hi = np.percentile(means, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    return (float(d.mean()), float(lo), float(hi))
+
+
+def paired_randomization_p(
+    a: Iterable[float], b: Iterable[float], n: int = 10000, seed: int = 0
+) -> float:
+    """양측 짝지은 무작위화 검정 p (질의마다 두 실행 값을 무작위로 맞바꿈 = 차이 부호 뒤집기)
+
+    ranx fisher 와 같은 귀무가설·통계량(|평균 차이|)이다. 단일 스레드 numpy 난수라
+    seed 가 같으면 결과가 같다. ranx 결과의 교차 확인용으로 함께 보고한다 (v4.2 E3).
+    """
+    x, y = np.asarray(list(a), dtype=float), np.asarray(list(b), dtype=float)
+    keep = ~(np.isnan(x) | np.isnan(y))
+    d = (y - x)[keep]
+    if d.size == 0:
+        return math.nan
+    obs = abs(d.mean())
+    rng = np.random.default_rng(seed)
+    signs = rng.choice((-1.0, 1.0), size=(n, d.size))
+    perm = np.abs((signs * d).mean(axis=1))
+    # 부동소수 오차로 관측값과 같은 순열을 놓치지 않게 작은 허용 오차를 둔다
+    return float((perm >= obs - 1e-12).mean())

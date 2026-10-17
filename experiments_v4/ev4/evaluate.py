@@ -1,11 +1,17 @@
-"""평가 — ranx 지표·bootstrap CI·fisher 검정(Holm)·분해 → results/ (지시서 §6.6, §6.8 T2~T6)
+"""평가 — ranx 지표·bootstrap CI·fisher 검정(Holm)·분해 → results/ (지시서 §6.6, §6.8 T2~T6, v4.2 E1~E8)
 
 - 평가 대상: test 질의 중 qrels 에 등급 ≥1 단위가 하나라도 있는 질의(관련 단위 없는 질의는
   recall 이 정의되지 않으므로 제외하고 수를 표에 적는다).
 - `recall@10-l2` 는 등급 2 단위가 있는 질의만으로 계산한다(ranx 는 없는 질의를 0 으로 센다).
+  증거 언어 분해(T5·T6 언어 행)도 등급 2 단위가 있는 질의만 쓴다(v4.2 J4).
 - nDCG 는 ranx `ndcg`(선형 이득 1·2).
 - 유의성: ranx.compare(stat_test="fisher", n_permutations=10000), 주 지표 nDCG@10,
-  config `comparisons` 전체를 한 계열로 Holm 보정.
+  config `comparisons` 전체(11개)를 한 계열로 Holm 보정.
+  ranx 0.3.21 fisher 는 |평균 차이| 로 비교하는 양측 검정이다
+  (ranx/statistical_tests/fisher_randomization_test.py 31·39행). 교차 확인용으로 단일 스레드
+  양측 무작위화 검정(stats.paired_randomization_p)을 함께 낸다(p_check).
+- 차이 CI: 같은 질의 재표집에서 두 실행의 차이를 계산하는 짝지은 bootstrap 95% (v4.2 E2).
+- 질의 5개 미만 그룹은 값을 내되 `†사례 수준` 표시를 붙인다 (v4.2 E8).
 """
 
 from __future__ import annotations
@@ -17,15 +23,33 @@ from collections import Counter
 from collections.abc import Callable
 from typing import Any
 
-from ev4.io import ExperimentConfig, Qrels, Run, read_qrels, read_queries, read_run
-from ev4.stats import bootstrap_ci, holm
+from ev4.io import (
+    QUERY_TYPE_NAMES,
+    QUERY_TYPES,
+    ExperimentConfig,
+    Qrels,
+    Run,
+    read_qrels,
+    read_queries,
+    read_run,
+)
+from ev4.stats import bootstrap_ci, holm, paired_bootstrap_ci, paired_randomization_p
 
 METRICS = ["ndcg@10", "recall@10", "mrr@10", "recall@10-l2", "recall@100"]
 PRIMARY = "ndcg@10"
 L2_METRIC = "recall@10-l2"
+LANG_METRIC = "recall@10"  # T5·T6 언어 행 지표 (v4.2 E6)
 N_PERMUTATIONS = 10000
 N_BOOTSTRAP = 1000
-DEFAULT_BREAKDOWN_RUNS = ["R2", "R4", "R6", "R8", "R9"]
+SMALL_N = 5
+SMALL_MARK = "†사례 수준"
+NOHDR_RUNS = ["R1", "R3", "R5", "R7"]
+HDR_RUNS = ["R2", "R4", "R6", "R8"]
+BREAKDOWN_RUNS = ["R2", "R4", "R6", "R8"]
+EXTRA_RUN = "R9"
+METRIC_LABELS = {"ndcg@10": "nDCG@10", "recall@10": "Recall@10", "recall@10-l2": "Recall@10(등급 2)",
+                 "mrr@10": "MRR@10", "recall@100": "Recall@100"}
+T2_METRICS = ["ndcg@10", "recall@10", "recall@10-l2", "mrr@10", "recall@100"]
 _EMPTY = "__no_hit__"
 
 
@@ -90,7 +114,7 @@ def per_query_scores(qrels: Qrels, run: Run, qids: list[str], l2_qids: list[str]
 
 
 def fisher_p(qrels: Qrels, run_a: Run, run_b: Run, qids: list[str], seed: int) -> float:
-    """두 실행의 nDCG@10 fisher 무작위화 검정 p (양측)"""
+    """두 실행의 nDCG@10 fisher 무작위화 검정 p (ranx, 양측)"""
     from ranx import compare
 
     rep = compare(_ranx_qrels(qrels, qids), [_ranx_run(run_a, qids, "A"), _ranx_run(run_b, qids, "B")],
@@ -99,14 +123,14 @@ def fisher_p(qrels: Qrels, run_a: Run, run_b: Run, qids: list[str], seed: int) -
     return float(rep.to_dict()["A"]["comparisons"]["B"][PRIMARY])
 
 
-# ─────────────────────────── 표 ───────────────────────────
+# ─────────────────────────── 형식 ───────────────────────────
 
 
 def _mean(vals: list[float]) -> float:
     return sum(vals) / len(vals) if vals else math.nan
 
 
-def _f(x: float, nd: int = 3) -> str:
+def _f(x: float | None, nd: int = 3) -> str:
     return "–" if x is None or (isinstance(x, float) and math.isnan(x)) else f"{x:.{nd}f}"
 
 
@@ -115,21 +139,43 @@ def _ci(ci: tuple[float, float, float]) -> str:
     return "–" if math.isnan(m) else f"{m:.3f} [{lo:.3f}, {hi:.3f}]"
 
 
-def _p(p: float) -> str:
+def _dci(ci: tuple[float, float, float]) -> str:
+    m, lo, hi = ci
+    return "–" if math.isnan(m) else f"{m:+.3f} [{lo:+.3f}, {hi:+.3f}]"
+
+
+def _p(p: float | None) -> str:
     if p is None or math.isnan(p):
         return "–"
     return "<0.001" if p < 0.001 else f"{p:.3f}"
 
 
+def _n(n: int) -> str:
+    """질의 수 (5개 미만이면 †사례 수준 표시)"""
+    return f"{n} {SMALL_MARK}" if 0 < n < SMALL_N else str(n)
+
+
+def _run_label(cfg: ExperimentConfig, run: str) -> str:
+    spec = cfg.runs.get(run, {})
+    parts = [x for x, on in (("BM25", spec.get("use_bm25")), ("밀집", spec.get("use_dense"))) if on]
+    label = "+".join(parts) if len(parts) < 2 else "혼합(RRF)"
+    return label + (" + 재순위" if spec.get("rerank") else "")
+
+
+# ─────────────────────────── 실행 ───────────────────────────
+
+
 def evaluate_all(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> dict[str, Any]:
-    """T2~T6·per_query.csv·comparisons.csv 생성
+    """T0(판정 후)·T2~T6·per_query.csv·comparisons.csv 생성
 
     Returns:
-        {n_queries, n_l2, runs: {run: {metric: (mean, lo, hi)}}, comparisons: [...]}
+        {n_queries, n_l2, excluded, runs: {run: {metric: (mean, lo, hi)}}, comparisons: [...]}
     """
+    from ev4.querystats import write_t0
     from src.index import case_index
 
-    queries = {q.qid: q for q in read_queries(cfg.queries_path, split="test")}
+    all_queries = read_queries(cfg.queries_path)
+    queries = {q.qid: q for q in all_queries if q.split == "test"}
     qrels_all = read_qrels(cfg.qrels_path)
     qrels = {q: v for q, v in qrels_all.items() if q in queries}
     qids = sorted(q for q, v in qrels.items() if any(g > 0 for g in v.values()))
@@ -147,6 +193,7 @@ def evaluate_all(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> d
     ev_lang = {q: evidence_lang([_lang(u) for u, g in qrels[q].items() if g == 2]) for q in qids}
     cross = {q: ("n/a" if ev_lang[q] == "n/a" else ("yes" if lang_bucket(queries[q].query_lang) != ev_lang[q] else "no"))
              for q in qids}
+    write_t0(cfg, all_queries, {q: ev_lang[q] == "other" for q in l2_qids}, log=log)
 
     run_names = list(cfg.runs)
     runs: dict[str, Run] = {}
@@ -162,41 +209,50 @@ def evaluate_all(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> d
         for name, s in scores.items()
     }
 
-    # 비교·Holm
+    # 사전 지정 비교 (E2·E3) — 차이 = B − A, Holm 은 전체 한 계열
     comps: list[dict[str, Any]] = []
     for fam, a, b in cfg.comparison_pairs():
         if a not in runs or b not in runs:
             continue
-        ma, mb = _mean(list(scores[a][PRIMARY].values())), _mean(list(scores[b][PRIMARY].values()))
-        comps.append({"family": fam, "A": a, "B": b, "metric": PRIMARY, "mean_A": ma, "mean_B": mb,
-                      "diff": mb - ma, "p": fisher_p(qrels, runs[a], runs[b], qids, cfg.seed)})
-    adj = holm({f"{c['A']}-{c['B']}-{i}": c["p"] for i, c in enumerate(comps)})
-    for i, c in enumerate(comps):
-        c["p_holm"] = adj[f"{c['A']}-{c['B']}-{i}"]
+        va = [scores[a][PRIMARY][q] for q in qids]
+        vb = [scores[b][PRIMARY][q] for q in qids]
+        d, lo, hi = paired_bootstrap_ci(va, vb, n=N_BOOTSTRAP, seed=cfg.seed)
+        comps.append({"family": fam, "A": a, "B": b, "comparison": f"{a}→{b}", "metric": PRIMARY,
+                      "n": len(qids), "mean_A": _mean(va), "mean_B": _mean(vb), "diff": d, "ci_lo": lo, "ci_hi": hi,
+                      "p": fisher_p(qrels, runs[a], runs[b], qids, cfg.seed),
+                      "p_check": paired_randomization_p(va, vb, n=N_PERMUTATIONS, seed=cfg.seed)})
+    for key in ("p", "p_check"):
+        adj = holm({str(i): c[key] for i, c in enumerate(comps)})
+        for i, c in enumerate(comps):
+            c[f"{key}_holm"] = adj[str(i)]
 
     res_dir = cfg.results_dir
     res_dir.mkdir(parents=True, exist_ok=True)
     _write_per_query(res_dir / "per_query.csv", scores, queries, qids, ev_lang, cross)
+    comp_cols = ["family", "comparison", "A", "B", "metric", "n", "mean_A", "mean_B", "diff", "ci_lo", "ci_hi",
+                 "p", "p_holm", "p_check", "p_check_holm"]
     with open(res_dir / "comparisons.csv", "w", encoding="utf-8-sig", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["family", "A", "B", "metric", "mean_A", "mean_B", "diff", "p", "p_holm"])
+        w = csv.DictWriter(f, fieldnames=comp_cols, extrasaction="ignore")
         w.writeheader()
         w.writerows(comps)
 
-    bd_runs = [r for r in cfg.extra.get("breakdown_runs", DEFAULT_BREAKDOWN_RUNS) if r in runs]
+    groups_type = {t: [q for q in qids if queries[q].type == t] for t in QUERY_TYPES}
     md = [
         "# 평가 결과",
         "",
         f"- test 질의 {len(queries)}건 중 평가 {len(qids)}건 (관련 단위 없는 질의 {len(no_rel)}건 제외"
         + (f": {', '.join(no_rel)}" if no_rel else "") + f") · 등급 2 단위 있는 질의 {len(l2_qids)}건",
-        f"- 실행 깊이 {cfg.depth} · bootstrap {N_BOOTSTRAP}회 95% CI · fisher {N_PERMUTATIONS}회 · "
-        f"Holm 보정 {len(comps)}개 비교(주 지표 {PRIMARY})",
+        f"- 실행 깊이 {cfg.depth} · bootstrap {N_BOOTSTRAP}회 95% CI(차이는 짝지은 bootstrap) · "
+        f"fisher {N_PERMUTATIONS}회 양측 · Holm 보정 {len(comps)}개 비교(주 지표 {METRIC_LABELS[PRIMARY]})",
+        f"- {SMALL_MARK}: 질의 {SMALL_N}개 미만 그룹 (값은 내되 일반화하지 않는다)",
         "",
     ]
-    md += _t2(summary, run_names, len(qids), len(l2_qids))
-    md += _t3(comps)
-    md += _t4(scores, queries, qids, bd_runs)
-    md += _t5(scores, qids, ev_lang, cross, bd_runs)
-    md += _t6(scores, summary, comps, qids, ev_lang)
+    md += _t2(cfg, summary, len(qids), len(l2_qids))
+    md += _t3(cfg, comps, scores, groups_type)
+    md += _comparisons_table(comps)
+    md += _t4(scores, qids, groups_type)
+    md += _t5(scores, l2_qids, ev_lang, cross)
+    md += _t6(scores, comps, qids, l2_qids, ev_lang, cross)
     (res_dir / "tables.md").write_text("\n".join(md) + "\n", encoding="utf-8")
     out = {
         "n_queries": len(qids), "n_l2": len(l2_qids), "excluded": no_rel,
@@ -218,65 +274,119 @@ def _write_per_query(path, scores, queries, qids, ev_lang, cross) -> None:
                             *[_f(s[m].get(q, math.nan), 4) if q in s[m] else "" for m in METRICS]])
 
 
-def _t2(summary, run_names, n, n_l2) -> list[str]:
-    lines = ["## T2 사다리 표 (평균 [95% CI])", "",
-             "| 실행 | " + " | ".join(METRICS) + " |", "|---|" + "---|" * len(METRICS)]
-    for r in run_names:
-        if r in summary:
-            lines.append(f"| {r} | " + " | ".join(_ci(summary[r][m]) for m in METRICS) + " |")
-    lines += ["", f"n = {n} (recall@10-l2: n = {n_l2})", ""]
+# ─────────────────────────── 표 ───────────────────────────
+
+
+def _t2(cfg, summary, n, n_l2) -> list[str]:
+    """T2 (논문 [표 12]) — 헤더 없음 R1·R3·R5·R7 / 헤더 있음 R2·R4·R6·R8, 평균 [95% CI]"""
+    heads = [METRIC_LABELS[m] + (f" (n={n_l2})" if m == L2_METRIC else "") for m in T2_METRICS]
+    lines = ["## T2 검색 구성별 성능 (평균 [95% CI])", "",
+             "| 헤더 | 실행 | 구성 | " + " | ".join(heads) + " |", "|---|---|---|" + "---|" * len(heads)]
+    for hdr, rs in (("없음", NOHDR_RUNS), ("있음", HDR_RUNS)):
+        for r in rs:
+            if r in summary:
+                lines.append(f"| {hdr} | {r} | {_run_label(cfg, r)} | "
+                             + " | ".join(_ci(summary[r][m]) for m in T2_METRICS) + " |")
+    lines += ["", f"n = {n} (Recall@10(등급 2): 등급 2 단위가 있는 질의 n = {n_l2})", ""]
     return lines
 
 
-def _t3(comps) -> list[str]:
-    lines = ["## T3 헤더 효과 및 비교 전체 (nDCG@10, B − A)", "",
-             "| 계열 | A | B | A 평균 | B 평균 | 차이 | p | p(Holm) |", "|---|---|---|---:|---:|---:|---:|---:|"]
-    for c in sorted(comps, key=lambda c: (c["family"] != "header", c["family"])):
-        lines.append(f"| {c['family']} | {c['A']} | {c['B']} | {_f(c['mean_A'])} | {_f(c['mean_B'])} | "
-                     f"{c['diff']:+.3f} | {_p(c['p'])} | {_p(c['p_holm'])} |")
-    return [*lines, ""]
+def _type_diff(scores, a: str, b: str, qs: list[str], metric: str = PRIMARY) -> float:
+    return _mean([scores[b][metric][q] - scores[a][metric][q] for q in qs])
 
 
-def _group_table(title, scores, groups: dict[str, list[str]], runs, metrics=("ndcg@10", "recall@10")) -> list[str]:
-    lines = [title, "", "| 그룹 | n | " + " | ".join(f"{r} {m}" for r in runs for m in metrics) + " |",
-             "|---|---:|" + "---:|" * (len(runs) * len(metrics))]
-    for g, qs in groups.items():
-        if not qs:
+def _t3(cfg, comps, scores, groups_type) -> list[str]:
+    """T3 (논문 [표 15]) — 헤더 효과 R1→R2 … R7→R8, 유형별 차이는 기술 통계(검정 없음)"""
+    pairs = cfg.comparisons.get("header") or list(zip(NOHDR_RUNS, HDR_RUNS, strict=True))
+    tcols = [f"{t} 차이" for t in QUERY_TYPES]
+    lines = ["## T3 헤더 효과 (nDCG@10, 헤더 있음 − 헤더 없음)", "",
+             "| 비교 | 헤더 없음 | 헤더 있음 | 차이 [95% CI] | p(Holm) | " + " | ".join(tcols) + " |",
+             "|---|---:|---:|---|---:|" + "---:|" * len(tcols)]
+    for a, b in pairs:
+        c = next((c for c in comps if c["A"] == a and c["B"] == b), None)
+        if c is None:
             continue
-        cells = [_f(_mean([scores[r][m][q] for q in qs])) for r in runs for m in metrics]
-        lines.append(f"| {g} | {len(qs)} | " + " | ".join(cells) + " |")
+        cells = [f"{_type_diff(scores, a, b, groups_type[t]):+.3f}" if groups_type[t] else "–" for t in QUERY_TYPES]
+        lines.append(f"| {a}→{b} | {_f(c['mean_A'])} | {_f(c['mean_B'])} | "
+                     f"{_dci((c['diff'], c['ci_lo'], c['ci_hi']))} | {_p(c['p_holm'])} | " + " | ".join(cells) + " |")
+    lines += ["", "유형별 n: " + ", ".join(f"{t}({QUERY_TYPE_NAMES[t]}) {_n(len(groups_type[t]))}" for t in QUERY_TYPES),
+              "유형별 차이는 검정하지 않은 기술 통계다.", ""]
+    return lines
+
+
+def _comparisons_table(comps) -> list[str]:
+    """사전 지정 비교 전체 (E2) — comparisons.csv 와 같은 값"""
+    lines = ["## 사전 지정 비교 (nDCG@10, 차이 = 대상 − 기준)", "",
+             "| 계열 | 기준→대상 | 기준 | 대상 | 차이 [95% CI] | p(fisher) | p(Holm) | p(교차 확인) |",
+             "|---|---|---:|---:|---|---:|---:|---:|"]
+    for c in comps:
+        lines.append(f"| {c['family']} | {c['comparison']} | {_f(c['mean_A'])} | {_f(c['mean_B'])} | "
+                     f"{_dci((c['diff'], c['ci_lo'], c['ci_hi']))} | {_p(c['p'])} | {_p(c['p_holm'])} | "
+                     f"{_p(c['p_check'])} |")
     return [*lines, ""]
 
 
-def _t4(scores, queries, qids, runs) -> list[str]:
-    from ev4.io import QUERY_TYPES
-
-    groups = {t: [q for q in qids if queries[q].type == t] for t in QUERY_TYPES}
-    return _group_table("## T4 질의 유형별", scores, groups, runs)
-
-
-def _t5(scores, qids, ev_lang, cross, runs) -> list[str]:
-    groups = {f"증거 {lg}": [q for q in qids if ev_lang[q] == lg] for lg in ("ko", "en", "other")}
-    groups |= {"교차 언어": [q for q in qids if cross[q] == "yes"],
-               "같은 언어": [q for q in qids if cross[q] == "no"]}
-    na = sum(1 for q in qids if ev_lang[q] == "n/a")
-    out = _group_table("## T5 증거 언어별·교차 언어", scores, groups, runs)
-    if na:
-        out.insert(-1, f"(등급 2 단위가 없어 증거 언어를 정할 수 없는 질의 {na}건은 이 표에서 빠짐)")
-    return out
+def _group_rows(scores, groups: dict[str, list[str]], runs: list[str], metric: str) -> list[str]:
+    rows = []
+    for g, qs in groups.items():
+        cells = [_f(_mean([scores[r][metric][q] for q in qs])) if qs else "–" for r in runs]
+        rows.append(f"| {g} | {_n(len(qs))} | " + " | ".join(cells) + " |")
+    return rows
 
 
-def _t6(scores, summary, comps, qids, ev_lang) -> list[str]:
+def _t4(scores, qids, groups_type) -> list[str]:
+    """T4 (논문 [표 16]) — 유형 3개 + 전체, R2·R4·R6·R8 nDCG@10 (R9 부가)"""
+    runs = [r for r in BREAKDOWN_RUNS if r in scores] + ([EXTRA_RUN] if EXTRA_RUN in scores else [])
+    head = " | ".join(f"{r}{' (부가)' if r == EXTRA_RUN else ''}" for r in runs)
+    groups = {f"{QUERY_TYPE_NAMES[t]} ({t})": groups_type[t] for t in QUERY_TYPES} | {"전체": qids}
+    return ["## T4 질의 유형별 nDCG@10", "", f"| 유형 | n | {head} |", "|---|---:|" + "---:|" * len(runs),
+            *_group_rows(scores, groups, runs, PRIMARY), ""]
+
+
+def _lang_groups(l2_qids, ev_lang, cross) -> dict[str, list[str]]:
+    groups = {f"증거 {name}": [q for q in l2_qids if ev_lang[q] == lg]
+              for lg, name in (("ko", "한국어"), ("en", "영어"), ("other", "기타"))}
+    groups["같은 언어 질의"] = [q for q in l2_qids if cross[q] == "no"]
+    groups["교차 언어 질의"] = [q for q in l2_qids if cross[q] == "yes"]
+    return groups
+
+
+def _t5(scores, l2_qids, ev_lang, cross) -> list[str]:
+    """T5 (논문 [표 17]) — 증거 언어·교차 언어별 Recall@10, 등급 2 단위가 없는 질의는 뺀다"""
+    runs = [r for r in BREAKDOWN_RUNS if r in scores]
+    return ["## T5 증거 언어별 Recall@10", "", "| 그룹 | n | " + " | ".join(runs) + " |",
+            "|---|---:|" + "---:|" * len(runs),
+            *_group_rows(scores, _lang_groups(l2_qids, ev_lang, cross), runs, LANG_METRIC),
+            "", f"등급 2 단위가 있는 질의 {len(l2_qids)}건만 쓴다(증거 언어 = 등급 2 단위 언어).", ""]
+
+
+def _t6(scores, comps, qids, l2_qids, ev_lang, cross) -> list[str]:
+    """T6 (논문 [표 18]) — 초기 모델(R9) vs 재설계(R8)"""
     if "R8" not in scores or "R9" not in scores:
         return ["## T6 모델 비교", "", "(R8·R9 실행이 없음)", ""]
-    lines = ["## T6 모델 비교 R8(Qwen3) vs R9(bge)", "",
-             "| 지표 | R8 | R9 | R9 − R8 |", "|---|---|---|---:|"]
-    for m in METRICS:
-        a, b = summary["R8"][m], summary["R9"][m]
-        lines.append(f"| {m} | {_ci(a)} | {_ci(b)} | {b[0] - a[0]:+.3f} |")
-    c = next((c for c in comps if {c["A"], c["B"]} == {"R8", "R9"}), None)
-    if c:
-        lines += ["", f"nDCG@10 fisher p = {_p(c['p'])}, Holm p = {_p(c['p_holm'])}"]
-    groups = {f"증거 {lg}": [q for q in qids if ev_lang[q] == lg] for lg in ("ko", "en", "other")}
-    lines += [""] + _group_table("### 증거 언어별", scores, groups, ["R8", "R9"])
+    c = next((c for c in comps if (c["A"], c["B"]) == ("R9", "R8")), None)
+    c = c or next((c for c in comps if {c["A"], c["B"]} == {"R8", "R9"}), None)
+    lines = ["## T6 모델 비교 R9(초기) vs R8(재설계)", "",
+             "| 지표 | n | R9 | R8 | 차이 (R8 − R9) |", "|---|---:|---:|---:|---|"]
+
+    def _row(label: str, metric: str, qs: list[str], with_test: bool = False) -> str:
+        r9 = _mean([scores["R9"][metric][q] for q in qs])
+        r8 = _mean([scores["R8"][metric][q] for q in qs])
+        diff = f"{r8 - r9:+.3f}" if qs else "–"
+        if with_test and c is not None:
+            sign = 1 if (c["A"], c["B"]) == ("R9", "R8") else -1
+            ci = (sign * c["diff"], *sorted((sign * c["ci_lo"], sign * c["ci_hi"])))
+            diff = f"{_dci(ci)} · p(Holm) {_p(c['p_holm'])}"
+        return f"| {label} | {_n(len(qs))} | {_f(r9) if qs else '–'} | {_f(r8) if qs else '–'} | {diff} |"
+
+    g = _lang_groups(l2_qids, ev_lang, cross)
+    lines += [
+        _row("nDCG@10 전체", PRIMARY, qids, with_test=True),
+        _row("Recall@10 전체", LANG_METRIC, qids),
+        _row("Recall@10 한국어 증거", LANG_METRIC, g["증거 한국어"]),
+        _row("Recall@10 영어 증거", LANG_METRIC, g["증거 영어"]),
+        _row("Recall@10 기타 언어 증거", LANG_METRIC, g["증거 기타"]),
+        _row("Recall@10 교차 언어 질의", LANG_METRIC, g["교차 언어 질의"]),
+        "",
+    ]
     return lines

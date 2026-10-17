@@ -1,6 +1,7 @@
 """CLI — `cd experiments_v4 && python -m ev4 <명령>` (지시서 §6.5)
 
     corpus                                   단위 통계 → results/T1_corpus.md
+    queries                                  질의 구성 T0(판정 전) + 입력 검증 경고 → results/T0_queries.md
     run --split dev|test --runs R2 R4 | all  retrieve() 실행 → runs/
     pool [--split test] [--no-translate]     판정 시트 → data/judgments/pool_{A,B}.csv
     judgments import <csv...>                판정 가져오기
@@ -27,6 +28,7 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--config", type=Path, default=None, help="config.yaml 경로 (기본 {root}/config.yaml)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("corpus")
+    sub.add_parser("queries")
     p = sub.add_parser("run")
     p.add_argument("--split", choices=["dev", "test"], default="test")
     p.add_argument("--runs", nargs="+", default=["all"])
@@ -61,13 +63,20 @@ def main(argv: list[str] | None = None) -> int:
         selftest(root=args.keep, keep=args.keep is not None)
         return 0
 
-    from ev4.io import load_config, read_queries
+    from ev4.io import load_config, query_warnings, read_queries
 
     cfg = load_config(args.config, args.root)
+    if args.cmd in ("run", "pool"):
+        for w in query_warnings(read_queries(cfg.queries_path)):  # 경고만 내고 실행은 계속 (v4.2 Q2)
+            print(f"[경고] {w}")
     if args.cmd == "corpus":
         from ev4.corpus import build_corpus
 
         build_corpus(cfg)
+    elif args.cmd == "queries":
+        from ev4.querystats import write_t0
+
+        write_t0(cfg, read_queries(cfg.queries_path))
     elif args.cmd == "run":
         from ev4.run import run_all
 

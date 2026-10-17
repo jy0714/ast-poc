@@ -5,6 +5,9 @@
   무작위로 바꿔 latency_repeats 회 반복. 단계별(timings_ms) p50/p95, 재순위 절단 비율.
 - 생성: 생성 기준 실행(기본 R8) 상위 5개 단위를 컨텍스트로 LLM 응답(1회). 첫 토큰까지·전체 시간·초당 토큰.
 - VRAM: 측정 동안 nvidia-smi memory.used 최대치(0.5초 간격), 재순위 프로세스 torch 최대 할당량.
+  서비스 세 모델(생성 기준 실행의 임베딩·재순위 + LLM)만 올린 시점의 값을 따로 기록한다(v4.2 L3):
+  측정 루프에는 비교 실행(R9 bge-m3·bge 재순위기)도 함께 올라오기 때문이다.
+- 단계 이름은 논문 [표 13] 그대로 고정한다(v4.2 L1). 재순위 입력 절단 상한은 settings.rerank_max_length(v4.2 L4).
 - AST_FAKE_MODELS=1 이면 LLM 은 가짜 스트림, GPU 기록은 빈 값.
 """
 
@@ -21,6 +24,7 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from ev4 import ollama
+from ev4.env import ollama_models
 from ev4.io import ExperimentConfig, Query, write_jsonl
 from ev4.stats import percentile
 from src.index import case_index
@@ -30,6 +34,15 @@ from src.utils.config import settings
 GEN_TOP_K = 5
 GEN_UNIT_MAX_CHARS = 4000
 STAGES = ("bm25", "embed_query", "dense", "rrf", "rerank", "total")
+# 논문 [표 13] 단계 이름 (표시 순서 고정, v4.2 L1)
+STAGE_LABELS = (
+    ("embed_query", "질의 임베딩"),
+    ("dense", "밀집 검색"),
+    ("bm25", "BM25 검색"),
+    ("rrf", "RRF 결합"),
+    ("rerank", "재순위"),
+    ("total", "검색 전체"),
+)
 
 
 class VramMonitor:
@@ -133,6 +146,18 @@ async def _measure_generation(question: str, context: list[str]) -> dict[str, An
     }
 
 
+def _model_rows(loaded: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`ollama ps` 행에서 메모리 관련 값만 (상주 크기·VRAM 상주·컨텍스트 길이)"""
+    return [{"name": m.get("name"), "size": m.get("size"), "size_vram": m.get("size_vram"),
+             "context_length": m.get("context_length")} for m in loaded]
+
+
+def _memory_snapshot(mon: VramMonitor) -> dict[str, Any]:
+    """현재까지의 nvidia-smi 최대·현재 사용량, torch 최대 할당, ollama ps"""
+    return {"vram_max_mib": mon.max_mib, "vram_now_mib": None if settings.ast_fake_models else mon.sample(),
+            "torch_peak_mib": torch_peak_mib(), "loaded_models": _model_rows(ollama.loaded_models())}
+
+
 def _context(idx: case_index.CaseIndex, unit_ids: list[str]) -> list[str]:
     out = []
     for uid in unit_ids[:GEN_TOP_K]:
@@ -162,16 +187,19 @@ def measure(cfg: ExperimentConfig, queries: list[Query], log: Callable[[str], No
     _reset_torch_peak()
 
     with VramMonitor() as mon:
-        # 1) 세 모델 적재 — 실행마다 한 번 검색(임베딩·재순위), LLM 은 짧은 생성 한 번
+        # 1) 서비스 세 모델 적재(생성 기준 실행의 임베딩·재순위 + LLM) → 메모리 기록 (v4.2 L3)
+        retrieve(cfg.case_id, queries[0].text, gen_rc, None, index=idx)
+        asyncio.run(_measure_generation(queries[0].text, _context(idx, [])))
+        service_mem = _memory_snapshot(mon)
+        # 2) 나머지 실행 적재 — 실행마다 한 번 검색
         for r in runs:
             retrieve(cfg.case_id, queries[0].text, rcs[r], None, index=idx)
-        asyncio.run(_measure_generation(queries[0].text, _context(idx, [])))
         loaded = ollama.loaded_models()
-        # 2) 사전 실행
+        # 3) 사전 실행
         for q in queries[: cfg.latency_warmup]:
             for r in runs:
                 retrieve(cfg.case_id, q.text, rcs[r], None, index=idx)
-        # 3) 본 측정
+        # 4) 본 측정
         rows: list[dict[str, Any]] = []
         for rep in range(cfg.latency_repeats):
             for q in queries:
@@ -183,7 +211,7 @@ def measure(cfg: ExperimentConfig, queries: list[Query], log: Callable[[str], No
                                  "n_rerank_truncated": res.n_rerank_truncated,
                                  "n_reranked": min(rcs[r].rerank_candidates, len(res.hits)) if rcs[r].rerank else 0})
         log(f"[latency] 검색 {len(rows)}회 측정")
-        # 4) 생성
+        # 5) 생성
         gens: list[dict[str, Any]] = []
         for q in queries:
             res = retrieve(cfg.case_id, q.text, gen_rc, None, index=idx)
@@ -211,8 +239,11 @@ def measure(cfg: ExperimentConfig, queries: list[Query], log: Callable[[str], No
         "generation_run": gen_run,
         "vram_max_mib": vram_max,
         "torch_peak_mib": torch_peak,
-        "loaded_models": [{"name": m.get("name"), "size_vram": m.get("size_vram")} for m in loaded],
-        "models": {m: ollama.show(m) for m in (settings.ollama_embed_model, settings.ollama_llm_model)},
+        "loaded_models": _model_rows(loaded),
+        "service_memory": service_mem,
+        "models": ollama_models([settings.ollama_embed_model, settings.ollama_llm_model]),
+        "llm_num_ctx": settings.llm_num_ctx,
+        "rerank_max_length": settings.rerank_max_length,
         "reranker": {r: rcs[r].reranker for r in runs if rcs[r].rerank},
         "n_queries": len(queries), "warmup": cfg.latency_warmup, "repeats": cfg.latency_repeats,
         "fake_models": settings.ast_fake_models,
@@ -230,44 +261,78 @@ def _ms(d: dict[str, float] | None) -> str:
     return f"{d['p50']:,.1f} / {d['p95']:,.1f}"
 
 
+def _mib(v: float | None) -> str:
+    return "–" if v is None else f"{v:,.0f}"
+
+
+def _bytes_mib(v: Any) -> str:
+    return f"{int(v) / 2**20:,.0f}" if v else "–"
+
+
 def render_t7(s: dict[str, Any]) -> str:
-    """T7 마크다운"""
+    """T7 마크다운 — [표 13] 단계별 시간, [표 14] 생성, 재순위 절단, 모델별 메모리"""
+    runs = list(s["runs"])
     lines = [
-        "# T7 응답 시간·VRAM·생성 시간",
+        "# T7 응답 시간·메모리·생성 시간",
         "",
         f"- 평가 질의 {s['n_queries']}건 × 반복 {s['repeats']}회 (사전 실행 {s['warmup']}건, 질의마다 실행 순서 무작위)"
         + (" · **가짜 모델**" if s["fake_models"] else ""),
         "- 세 모델(임베딩·재순위·LLM) 동시 적재 상태",
         "",
-        "## 검색 단계별 시간 (ms, p50 / p95)",
+        "## [표 13] 검색 단계별 시간 (ms, p50 / p95)",
         "",
-        "| 실행 | " + " | ".join(STAGES) + " | 재순위 절단 비율 |",
-        "|---|" + "---:|" * (len(STAGES) + 1),
+        "| 단계 | " + " | ".join(runs) + " |",
+        "|---|" + "---:|" * len(runs),
     ]
-    for r, st in s["runs"].items():
-        tr = s["rerank_truncation"].get(r)
-        tr_s = "–" if tr is None else f"{tr:.1%}"
-        lines.append(f"| {r} | " + " | ".join(_ms(st.get(k)) for k in STAGES) + f" | {tr_s} |")
-    g = s["generation"]
-    vram = "–" if s["vram_max_mib"] is None else f"{s['vram_max_mib']:,}"
-    peak = "–" if s["torch_peak_mib"] is None else f"{s['torch_peak_mib']:,.0f}"
+    for key, label in STAGE_LABELS:
+        lines.append(f"| {label} | " + " | ".join(_ms(s["runs"][r].get(key)) for r in runs) + " |")
+    max_len = s.get("rerank_max_length", settings.rerank_max_length)
     lines += [
         "",
-        f"## 생성 ({s['generation_run']} 상위 {GEN_TOP_K}개 단위 컨텍스트, 1회)",
+        f"## 재순위 입력 절단 ({max_len:,}토큰 초과 후보 비율)",
+        "",
+        "| 실행 | 절단 비율 |",
+        "|---|---:|",
+    ]
+    for r in runs:
+        tr = s["rerank_truncation"].get(r)
+        lines.append(f"| {r} | {'–' if tr is None else f'{tr:.1%}'} |")
+    g = s["generation"]
+    lines += [
+        "",
+        f"## [표 14] 응답 생성 ({s['generation_run']} 상위 {GEN_TOP_K}개 단위 컨텍스트, 질의당 1회)",
         "",
         "| 항목 | p50 | p95 |",
         "|---|---:|---:|",
         f"| 첫 토큰까지 (ms) | {g['ttft_ms']['p50']:,.1f} | {g['ttft_ms']['p95']:,.1f} |",
-        f"| 전체 (ms) | {g['total_ms']['p50']:,.1f} | {g['total_ms']['p95']:,.1f} |",
-        f"| 초당 토큰 | {g['tokens_per_s']['p50']:,.1f} | {g['tokens_per_s']['p95']:,.1f} |",
-        "",
-        "## VRAM",
-        "",
-        f"- nvidia-smi memory.used 최대: {vram} MiB",
-        f"- 재순위 torch 최대 할당: {peak} MiB",
-        "- 적재 모델(ollama ps): " + (", ".join(f"{m['name']}" for m in s["loaded_models"]) or "–"),
+        f"| 전체 생성 (ms) | {g['total_ms']['p50']:,.1f} | {g['total_ms']['p95']:,.1f} |",
+        f"| 초당 생성 토큰 | {g['tokens_per_s']['p50']:,.1f} | {g['tokens_per_s']['p95']:,.1f} |",
     ]
+    svc = s.get("service_memory") or {}
+    lines += [
+        "",
+        "## GPU 메모리 (v4.2 L3)",
+        "",
+        "| 항목 | MiB |",
+        "|---|---:|",
+        f"| nvidia-smi 최대 — 서비스 세 모델 적재 시점까지 | {_mib(svc.get('vram_max_mib'))} |",
+        f"| nvidia-smi 현재 — 서비스 세 모델 적재 직후 | {_mib(svc.get('vram_now_mib'))} |",
+        f"| nvidia-smi 최대 — 측정 전체(비교 실행 모델 포함) | {_mib(s['vram_max_mib'])} |",
+        f"| 재순위 torch 최대 할당 — 서비스 재순위기만 | {_mib(svc.get('torch_peak_mib'))} |",
+        f"| 재순위 torch 최대 할당 — 측정 전체 | {_mib(s['torch_peak_mib'])} |",
+        "",
+        f"- LLM 컨텍스트 길이 설정(LLM_NUM_CTX, KV 캐시 크기 결정): {s.get('llm_num_ctx', '–')}",
+        "",
+        "| Ollama 모델 (서비스 적재 시점 ollama ps) | 상주 크기 (MiB) | VRAM 상주 (MiB) | 컨텍스트 길이 |",
+        "|---|---:|---:|---:|",
+    ]
+    for m in svc.get("loaded_models") or []:
+        lines.append(f"| {m.get('name')} | {_bytes_mib(m.get('size'))} | {_bytes_mib(m.get('size_vram'))} | "
+                     f"{m.get('context_length') or '–'} |")
+    lines += ["", "| 모델 (ollama show) | 양자화 | 매개변수 | 파일 크기 (MiB) | digest |", "|---|---|---|---:|---|"]
     for m, info in s["models"].items():
-        lines.append(f"- {m}: 양자화 {info.get('quantization', '–')} · 크기 {info.get('parameter_size', '–')} · "
-                     f"digest {str(info.get('digest', ''))[:12] or '–'}")
+        lines.append(f"| {m} | {info.get('quantization') or '–'} | {info.get('parameter_size') or '–'} | "
+                     f"{_bytes_mib(info.get('file_size_bytes'))} | {str(info.get('digest', ''))[:12] or '–'} |")
+    lines += ["", "- 측정 종료 시점 적재 모델(ollama ps): "
+              + (", ".join(f"{m['name']}" for m in s["loaded_models"]) or "–")]
     return "\n".join(lines) + "\n"
