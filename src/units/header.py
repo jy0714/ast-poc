@@ -2,10 +2,11 @@
 
     [이메일] 2024-03-05 14:22 | 보낸이: 홍길동 | 받는이: 김철수, 이영희 | 참조: 박민수 | 제목: RE: 3월 정산 건 | 첨부: 견적서.xlsx
     [채팅] 2024-03-05 14:00~14:47 | 참여자: 홍길동, 김철수 | 방: 정산팀
-    [문서] 정산기준_v3.docx | 3/12쪽 | 작성자: 홍길동 | 수정일: 2024-02-28
-    [첨부] 견적서.xlsx | 2/3쪽 | 부모 메일: 2024-03-05 홍길동→김철수 "RE: 3월 정산 건"
+    [문서] 정산기준_v3.docx | 3/12쪽 | 작성자: 홍길동 | 최종 수정자: 박민수 | 수정일: 2024-02-28
+    [첨부] 견적서.xlsx | 2/3쪽 | 작성자: 김철수 | 최종 수정자: 김철수 | 부모 메일: 2024-03-05 홍길동→김철수 "RE: 3월 정산 건"
 
-- 빈 필드는 생략한다.
+- 빈 필드는 생략한다. 작성자·최종 수정자는 Office core properties(creator, lastModifiedBy),
+  PDF는 문서 정보 Author만 있다(최종 수정자 없음 → 생략). (v4.2 U1)
 - 받는이·참여자·첨부가 5개를 넘으면 앞 5개 뒤에 "외 n명"(첨부는 "외 n건")을 붙인다.
 - 시각은 settings.unit_header_tz(기본 Asia/Seoul)로 바꿔 표시한다. 메타데이터 date 는 원본 그대로.
 - 헤더 형식은 체크포인트 2에서 사용자가 확정한다.
@@ -139,7 +140,8 @@ def chat_header(meta: dict[str, Any]) -> str:
 
 
 def document_header(meta: dict[str, Any]) -> str:
-    """문서 헤더 (meta: filename, page_kind, page, page_count, position_extra, author, last_modified)"""
+    """문서 헤더 (meta: filename, page_kind, page, page_count, position_extra, author,
+    last_modified_by, last_modified)"""
     return _join(
         "[문서]",
         [
@@ -147,13 +149,15 @@ def document_header(meta: dict[str, Any]) -> str:
             ("", position(meta.get("page_kind", ""), meta.get("page", 0),
                           meta.get("page_count", 0), meta.get("position_extra", ""))),
             ("작성자", meta.get("author") or ""),
+            ("최종 수정자", meta.get("last_modified_by") or ""),
             ("수정일", fmt_date(meta.get("last_modified") or meta.get("modified_date") or "")),
         ],
     )
 
 
 def attachment_header(meta: dict[str, Any]) -> str:
-    """첨부 헤더 (meta: filename, 위치, parent_date, parent_sender, parent_recipients, parent_subject)"""
+    """첨부 헤더 (meta: filename, 위치, author, last_modified_by, parent_date, parent_sender,
+    parent_recipients, parent_subject)"""
     parent = ""
     if meta.get("parent_unit_id"):
         sender = meta.get("parent_sender") or ""
@@ -171,6 +175,8 @@ def attachment_header(meta: dict[str, Any]) -> str:
             ("", meta.get("filename") or ""),
             ("", position(meta.get("page_kind", ""), meta.get("page", 0),
                           meta.get("page_count", 0), meta.get("position_extra", ""))),
+            ("작성자", meta.get("author") or ""),
+            ("최종 수정자", meta.get("last_modified_by") or ""),
             (parent_label, parent),
         ],
     )
