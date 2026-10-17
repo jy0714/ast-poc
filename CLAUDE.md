@@ -148,12 +148,12 @@ python -m scripts.langdetect_compare <case_id>        # langdetect↔lingua 대�
 docker compose up --build                             # Docker 전체 스택
 ```
 
-## 현재 상태 (2026-10-16 기준)
+## 현재 상태 (2026-10-17 기준)
 
-- **브랜치**: `v4-simplify` (지시서 1~5단계 완료, 체크포인트 3 삭제 반영). 다음: 6단계(RTX 3090 실데이터)
-- **테스트**: tests 528 + experiments_v4 11
+- **브랜치**: `v4-simplify` (지시서 1~5단계 + v4.2 추가 지시 코드 반영 완료). 다음: 코퍼스 확정 → 색인 → 체크포인트 2 확정 사항 → 6단계 실측
+- **테스트**: tests + experiments_v4 합계 561
 - **GPU**: NVIDIA GeForce RTX 3090 24GB, 드라이버 617.42(CUDA 13.4). 임베딩 일치 통과(cos 0.995), 세 모델 동시 적재 ≈24.1/24.6GB (`LLM_NUM_CTX=16384` 필수)
-- **케이스**: 평가용 685850a87ee2 (메일함 1, v4 색인). 구 케이스 b392e4f27760·8cdadf2ab3db는 ARCHIVED(같은 원본, v3 색인) 그대로 둠
+- **케이스**: 685850a87ee2 (메일함 1, CREATED·미색인 — 코퍼스 확정 후 결정), 9dec87cd8d6c (메일함 1 중 300파일 실규모 점검, units-v2 색인 READY). 구 케이스 b392e4f27760·8cdadf2ab3db는 ARCHIVED 그대로 둠
 - **평가 코퍼스 폴더**: `D:\ast-file\corpus\` (사용자가 확정 자료를 넣으면 새 케이스로 색인)
 
 ### 환경 설정 파일
