@@ -955,6 +955,10 @@ class IndexingPipeline:
         t0 = time.monotonic()
         stats_out = build_stats.to_dict()
         stats_out["duplicates_removed"] = dict(collector.duplicates)
+        # 파트 토큰 수를 센 카운터 종류 (T1이 근사 여부를 확인한다, v4.2 S1)
+        from src.units.tokens import get_token_counter
+
+        stats_out["token_counter"] = get_token_counter().kind
         stats_out["embedding"] = {
             "embedded": state["embedded"] - state["reused"],
             "reused": state["reused"],

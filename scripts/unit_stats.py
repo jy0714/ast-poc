@@ -8,7 +8,7 @@
 
 출력 (data/unit_stats/<case_id>/):
     T1_corpus.md      — 단위 통계 표 (지시서 §6.8 T1)
-    stats.json        — 원 수치
+    stats.json        — 원 수치 (집계만, 원문·파일명 없음)
     units.jsonl       — 생성된 파트 (UnitPart 한 줄씩)
     clean_samples/    — 정제 전후 샘플 (언어별, 전달 메일 포함). 실데이터이므로 커밋 금지
 """
@@ -20,7 +20,6 @@ import json
 import logging
 import os
 import random
-import statistics
 import sys
 import time
 from collections import Counter, defaultdict
@@ -33,6 +32,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.units.builder import BuildStats, UnitCollector  # noqa: E402
 from src.units.schema import UNIT_RULES_VERSION, EvidenceUnit, UnitPart  # noqa: E402
+
+sys.path.insert(0, str(PROJECT_ROOT / "experiments_v4"))
+from ev4.corpus import CorpusStopError, render_t1, stats_from_parts  # noqa: E402
 
 # ─────────────────────────── 워커 ───────────────────────────
 
@@ -111,23 +113,6 @@ def _stats_from_dict(d: dict[str, Any]) -> BuildStats:
 # ─────────────────────────── 집계 ───────────────────────────
 
 
-def _pct(values: list[int], q: float) -> int:
-    if not values:
-        return 0
-    s = sorted(values)
-    return s[min(len(s) - 1, int(round(q * (len(s) - 1))))]
-
-
-def _dist(values: list[int]) -> dict[str, int]:
-    return {
-        "n": len(values),
-        "median": int(statistics.median(values)) if values else 0,
-        "p95": _pct(values, 0.95),
-        "p99": _pct(values, 0.99),
-        "max": max(values) if values else 0,
-    }
-
-
 def _collect_source_files(case_id: str) -> list[tuple[str, str]]:
     """케이스 데이터 소스 → [(절대 경로, 케이스 기준 상대 경로)] (인덱싱과 같은 규칙)"""
     from src.cases.case_store import CaseStore
@@ -189,90 +174,20 @@ def _write_samples(units: list[EvidenceUnit], paths_by_unit: dict[str, str], out
     return written
 
 
-def _render_t1(s: dict[str, Any]) -> str:
-    """T1 단위 통계 표 (마크다운)"""
+def _render_extra(s: dict[str, Any]) -> str:
+    """이 스크립트에만 있는 처리 수치 (T1 본표는 ev4.corpus.render_t1)"""
     lines = [
-        f"# T1 단위 통계 (초안) — 케이스 {s['case_id']}",
         "",
-        f"- 생성 시각: {s['created_at']} · 규칙 {s['unit_rules_version']} · "
-        f"토큰 기준 `{s['token_counter']}` · 파트 상한 {s['max_part_tokens']}",
+        "## 부록: 단위 생성 처리 (unit_stats 초안 전용)",
+        "",
         f"- 입력 파일 {s['files']['total']:,}개 (실패 {s['files']['failed']:,}) · "
-        f"처리 시간 {s['elapsed_sec']:,.0f}초 (워커 {s['workers']})",
-        "",
-        "## 1. 유형별 단위·파트",
-        "",
-        "| 유형 | 단위 | 파트 | 분할된 단위 | 중복 제거 |",
-        "|---|---:|---:|---:|---:|",
-    ]
-    for t in ("email", "chat", "document", "attachment"):
-        u = s["units_by_type"].get(t, 0)
-        if not u and not s["duplicates"].get(t):
-            continue
-        lines.append(
-            f"| {t} | {u:,} | {s['parts_by_type'].get(t, 0):,} | "
-            f"{s['split_units'].get(t, 0):,} | {s['duplicates'].get(t, 0):,} |"
-        )
-    lines += [
-        f"| **합계** | **{sum(s['units_by_type'].values()):,}** | "
-        f"**{sum(s['parts_by_type'].values()):,}** | {sum(s['split_units'].values()):,} | "
-        f"{sum(s['duplicates'].values()):,} |",
-        "",
-        "## 2. 토큰 길이 (본문, 헤더 제외)",
-        "",
-        "| 구분 | n | 중앙값 | p95 | p99 | 최대 |",
-        "|---|---:|---:|---:|---:|---:|",
-    ]
-    for key, d in s["token_dist"].items():
-        lines.append(f"| {key} | {d['n']:,} | {d['median']:,} | {d['p95']:,} | {d['p99']:,} | {d['max']:,} |")
-    lines += [
-        "",
-        f"헤더 토큰: 중앙값 {s['header_tokens']['median']} · p95 {s['header_tokens']['p95']} · "
-        f"최대 {s['header_tokens']['max']}",
-        "",
-        "## 3. 언어 분포 (단위 기준, lingua)",
-        "",
-        "| 유형 | " + " | ".join(s["lang_columns"]) + " | 혼용 |",
-        "|---|" + "---:|" * (len(s["lang_columns"]) + 1),
-    ]
-    for t, row in s["lang_by_type"].items():
-        cells = " | ".join(f"{row.get(c, 0):,}" for c in s["lang_columns"])
-        lines.append(f"| {t} | {cells} | {s['mixed_by_type'].get(t, 0):,} |")
-    lines += [
-        "",
-        "## 4. 이메일 정제",
-        "",
-        "| 언어 | 정제 전 문자 | 정제 후 문자 | 줄어든 비율 |",
-        "|---|---:|---:|---:|",
-    ]
-    for lang, (b, a) in sorted(s["clean_chars"].items(), key=lambda kv: -kv[1][0]):
-        ratio = (1 - a / b) if b else 0.0
-        lines.append(f"| {lang} | {b:,} | {a:,} | {ratio:.1%} |")
-    fw = s["forwarded"]
-    lines += [
-        "",
-        f"- 전달 메일(인용 유지): {fw['count']:,}건 · 토큰 중앙값 {fw['dist']['median']:,} · "
-        f"p95 {fw['dist']['p95']:,} · 최대 {fw['dist']['max']:,}",
-        "",
-        "## 5. 첨부·문서 처리",
-        "",
-        f"- 첨부 총 {s['counts'].get('attachments_total', 0):,}건 → 파싱 "
-        f"{s['counts'].get('attachments_parsed', 0):,}건, 부모 없는 첨부 "
-        f"{s['counts'].get('orphan_attachments', 0):,}건, 첨부된 메일 "
-        f"{s['counts'].get('nested_email_attachments', 0):,}건",
+        f"처리 시간 {s['elapsed_sec']:,.0f}초 (워커 {s['workers']}) · 파트 상한 {s['max_part_tokens']}",
         f"- 빈 페이지(단위 없음): PDF {s['counts'].get('empty_pages:pdf', 0):,}쪽 · "
-        f"PPTX {s['counts'].get('empty_pages:pptx', 0):,}장",
+        f"PPTX {s['counts'].get('empty_pages:pptx', 0):,}장 · 첨부된 메일 "
+        f"{s['counts'].get('nested_email_attachments', 0):,}건",
         f"- OCR: {s['ocr']['pages']:,}쪽 시도 · 인식 {s['counts'].get('ocr_pages', 0):,}쪽 · "
         f"OCR 시간 합계 {s['ocr']['seconds']:,.0f}초 (쪽당 {s['ocr']['sec_per_page']:.1f}초, 워커 합산)",
-        "",
-        "| 제외 형식 (단위 없음) | 건수 |",
-        "|---|---:|",
     ]
-    for ext, n in sorted(s["excluded_types"].items(), key=lambda kv: -kv[1]):
-        lines.append(f"| {ext} | {n:,} |")
-    if s["errors"]:
-        lines += ["", "| 오류 | 건수 |", "|---|---:|"]
-        for k, n in sorted(s["errors"].items(), key=lambda kv: -kv[1]):
-            lines.append(f"| {k} | {n:,} |")
     return "\n".join(lines) + "\n"
 
 
@@ -331,57 +246,27 @@ def main() -> None:
 
     units = list(collector.units.values())
     counter = get_token_counter()
-    tok: dict[str, list[int]] = defaultdict(list)
-    for u in units:
-        tok[f"단위:{u.unit_type}"].append(u.n_tokens)
-        for p in u.parts:
-            tok[f"파트:{u.unit_type}"].append(p.n_tokens)
-        if u.unit_type in ("document", "attachment"):
-            tok[f"단위:{u.unit_type}:{u.meta.get('file_type')}"].append(u.n_tokens)
-    header_tokens = counter.count_many([u.header for u in units])
-
-    lang_by_type: dict[str, Counter] = defaultdict(Counter)
-    mixed_by_type: Counter = Counter()
-    for u in units:
-        lang_by_type[u.unit_type][u.meta["lang"]] += 1
-        mixed_by_type[u.unit_type] += int(u.meta["lang_mixed"])
-    totals = Counter()
-    for c in lang_by_type.values():
-        totals.update(c)
-    lang_columns = [k for k, _ in totals.most_common()]
-
-    summary: dict[str, Any] = {
+    build_stats = stats.to_dict()
+    build_stats["duplicates_removed"] = dict(collector.duplicates)
+    try:
+        summary = stats_from_parts(collector.parts(), build_stats, counter,
+                                   build_counter_kind=counter.kind)
+    except CorpusStopError as e:
+        print(f"중단: {e}")
+        sys.exit(2)
+    summary.update({
         "case_id": args.case_id,
         "created_at": time.strftime("%Y-%m-%d %H:%M"),
         "unit_rules_version": UNIT_RULES_VERSION,
-        "token_counter": counter.kind,
         "max_part_tokens": settings.unit_max_part_tokens,
         "workers": args.workers,
         "elapsed_sec": elapsed,
         "files": {"total": len(files), "failed": len(failed)},
-        "failed_samples": failed[:20],
-        "units_by_type": {k.split(":", 1)[1]: v for k, v in stats.counts.items() if k.startswith("units:")},
-        "parts_by_type": {k.split(":", 1)[1]: v for k, v in stats.counts.items() if k.startswith("parts:")},
-        "split_units": {k.split(":", 1)[1]: v for k, v in stats.counts.items() if k.startswith("split_units:")},
-        "duplicates": dict(collector.duplicates),
-        "token_dist": {k: _dist(v) for k, v in sorted(tok.items())},
-        "header_tokens": _dist(header_tokens),
-        "lang_columns": lang_columns,
-        "lang_by_type": {k: dict(v) for k, v in lang_by_type.items()},
-        "mixed_by_type": dict(mixed_by_type),
-        "clean_chars": {k: list(v) for k, v in stats.clean_chars.items()},
-        "forwarded": {"count": stats.counts.get("forwarded_emails", 0),
-                      "dist": _dist(stats.forwarded_tokens)},
+        "failed_errors": dict(Counter(err.split(":", 1)[0] for _p, err in failed)),
         "counts": dict(stats.counts),
-        "excluded_types": dict(stats.excluded_types),
-        "errors": dict(stats.errors),
         "ocr": {"pages": ocr_pages, "seconds": ocr_seconds,
                 "sec_per_page": ocr_seconds / ocr_pages if ocr_pages else 0.0},
-    }
-    # 중복 제거 후 기준으로 단위·파트 수를 다시 맞춘다 (stats.counts 는 중복 포함)
-    summary["units_by_type"] = dict(Counter(u.unit_type for u in units))
-    summary["parts_by_type"] = dict(Counter(p.unit_type for u in units for p in u.parts))
-    summary["split_units"] = dict(Counter(u.unit_type for u in units if len(u.parts) > 1))
+    })
 
     with open(out_dir / "units.jsonl", "w", encoding="utf-8") as f:
         for p in collector.parts():
@@ -389,7 +274,7 @@ def main() -> None:
     samples = _write_samples(units, paths_by_unit, out_dir, args.samples, args.seed)
     summary["clean_samples"] = samples
     (out_dir / "stats.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    (out_dir / "T1_corpus.md").write_text(_render_t1(summary), encoding="utf-8")
+    (out_dir / "T1_corpus.md").write_text(render_t1(summary) + _render_extra(summary), encoding="utf-8")
     print(f"완료: {out_dir} (단위 {len(units):,} · 파트 {len(collector.parts()):,} · {elapsed:,.0f}초)")
 
 
