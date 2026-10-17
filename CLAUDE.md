@@ -6,7 +6,7 @@
 내부 이메일(PST·EML), Teams 채팅(PST), 문서(PDF/DOCX/PPTX/XLSX/XLS/HTML/EML/MSG)를 통합 검색하는 로컬 RAG 시스템.
 1TB PoC 규모 · GPU: NVIDIA GeForce RTX 3090 24GB (2026-10-16부터 개발·실험 PC) · 케이스 기반 운영
 
-v4 구현 지시서: `docs/CLAUDE_CODE_v4_구현지시서.md` (v4.1). 참조 코드: `docs/v4/ref/`.
+v4 구현 지시서: `docs/CLAUDE_CODE_v4_구현지시서.md` (v4.1) + 추가 지시 `docs/v4/CLAUDE_CODE_v4.2_논문반영_추가지시.md` (v4.2, 충돌 시 v4.2 우선). 참조 코드: `docs/v4/ref/`.
 
 ## 아키텍처 v4 요약
 
@@ -18,7 +18,7 @@ v4 구현 지시서: `docs/CLAUDE_CODE_v4_구현지시서.md` (v4.1). 참조 코
 ```
 
 상태 머신 (`src/cases/case_store.py` `_VALID_TRANSITIONS`):
-`CREATED → INDEXING → READY → ARCHIVED`, 각 상태에서 `ERROR` 전이 가능, `ARCHIVED → CREATED` 복구 가능.
+`CREATED → INDEXING → READY → ARCHIVED`, 각 상태에서 `ERROR` 전이 가능. `ARCHIVED`는 종착 상태(전이 불가) — 다시 쓰려면 같은 원본으로 새 케이스를 만든다.
 
 ### GPU 자원 (RTX 3090 24GB)
 - 서비스 조건: 임베딩(qwen3-embedding 4B q8) + 재순위(Qwen3-Reranker-4B bf16) + LLM(gemma4:12b) 동시 적재
@@ -30,7 +30,7 @@ PST/EML 파일 / 내부 문서
   → 파싱 (libpff, PyMuPDF, python-docx, xlrd, OCR 등) [멀티프로세싱, 파서 크래시 시 풀 재시작]
   → 증거 단위 생성 (src/units): 이메일 1통 / 채팅 세션 1개 / 문서·첨부 1쪽
      · 이메일 정제(다국어 인용·서명 제거), 중복 메일 제거, 첨부↔부모 연결
-     · 단위별 언어 감지(lingua), 한국어 레이블 헤더, UNIT_MAX_PART_TOKENS(2048) 초과 시 파트 분할
+     · 단위별 언어 감지(lingua), 한국어 레이블 헤더(문서·첨부는 작성자·최종 수정자 포함, units-v2), UNIT_MAX_PART_TOKENS(2048) 초과 시 파트 분할
   → 로컬 임베딩 (Ollama qwen3-embedding:4b-q8_0, 2560-dim, 헤더+본문)
   → 케이스 색인 data/index/{case_id}/ (units.jsonl + BM25 hdr/nohdr + profiles/{profile}/dense.npy)
      · 원자적 교체(임시 폴더 → rename), 변경 없는 파트는 기존 벡터 재사용
@@ -79,6 +79,13 @@ PST/EML 파일 / 내부 문서
 - `AST_FAKE_MODELS=1 python -m ev4 selftest` — GPU·실데이터 없이 전체 흐름 점검
 
 ## 핵심 규칙
+
+### 조사 데이터 기밀 (v4.2 P0) — 최우선
+- Claude Code는 조사 데이터 원문을 열지 않는다: `experiments_v4/{data,runs,cache}/**`, `experiments_v4/results/failures*`, `data/{processed,index,vectordb,bm25_index,unit_stats,failed_embeddings,ocr_cache,parity,benchmark,judgments,input,logs}/**`, `error_logs/**`, `D:\ast-file\**`(목록 조회 포함)
+- 차단: `.claude/settings.json` permissions.deny(Read) + PreToolUse 훅 `.claude/hooks/p0_guard.py`(Bash·PowerShell, `grep -c`/`-l`만 허용). `.claude/`는 gitignore(이 PC 전용)
+- 보고는 집계 표(T0~T7, F1 요약, E1)와 로그의 건수·시간·오류 유형만. 식별자는 `qid`, `unit_id`만. 본문·질의 문장·실명·업체명·파일명 금지
+- 원문이 필요한 디버깅은 사용자에게 가명 조각을 요청하거나 `tests/fixtures/` 가명 자료로 재현
+- 스크립트·백그라운드 대기 명령도 건수만 출력한다 (로그 꼬리 출력 금지)
 
 ### 보안
 - 임베딩·색인·재순위는 **항상 로컬**에서만 동작
@@ -135,7 +142,9 @@ pytest tests/ -q                                      # 테스트
 pytest experiments_v4/tests -q                        # 하네스 테스트
 python -m scripts.run_indexing <case_id>              # 인덱싱 CLI
 python -m scripts.build_profiles <case_id> --profiles nohdr-qwen3 hdr-bgem3
-python -m scripts.unit_stats <case_id>                # 단위 통계 (임베딩 없음)
+python -m scripts.unit_stats <case_id>                # 단위 통계 (임베딩 없음, T1 초안)
+python -m scripts.repro_kiwi --out experiments_v4/results/S6_kiwi_repro.md   # kiwipiepy 현상 재현 (합성 문자열)
+python -m scripts.langdetect_compare <case_id>        # langdetect↔lingua 대조 (건수만, langdetect 별도 설치)
 docker compose up --build                             # Docker 전체 스택
 ```
 
@@ -144,7 +153,8 @@ docker compose up --build                             # Docker 전체 스택
 - **브랜치**: `v4-simplify` (지시서 1~5단계 완료, 체크포인트 3 삭제 반영). 다음: 6단계(RTX 3090 실데이터)
 - **테스트**: tests 528 + experiments_v4 11
 - **GPU**: NVIDIA GeForce RTX 3090 24GB, 드라이버 617.42(CUDA 13.4). 임베딩 일치 통과(cos 0.995), 세 모델 동시 적재 ≈24.1/24.6GB (`LLM_NUM_CTX=16384` 필수)
-- **케이스**: b392e4f27760, 8cdadf2ab3db 모두 ARCHIVED → 재색인 전 ARCHIVED→CREATED 전환 필요
+- **케이스**: 평가용 685850a87ee2 (메일함 1, v4 색인). 구 케이스 b392e4f27760·8cdadf2ab3db는 ARCHIVED(같은 원본, v3 색인) 그대로 둠
+- **평가 코퍼스 폴더**: `D:\ast-file\corpus\` (사용자가 확정 자료를 넣으면 새 케이스로 색인)
 
 ### 환경 설정 파일
 - `.env.prod.example` — RTX 3090 24GB (gemma4:12b, Qwen3-Reranker-4B bf16, EMBED_BATCH_SIZE=16)
