@@ -6,7 +6,7 @@
 내부 이메일(PST·EML), Teams 채팅(PST), 문서(PDF/DOCX/PPTX/XLSX/XLS/HTML/EML/MSG)를 통합 검색하는 로컬 RAG 시스템.
 1TB PoC 규모 · GPU: NVIDIA GeForce RTX 3090 24GB (2026-10-16부터 개발·실험 PC) · 케이스 기반 운영
 
-v4 구현 지시서: `docs/CLAUDE_CODE_v4_구현지시서.md` (v4.1) + 추가 지시 `docs/v4/CLAUDE_CODE_v4.2_논문반영_추가지시.md` (v4.2, 충돌 시 v4.2 우선). 참조 코드: `docs/v4/ref/`.
+v4 구현 지시서: `docs/CLAUDE_CODE_v4_구현지시서.md` (v4.1) + 추가 지시 `docs/v4/CLAUDE_CODE_v4.2_논문반영_추가지시.md` (v4.2, 충돌 시 v4.2 우선) + `docs/v4/CLAUDE_CODE_v4.3_표준질문45_추가지시.md` (v4.3: 평가는 감사인 표준 질문 45개만, 충돌 시 v4.3 우선). 참조 코드: `docs/v4/ref/`.
 
 ## 아키텍처 v4 요약
 
@@ -73,8 +73,9 @@ PST/EML 파일 / 내부 문서
 
 ## 실험 하네스 (`experiments_v4/`)
 
-- `cd experiments_v4 && python -m ev4 <명령>`: corpus(T1) · run · pool · judgments(import/agreement/finalize) · evaluate(T2~T6) · latency(T7) · failures(F1) · env(E1)
-- `config.yaml`: R1~R9 실행 목록·비교 쌍. k값은 RetrievalConfig 기본값 고정
+- `cd experiments_v4 && python -m ev4 <명령>`: corpus(T1) · queries(T0) · smoke(동작 점검) · run · pool · judgments(import/agreement/finalize → T0b) · evaluate(T2~T6·T8) · latency(T7) · failures(F1) · env(E1)
+- `config.yaml`: R1~R9 실행 목록·비교 쌍. k값은 RetrievalConfig 기본값 고정. `primary_subset: search`(S17, 검정·Holm·T2~T6·F1 기준)는 실행 전 고정 — 첫 run 이 `runs/primary_subset.json` 에 기록
+- 질의: 표준 질문 45개 `docs/v4/data/queries_45.jsonl` → `experiments_v4/data/queries.jsonl` (dev 없음, search 17·meta 3·nonsearch 25)
 - 실데이터·결과(`data/ runs/ results/ cache/`)는 gitignore
 - `AST_FAKE_MODELS=1 python -m ev4 selftest` — GPU·실데이터 없이 전체 흐름 점검
 
@@ -82,6 +83,7 @@ PST/EML 파일 / 내부 문서
 
 ### 조사 데이터 기밀 (v4.2 P0) — 최우선
 - Claude Code는 조사 데이터 원문을 열지 않는다: `experiments_v4/{data,runs,cache}/**`, `experiments_v4/results/failures*`, `data/{processed,index,vectordb,bm25_index,unit_stats,failed_embeddings,ocr_cache,parity,benchmark,judgments,input,logs}/**`, `error_logs/**`, `D:\ast-file\**`(목록 조회 포함)
+- 예외(v4.3 §1): 표준 질문 45개는 사건 정보 없는 논문 부록 내용이라 읽어도 된다 — 원본 `docs/v4/data/queries_45.jsonl` 을 읽는다 (`experiments_v4/data/` 사본은 훅이 막는다)
 - 차단: `.claude/settings.json` permissions.deny(Read) + PreToolUse 훅 `.claude/hooks/p0_guard.py`(Bash·PowerShell, `grep -c`/`-l`만 허용). `.claude/`는 gitignore(이 PC 전용)
 - 보고는 집계 표(T0~T7, F1 요약, E1)와 로그의 건수·시간·오류 유형만. 식별자는 `qid`, `unit_id`만. 본문·질의 문장·실명·업체명·파일명 금지
 - 원문이 필요한 디버깅은 사용자에게 가명 조각을 요청하거나 `tests/fixtures/` 가명 자료로 재현
@@ -150,8 +152,8 @@ docker compose up --build                             # Docker 전체 스택
 
 ## 현재 상태 (2026-10-17 기준)
 
-- **브랜치**: `v4-simplify` (지시서 1~5단계 + v4.2 추가 지시 코드 반영 완료). 다음: 코퍼스 확정 → 색인 → 체크포인트 2 확정 사항 → 6단계 실측
-- **테스트**: tests + experiments_v4 합계 561
+- **브랜치**: `v4-simplify` (지시서 1~5단계 + v4.2·v4.3 추가 지시 코드 반영 완료). 다음: 코퍼스 확정 → 색인 → smoke → 6단계 실측
+- **테스트**: tests + experiments_v4 합계 564
 - **GPU**: NVIDIA GeForce RTX 3090 24GB, 드라이버 617.42(CUDA 13.4). 임베딩 일치 통과(cos 0.995), 세 모델 동시 적재 ≈24.1/24.6GB (`LLM_NUM_CTX=16384` 필수)
 - **케이스**: 685850a87ee2 (메일함 1, CREATED·미색인 — 코퍼스 확정 후 결정), 9dec87cd8d6c (메일함 1 중 300파일 실규모 점검, units-v2 색인 READY). 구 케이스 b392e4f27760·8cdadf2ab3db는 ARCHIVED 그대로 둠
 - **평가 코퍼스 폴더**: `D:\ast-file\corpus\` (사용자가 확정 자료를 넣으면 새 케이스로 색인)

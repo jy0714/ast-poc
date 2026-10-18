@@ -1,6 +1,7 @@
 """실패 분석 시트 → results/F1_failures.csv, results/F1_summary.md (지시서 §6.7, v4.2 F1~F3)
 
-- 대상(F1): 기준 실행(기본 R8) 상위 10 에 들지 못한 **등급 2 단위 전체**. 등급 2 단위 일부만 찾은
+- 대상(F1): 주 분석 집합(S17, config `primary_subset`) 질의에서 기준 실행(기본 R8) 상위 10 에 들지 못한
+  **등급 2 단위 전체** (v4.3 §6). 등급 2 단위 일부만 찾은
   질의의 나머지 단위도 포함한다. 놓친 단위마다 한 행, R2·R4·R6·R7·R8 순위(100위 밖이면 ">100").
 - 분류 힌트(F2) `category_hint`: 순위 기록으로 판단할 수 있는 것만 자동으로 단다(쉼표 구분).
   최종 `category`·`note` 는 사용자가 채운다. 다시 실행하면 같은 (qid, unit_id) 의 기존 분류를 보존한다.
@@ -130,7 +131,9 @@ def build_failures(cfg: ExperimentConfig, log: Callable[[str], None] = print) ->
     rank_runs = [r for r in cfg.extra.get("failure_rank_runs", DEFAULT_RANK_RUNS) if r in cfg.runs]
     if base not in rank_runs:
         rank_runs.append(base)
-    queries = {q.qid: q for q in read_queries(cfg.queries_path, split="test")}
+    cfg.check_subset_lock()
+    queries = {q.qid: q for q in read_queries(cfg.queries_path, split="test")
+               if q.support_group == cfg.primary_subset}
     qrels = read_qrels(cfg.qrels_path)
     runs = {r: read_run(cfg.run_path(r, "test")) for r in rank_runs if cfg.run_path(r, "test").exists()}
     if base not in runs:

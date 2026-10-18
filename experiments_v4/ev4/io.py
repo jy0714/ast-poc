@@ -2,8 +2,9 @@
 
 경로는 모두 실험 루트(기본 `experiments_v4/`) 기준이다. selftest 는 임시 폴더를 루트로 쓴다.
 
-- 질의: `data/queries.jsonl` — {qid, text, type, split, query_lang, target_evidence_lang, source_question, note}
-  (`target_evidence_lang`·`source_question` 은 선택 필드, v4.2 Q2)
+- 질의: `data/queries.jsonl` — 감사인 표준 질문 45개(논문 부록 A, v4.3 §1)
+  {qid, text, area, support_class, support_group, type, split, query_lang, target_evidence_lang,
+  source_question, note}. `type` 은 search 집합만 exact·semantic·relation, 나머지는 none
 - 최종 qrels: `data/qrels.txt` — `qid 0 unit_id grade`
 - 실행: `runs/{RUN}.trec` (test), `runs/dev/{RUN}.trec` (dev) — `qid Q0 unit_id rank score RUN`
 """
@@ -29,9 +30,18 @@ QUERY_TYPE_DEFS = {
     "semantic": ("본문에 직접 드러나지 않는 행위, 회피 표현, 사내 은어를 서술하여 찾는 질의", "의미 유사도(밀집 검색)"),
     "relation": ("특정 인물이나 업체 사이 소통, 또는 날짜 선후를 조건으로 하는 질의", "메타데이터 헤더와 의미 유사도"),
 }
-LOCAL_EXCLUDE_LANGS = ("ko", "en")  # 이 둘이 아닌 증거 언어 = 현지어 증거
-SPLITS = ("test", "dev")
+TYPE_NONE = "none"  # search 집합이 아닌 질의의 type (v4.3 §1)
+# 부록 A 지원 분류 → 분석 집합 (v4.3 §1, §3)
+SUPPORT_GROUPS = ("search", "meta", "nonsearch")
+SUPPORT_CLASS_GROUP = {"A": "search", "A′": "search", "C": "meta", "D": "nonsearch", "B": "nonsearch",
+                       "E": "nonsearch"}
+SUPPORT_CLASSES = tuple(SUPPORT_CLASS_GROUP)
+AREAS = tuple(str(i) for i in range(1, 8))
+EXPECTED_QUERIES = 45
+SPLITS = ("test",)  # 개발용(dev) 질의는 없다 (v4.3 §2)
 GRADES = (0, 1, 2)
+DEFAULT_B_QUERIES = {"search": 4, "meta": 1, "nonsearch": 6}  # 판정자 B 질의 수 (v4.3 §5)
+DEFAULT_SMOKE_QIDS = ["q1.1", "q2.6", "q7.2"]  # 실데이터 동작 점검 (v4.3 §2)
 
 # RetrievalConfig 에서 실행별로 바꿀 수 있는 필드 — k값은 고정(지시서 §6.4: config 에서 덮어쓰지 않음)
 _RUN_FIELDS = {"profile", "use_bm25", "use_dense", "rerank", "reranker"}
@@ -54,7 +64,9 @@ class ExperimentConfig:
     pool_runs: list[str]
     comparisons: dict[str, list[tuple[str, str]]]
     latency_runs: list[str]
-    b_ratio: float = 0.25
+    primary_subset: str = "search"
+    b_queries: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_B_QUERIES))
+    smoke_qids: list[str] = field(default_factory=lambda: list(DEFAULT_SMOKE_QIDS))
     text_max_chars: int = 6000
     latency_warmup: int = 3
     latency_repeats: int = 5
@@ -91,6 +103,30 @@ class ExperimentConfig:
     @property
     def judgments_dir(self) -> Path:
         return self.data_dir / "judgments"
+
+    @property
+    def subset_lock_path(self) -> Path:
+        """첫 test 실행 때 기록한 주 분석 집합 (v4.3 §3: 실행 전에 고정하고 바꾸지 않는다)"""
+        return self.runs_dir / "primary_subset.json"
+
+    def check_subset_lock(self, write: bool = False) -> None:
+        """config 의 primary_subset 이 첫 실행 때 기록한 값과 같은지 확인한다
+
+        Args:
+            write: 기록이 없으면 지금 값을 기록한다 (run 에서 True)
+
+        Raises:
+            ConfigError: 기록된 값과 다를 때
+        """
+        path = self.subset_lock_path
+        if path.exists():
+            locked = json.loads(path.read_text(encoding="utf-8")).get("primary_subset")
+            if locked != self.primary_subset:
+                raise ConfigError(f"primary_subset 이 실행 뒤에 바뀌었습니다 (기록 {locked!r} → config "
+                                  f"{self.primary_subset!r}). 실행 전에 고정한 값으로 되돌리세요 ({path})")
+        elif write:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"primary_subset": self.primary_subset}) + "\n", encoding="utf-8")
 
     def run_path(self, run: str, split: str = "test") -> Path:
         """실행 파일 경로 (dev 는 runs/dev/ 아래 — test 실행을 덮어쓰지 않게)"""
@@ -146,14 +182,22 @@ def load_config(path: Path | None = None, root: Path | None = None) -> Experimen
         pool_runs=[str(r) for r in raw.get("pool_runs", list(runs))],
         comparisons=comparisons,
         latency_runs=[str(r) for r in raw.get("latency_runs", [])],
-        b_ratio=float(raw.get("b_ratio", 0.25)),
+        primary_subset=str(raw.get("primary_subset", "search")),
+        b_queries={str(k): int(v) for k, v in (raw.get("b_queries") or DEFAULT_B_QUERIES).items()},
+        smoke_qids=[str(q) for q in raw.get("smoke_qids", DEFAULT_SMOKE_QIDS)],
         text_max_chars=int(raw.get("text_max_chars", 6000)),
         latency_warmup=int(raw.get("latency_warmup", 3)),
         latency_repeats=int(raw.get("latency_repeats", 5)),
         extra={k: v for k, v in raw.items() if k not in {
             "case_id", "depth", "pool_depth", "seed", "runs", "pool_runs", "comparisons",
-            "latency_runs", "b_ratio", "text_max_chars", "latency_warmup", "latency_repeats"}},
+            "latency_runs", "primary_subset", "b_queries", "smoke_qids", "text_max_chars", "latency_warmup",
+            "latency_repeats"}},
     )
+    if cfg.primary_subset not in SUPPORT_GROUPS:
+        raise ConfigError(f"{path}: primary_subset 은 {SUPPORT_GROUPS} 중 하나 (입력 {cfg.primary_subset!r})")
+    bad_b = set(cfg.b_queries) - set(SUPPORT_GROUPS)
+    if bad_b:
+        raise ConfigError(f"{path}: b_queries 의 집합 {sorted(bad_b)} 는 {SUPPORT_GROUPS} 가 아닙니다")
     used = set(cfg.pool_runs) | set(cfg.latency_runs) | {r for _f, a, b in cfg.comparison_pairs() for r in (a, b)}
     unknown = used - set(runs)
     if unknown:
@@ -191,24 +235,23 @@ class Query:
     split: str
     query_lang: str = "ko"
     note: str = ""
-    target_evidence_lang: str = ""  # 질의를 쓸 때 예상한 결정적 증거 언어 (선택, v4.2 Q2)
-    source_question: str = ""       # 부록 A 감사인 질문 번호, 예 "1.3" (선택)
-
-    @property
-    def expects_local_evidence(self) -> bool:
-        """판정 전 기준 현지어 증거 질의 여부 (target_evidence_lang 이 ko·en 이 아님)"""
-        return bool(self.target_evidence_lang) and self.target_evidence_lang not in LOCAL_EXCLUDE_LANGS
+    target_evidence_lang: str = ""  # v4.3: 빈칸 (증거 언어는 판정 후 등급 2 단위로 정한다)
+    source_question: str = ""       # 부록 A 감사인 질문 번호, 예 "1.3"
+    area: str = ""                  # 부록 A 영역 1~7
+    support_class: str = ""         # 부록 A 분류 A·A′·C·D·B·E
+    support_group: str = ""         # 분석 집합 search·meta·nonsearch
 
 
 def read_queries(path: Path, split: str | None = None) -> list[Query]:
-    """queries.jsonl 읽기·검증
+    """queries.jsonl 읽기·검증 (v4.3 §1 — 질의 수 45개는 query_warnings 에서 본다)
 
     Args:
         path: queries.jsonl
-        split: "test" | "dev" | None(전체)
+        split: "test" | None(전체)
 
     Raises:
-        ConfigError: 중복 qid, 빈 질의, 알 수 없는 type·split
+        ConfigError: 중복 qid, 빈 질의, 정해진 6개 밖의 support_class, 분류와 맞지 않는 support_group,
+            search 인데 type 이 exact·semantic·relation 이 아니거나 search 가 아닌데 none 이 아님, split 오류
     """
     out: list[Query] = []
     seen: set[str] = set()
@@ -222,13 +265,22 @@ def read_queries(path: Path, split: str | None = None) -> list[Query]:
             note=str(r.get("note", "")),
             target_evidence_lang=str(r.get("target_evidence_lang") or "").strip(),
             source_question=str(r.get("source_question") or "").strip(),
+            area=str(r.get("area") or "").strip(),
+            support_class=str(r.get("support_class") or "").strip(),
+            support_group=str(r.get("support_group") or "").strip(),
         )
         if not q.qid or not q.text:
             raise ConfigError(f"{path}:{i}: qid·text 가 비어 있습니다")
         if q.qid in seen:
             raise ConfigError(f"{path}:{i}: 중복 qid {q.qid}")
-        if q.type not in QUERY_TYPES:
-            raise ConfigError(f"{path}:{i}: type 은 {QUERY_TYPES} 중 하나 (입력 {q.type!r})")
+        if q.support_class not in SUPPORT_CLASSES:
+            raise ConfigError(f"{path}:{i}: support_class 는 {SUPPORT_CLASSES} 중 하나 (입력 {q.support_class!r})")
+        if q.support_group != SUPPORT_CLASS_GROUP[q.support_class]:
+            raise ConfigError(f"{path}:{i}: support_class {q.support_class} 의 support_group 은 "
+                              f"{SUPPORT_CLASS_GROUP[q.support_class]} (입력 {q.support_group!r})")
+        allowed = QUERY_TYPES if q.support_group == "search" else (TYPE_NONE,)
+        if q.type not in allowed:
+            raise ConfigError(f"{path}:{i}: {q.support_group} 집합의 type 은 {allowed} 중 하나 (입력 {q.type!r})")
         if q.split not in SPLITS:
             raise ConfigError(f"{path}:{i}: split 은 {SPLITS} 중 하나 (입력 {q.split!r})")
         seen.add(q.qid)
@@ -236,37 +288,19 @@ def read_queries(path: Path, split: str | None = None) -> list[Query]:
     return [q for q in out if split is None or q.split == split]
 
 
-# 입력 검증 기준 (v4.2 Q2) — 벗어나면 경고만 하고 실행은 계속한다
-TEST_RANGE = (60, 80)
-DEV_COUNT = 20
-MIN_PER_TYPE = 20
-MIN_LOCAL_EVIDENCE = 5
-
-
 def query_warnings(queries: list[Query]) -> list[str]:
-    """질의 구성 경고 목록 (질의 문장은 넣지 않는다)
+    """질의 구성 경고 목록 (v4.3 §1, 질의 문장은 넣지 않는다)
 
-    - test 질의가 60~80개 범위를 벗어남
-    - dev 가 20개가 아님
-    - test 에서 유형별 질의가 20개 미만인 유형
-    - target_evidence_lang 이 ko·en 이 아닌 test 질의가 5개 미만
+    필드 검증은 read_queries 가 오류로 막고, 여기서는 질의 수가 45개가 아닌 것만 경고한다.
     """
-    test = [q for q in queries if q.split == "test"]
-    dev = [q for q in queries if q.split == "dev"]
-    out: list[str] = []
-    if not TEST_RANGE[0] <= len(test) <= TEST_RANGE[1]:
-        out.append(f"test 질의 {len(test)}개 — 권장 범위 {TEST_RANGE[0]}~{TEST_RANGE[1]}개를 벗어남")
-    if len(dev) != DEV_COUNT:
-        out.append(f"dev 질의 {len(dev)}개 — {DEV_COUNT}개가 아님")
-    for t in QUERY_TYPES:
-        n = sum(1 for q in test if q.type == t)
-        if n < MIN_PER_TYPE:
-            out.append(f"test {t}({QUERY_TYPE_NAMES[t]}) 질의 {n}개 — {MIN_PER_TYPE}개 미만")
-    n_local = sum(1 for q in test if q.expects_local_evidence)
-    if n_local < MIN_LOCAL_EVIDENCE:
-        out.append(f"현지어 증거 예상(target_evidence_lang ∉ ko·en) test 질의 {n_local}개 — "
-                   f"{MIN_LOCAL_EVIDENCE}개 미만")
-    return out
+    if len(queries) != EXPECTED_QUERIES:
+        return [f"질의 {len(queries)}개 — 표준 질문 {EXPECTED_QUERIES}개가 아님"]
+    return []
+
+
+def subset_qids(queries: list[Query], group: str | None) -> list[str]:
+    """분석 집합의 qid (group 이 None 이면 전체 = ALL45)"""
+    return [q.qid for q in queries if group is None or q.support_group == group]
 
 
 # ─────────────────────────── qrels ───────────────────────────

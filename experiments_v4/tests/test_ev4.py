@@ -25,7 +25,7 @@ def test_selftest_full_flow(tmp_path):
     out = selftest(root=tmp_path / "st", keep=True, log=lambda _m: None)
     assert set(EXPECTED) <= set(out["results"])
     assert out["failures"]["n_rows"] >= 1
-    assert out["evaluation"]["n_queries"] == 10
+    assert out["evaluation"]["n_queries"] == 8 and out["evaluation"]["n_queries_all"] == 13
 
 
 def test_config_rejects_k_override(tmp_path):
@@ -54,11 +54,14 @@ def test_qrels_and_run_roundtrip(tmp_path):
 
 
 def test_b_queries_stratified():
-    qs = [Query(f"q{i:02d}", "t", t, "test") for i, t in enumerate(["exact"] * 8 + ["semantic"] * 4 + ["relation"] * 1)]
-    chosen = select_b_queries(qs, 0.25, seed=1)
-    by_type = {t: sum(1 for q in qs if q.qid in chosen and q.type == t) for t in ("exact", "semantic", "relation")}
-    assert by_type == {"exact": 2, "semantic": 1, "relation": 1}
-    assert chosen == select_b_queries(qs, 0.25, seed=1)
+    groups = ["search"] * 17 + ["meta"] * 3 + ["nonsearch"] * 25
+    qs = [Query(f"q{i:02d}", "t", "none", "test", support_group=g) for i, g in enumerate(groups)]
+    quota = {"search": 4, "meta": 1, "nonsearch": 6}
+    chosen = select_b_queries(qs, quota, seed=1)
+    by_group = {g: sum(1 for q in qs if q.qid in chosen and q.support_group == g) for g in quota}
+    assert by_group == quota
+    assert chosen == select_b_queries(qs, quota, seed=1)
+    assert select_b_queries(qs[17:20], {"meta": 5}, seed=1) == ["q17", "q18", "q19"]  # 집합보다 많으면 전부
 
 
 @pytest.mark.parametrize(("langs", "expected"), [
@@ -101,31 +104,94 @@ def test_ranx_fisher_is_two_sided():
     assert p_ab == pytest.approx(p_ba, abs=0.03)
 
 
-def test_query_optional_fields_and_warnings(tmp_path):
+def _qrow(qid: str, cls: str, group: str, qtype: str, **kw) -> dict:
+    return {"qid": qid, "text": "t", "area": "1", "support_class": cls, "support_group": group, "type": qtype,
+            "split": "test", **kw}
+
+
+def test_query_fields_and_warnings(tmp_path):
+    """v4.3 §1 입력 검증 — 분류 6개, 집합↔분류, search 만 유형, 나머지 none, 45개 경고"""
     from ev4.io import query_warnings, read_queries, write_jsonl
 
-    rows = [{"qid": f"q{i}", "text": "t", "type": "exact", "split": "test",
-             "target_evidence_lang": "zh" if i < 2 else "ko", "source_question": "1.3"} for i in range(3)]
-    rows.append({"qid": "d1", "text": "t", "type": "semantic", "split": "dev"})
+    rows = [_qrow("q1.1", "A", "search", "semantic", source_question="1.1"), _qrow("q1.2", "B", "nonsearch", "none"),
+            _qrow("q1.8", "C", "meta", "none"), _qrow("q2.1", "A′", "search", "relation")]
     write_jsonl(tmp_path / "q.jsonl", rows)
     qs = read_queries(tmp_path / "q.jsonl")
-    assert qs[0].target_evidence_lang == "zh" and qs[0].source_question == "1.3" and qs[0].expects_local_evidence
-    assert qs[3].target_evidence_lang == "" and not qs[3].expects_local_evidence
-    w = " / ".join(query_warnings(qs))
-    for frag in ("test 질의 3개", "dev 질의 1개", "semantic", "relation", "현지어 증거 예상"):
-        assert frag in w
-    assert "test exact" in w  # 3개 < 20
+    assert [q.support_group for q in qs] == ["search", "nonsearch", "meta", "search"]
+    assert qs[0].source_question == "1.1" and qs[0].area == "1"
+    assert query_warnings(qs) == ["질의 4개 — 표준 질문 45개가 아님"]
+
+    bad = [
+        (_qrow("x", "F", "search", "exact"), "support_class"),
+        (_qrow("x", "C", "search", "exact"), "support_group"),
+        (_qrow("x", "A", "search", "none"), "type"),
+        (_qrow("x", "D", "nonsearch", "semantic"), "type"),
+        (_qrow("x", "A", "search", "exact", split="dev"), "split"),
+    ]
+    for row, frag in bad:
+        write_jsonl(tmp_path / "bad.jsonl", [row])
+        with pytest.raises(ConfigError, match=frag):
+            read_queries(tmp_path / "bad.jsonl")
+    write_jsonl(tmp_path / "dup.jsonl", [rows[0], rows[0]])
+    with pytest.raises(ConfigError, match="중복"):
+        read_queries(tmp_path / "dup.jsonl")
 
 
 def test_t0_lines_has_no_query_text():
     from ev4.querystats import t0_lines
 
-    qs = [Query("q1", "비밀 질의 문장", "exact", "test", target_evidence_lang="zh", source_question="1.8"),
-          Query("q2", "다른 질의", "relation", "test"), Query("d1", "개발 질의", "semantic", "dev")]
-    text = "\n".join(t0_lines(qs, {"q1": True, "q2": False}))
-    assert "비밀 질의 문장" not in text and "개발 질의" not in text
-    assert "| 계 | 2 | 1 | 1 | 1 |" in text
-    assert "| 1.8 | 1 | 0 |" in text
+    qs = [Query("q1.1", "비밀 질의 문장", "exact", "test", area="1", support_class="A", support_group="search"),
+          Query("q1.2", "다른 질의", "none", "test", area="1", support_class="B", support_group="nonsearch"),
+          Query("q2.1", "세 번째", "relation", "test", area="2", support_class="A′", support_group="search")]
+    text = "\n".join(t0_lines(qs))
+    assert "비밀 질의 문장" not in text and "다른 질의" not in text
+    assert "| 1 | 1 | 0 | 0 | 0 | 1 | 0 | 2 | 1 | 0 | 0 |" in text
+    assert "| 계 | 1 | 1 | 0 | 0 | 1 | 0 | 3 | 1 | 0 | 1 |" in text
+
+
+def test_t0b_distribution():
+    from ev4.querystats import t0b_lines
+
+    qs = [Query("a", "t", "exact", "test", support_group="search"),
+          Query("b", "t", "semantic", "test", support_group="search"),
+          Query("c", "t", "none", "test", support_group="meta")]
+    qrels = {"a": {f"u{i}": 2 if i < 3 else 1 for i in range(12)} | {"z": 0}, "b": {"u": 1}}
+    text = "\n".join(t0b_lines(qs, qrels))
+    # search: 등급≥1 [12, 1] → 평균 6.5 중앙값 6.5 최대 12, 등급 2 [3, 0], 0개 질의 0, 10개 초과 1
+    assert "| S17 (search) | 2 | 6.5 | 6.5 | 12 | 1.5 | 1.5 | 3 | 0 | 1 |" in text
+    assert "| meta | 1 | 0.0 | 0 | 0 | 0.0 | 0 | 0 | 1 | 0 |" in text
+
+
+def test_subset_lock(tmp_path):
+    (tmp_path / "config.yaml").write_text("case_id: c\nprimary_subset: search\nruns:\n  R1: {profile: hdr-qwen3}\n",
+                                          encoding="utf-8")
+    cfg = load_config(root=tmp_path)
+    cfg.check_subset_lock()  # 기록 없음 → 통과, 기록하지 않음
+    assert not cfg.subset_lock_path.exists()
+    cfg.check_subset_lock(write=True)
+    cfg.primary_subset = "meta"
+    with pytest.raises(ConfigError, match="primary_subset"):
+        cfg.check_subset_lock()
+    (tmp_path / "config.yaml").write_text("case_id: c\nprimary_subset: all\nruns:\n  R1: {profile: hdr-qwen3}\n",
+                                          encoding="utf-8")
+    with pytest.raises(ConfigError, match="primary_subset"):
+        load_config(root=tmp_path)
+
+
+def test_standard_queries_file_passes_validation():
+    """docs/v4/data/queries_45.jsonl (사건 정보 없는 표준 질문, P0 예외) — 45개·분류·유형 수"""
+    from collections import Counter
+
+    from ev4.io import query_warnings, read_queries
+
+    path = Path(__file__).resolve().parents[2] / "docs" / "v4" / "data" / "queries_45.jsonl"
+    if not path.exists():
+        pytest.skip("표준 질문 파일 없음")
+    qs = read_queries(path)
+    assert query_warnings(qs) == []
+    assert Counter(q.support_group for q in qs) == {"search": 17, "meta": 3, "nonsearch": 25}
+    assert Counter(q.type for q in qs if q.support_group == "search") == {"exact": 2, "semantic": 9, "relation": 6}
+    assert all(q.split == "test" and not q.target_evidence_lang for q in qs)
 
 
 def test_category_hints():

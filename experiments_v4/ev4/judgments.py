@@ -19,7 +19,7 @@ from typing import Any
 
 from ev4.io import (
     GRADES,
-    QUERY_TYPES,
+    SUPPORT_GROUPS,
     ExperimentConfig,
     Qrels,
     read_jsonl,
@@ -108,7 +108,7 @@ def agreement(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> dict
 
     Returns:
         {annotators, pair, n, exact_agreement, relevant_agreement, quadratic_weighted_kappa,
-         n_disagree, by_type}
+         n_disagree, a_queries_by_group, b_queries_by_group}
     """
     by_unit = _by_unit(cfg)
     annotators = sorted({a for d in by_unit.values() for a in d if a != ADJUDICATOR})
@@ -134,15 +134,16 @@ def agreement(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> dict
     })
     dis = sorted(k for k, d in shared.items() if d[a1] != d[a2])
     res["n_disagree"] = len(dis)
-    # B 판정 질의 비율·유형별 분포 (v4.2 J3)
-    qtypes = _query_types(cfg)
+    # B 판정 질의 비율·집합별 분포 (v4.2 J3, v4.3 §5)
+    qgroups = _query_groups(cfg)
     q_a = {q for (q, _u), d in by_unit.items() if a1 in d}
     q_b = {q for (q, _u), d in by_unit.items() if a2 in d}
     res["n_queries_A"] = len(q_a)
     res["n_queries_B"] = len(q_b)
     res["b_query_ratio"] = len(q_b) / len(q_a) if q_a else float("nan")
-    res["b_queries_by_type"] = {t: sum(1 for q in q_b if qtypes.get(q) == t) for t in QUERY_TYPES}
-    res["a_queries_by_type"] = {t: sum(1 for q in q_a if qtypes.get(q) == t) for t in QUERY_TYPES}
+    res["b_queries_by_group"] = {g: sum(1 for q in q_b if qgroups.get(q) == g) for g in SUPPORT_GROUPS}
+    res["a_queries_by_group"] = {g: sum(1 for q in q_a if qgroups.get(q) == g) for g in SUPPORT_GROUPS}
+    res["qids_B"] = sorted(q_b)
 
     # 중재 시트 — 이미 중재한 등급은 보존
     adj_path = adjudication_path(cfg)
@@ -197,10 +198,10 @@ def disputed_units(cfg: ExperimentConfig) -> set[tuple[str, str]]:
     return out
 
 
-def _query_types(cfg: ExperimentConfig) -> dict[str, str]:
+def _query_groups(cfg: ExperimentConfig) -> dict[str, str]:
     if not cfg.queries_path.exists():
         return {}
-    return {str(r["qid"]): str(r.get("type", "")) for r in read_jsonl(cfg.queries_path)}
+    return {str(r["qid"]): str(r.get("support_group", "")) for r in read_jsonl(cfg.queries_path)}
 
 
 def _agreement_markdown(res: dict[str, Any]) -> str:
@@ -216,10 +217,11 @@ def _agreement_markdown(res: dict[str, Any]) -> str:
         f"| 2차 가중 카파 | {res['quadratic_weighted_kappa']:.3f} |",
         f"| 불일치 단위 수 | {res['n_disagree']} |",
         f"| B 판정 질의 비율 | {res['n_queries_B']}/{res['n_queries_A']} = {res['b_query_ratio']:.3f} |",
-        "", f"| 유형 | {a1} 판정 질의 | {a2} 판정 질의 |", "|---|---:|---:|",
+        "", f"| 집합 | {a1} 판정 질의 | {a2} 판정 질의 |", "|---|---:|---:|",
     ]
-    for t in QUERY_TYPES:
-        lines.append(f"| {t} | {res['a_queries_by_type'][t]} | {res['b_queries_by_type'][t]} |")
+    for g in SUPPORT_GROUPS:
+        lines.append(f"| {g} | {res['a_queries_by_group'][g]} | {res['b_queries_by_group'][g]} |")
+    lines += ["", f"{a2} 판정 질의 (qid): " + (", ".join(res.get("qids_B", [])) or "없음")]
     lines += ["", "| A\\B | 0 | 1 | 2 |", "|---|---:|---:|---:|"]
     for x in GRADES:
         lines.append(f"| {x} | " + " | ".join(str(res["confusion"][f"{x}{y}"]) for y in GRADES) + " |")
@@ -296,11 +298,14 @@ def finalize(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> Qrels
     dist = {g: sum(1 for v in qrels.values() for x in v.values() if x == g) for g in GRADES}
     log(f"[finalize] 질의 {len(qrels)} · 단위 {n} (등급 0/1/2 = {dist[0]}/{dist[1]}/{dist[2]}, 중재 {n_adj}) "
         f"→ {cfg.qrels_path}")
-    test_qids = ({q.qid for q in read_queries(cfg.queries_path, split="test")}
-                 if cfg.queries_path.exists() else None)
-    st = qrels_stats(qrels, test_qids)
+    queries = read_queries(cfg.queries_path, split="test") if cfg.queries_path.exists() else []
+    st = qrels_stats(qrels, {q.qid for q in queries} if queries else None)
     cfg.results_dir.mkdir(parents=True, exist_ok=True)
     (cfg.results_dir / "J4_qrels.md").write_text(_qrels_markdown(st, n_adj), encoding="utf-8")
+    if queries:
+        from ev4.querystats import write_t0b
+
+        write_t0b(cfg, queries, qrels)  # v4.3 §4
     log(f"[finalize] 평가용: 등급 2 {st['grade2_units']} · 등급 1 {st['grade1_units']} · "
         f"등급 2 없는 질의 {len(st['queries_without_grade2'])}건")
     return qrels

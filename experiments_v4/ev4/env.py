@@ -240,6 +240,7 @@ def collect_env(cfg: ExperimentConfig | None = None) -> dict[str, Any]:
             "chat_session_gap_minutes": settings.chat_session_gap_minutes,
             "embed_num_ctx": settings.embed_num_ctx, "llm_num_ctx": settings.llm_num_ctx,
             "seed": cfg.seed if cfg else None,
+            "primary_subset": cfg.primary_subset if cfg else None,
         },
         "fake_models": settings.ast_fake_models,
     }
@@ -306,6 +307,7 @@ def render_e1(e: dict[str, Any]) -> str:
         f"| CHAT_SESSION_GAP_MINUTES | {s['chat_session_gap_minutes']} |",
         f"| num_ctx (임베딩 / LLM) | {s['embed_num_ctx']} / {s['llm_num_ctx']} |",
         f"| seed | {s['seed'] if s['seed'] is not None else '–'} |",
+        f"| 주 분석 집합 (primary_subset) | {s.get('primary_subset') or '–'} |",
         "",
         "## 지시문 원문",
         "",

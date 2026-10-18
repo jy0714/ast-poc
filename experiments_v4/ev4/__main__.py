@@ -1,13 +1,14 @@
 """CLI — `cd experiments_v4 && python -m ev4 <명령>` (지시서 §6.5)
 
     corpus                                   단위 통계 → results/T1_corpus.md
-    queries                                  질의 구성 T0(판정 전) + 입력 검증 경고 → results/T0_queries.md
-    run --split dev|test --runs R2 R4 | all  retrieve() 실행 → runs/
-    pool [--split test] [--no-translate]     판정 시트 → data/judgments/pool_{A,B}.csv
+    queries                                  질의 구성 T0 + 입력 검증 경고 → results/T0_queries.md
+    smoke                                    표준 질문 3개 동작 점검(오류·응답 시간·GPU 메모리) → results/smoke.md
+    run --runs R2 R4 | all                   retrieve() 실행 → runs/ (첫 실행이 primary_subset 을 기록)
+    pool [--no-translate]                    판정 시트 → data/judgments/pool_{A,B}.csv
     judgments import <csv...>                판정 가져오기
     judgments agreement                      일치도 + 중재 시트
-    judgments finalize                       최종 qrels → data/qrels.txt
-    evaluate                                 T2~T6 → results/tables.md
+    judgments finalize                       최종 qrels → data/qrels.txt, T0b
+    evaluate                                 T2~T6·T8 → results/tables.md
     latency                                  T7 → results/T7_latency.md
     failures                                 F1 → results/F1_failures.csv
     env                                      E1 → results/E1_env.md
@@ -29,11 +30,10 @@ def _parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("corpus")
     sub.add_parser("queries")
+    sub.add_parser("smoke")
     p = sub.add_parser("run")
-    p.add_argument("--split", choices=["dev", "test"], default="test")
     p.add_argument("--runs", nargs="+", default=["all"])
     p = sub.add_parser("pool")
-    p.add_argument("--split", choices=["dev", "test"], default="test")
     p.add_argument("--no-translate", action="store_true", help="현지어 단위 번역 생략")
     p = sub.add_parser("judgments")
     js = p.add_subparsers(dest="jcmd", required=True)
@@ -66,8 +66,8 @@ def main(argv: list[str] | None = None) -> int:
     from ev4.io import load_config, query_warnings, read_queries
 
     cfg = load_config(args.config, args.root)
-    if args.cmd in ("run", "pool"):
-        for w in query_warnings(read_queries(cfg.queries_path)):  # 경고만 내고 실행은 계속 (v4.2 Q2)
+    if args.cmd in ("run", "pool", "smoke"):
+        for w in query_warnings(read_queries(cfg.queries_path)):  # 질의 수는 경고만 (필드 오류는 read_queries 가 막음)
             print(f"[경고] {w}")
     if args.cmd == "corpus":
         from ev4.corpus import build_corpus
@@ -77,6 +77,10 @@ def main(argv: list[str] | None = None) -> int:
         from ev4.querystats import write_t0
 
         write_t0(cfg, read_queries(cfg.queries_path))
+    elif args.cmd == "smoke":
+        from ev4.smoke import smoke
+
+        smoke(cfg, read_queries(cfg.queries_path))
     elif args.cmd == "run":
         from ev4.run import run_all
 
@@ -84,12 +88,12 @@ def main(argv: list[str] | None = None) -> int:
         unknown = [r for r in names if r not in cfg.runs]
         if unknown:
             raise SystemExit(f"config 에 없는 실행: {unknown}")
-        run_all(cfg, read_queries(cfg.queries_path, split=args.split), names, args.split)
+        cfg.check_subset_lock(write=True)  # v4.3 §3: 주 분석 집합은 실행 전에 고정
+        run_all(cfg, read_queries(cfg.queries_path, split="test"), names, "test")
     elif args.cmd == "pool":
         from ev4.pool import build_pool
 
-        build_pool(cfg, read_queries(cfg.queries_path, split=args.split), args.split,
-                   translate=not args.no_translate)
+        build_pool(cfg, read_queries(cfg.queries_path, split="test"), "test", translate=not args.no_translate)
     elif args.cmd == "judgments":
         from ev4 import judgments
 

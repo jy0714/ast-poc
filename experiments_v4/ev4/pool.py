@@ -2,7 +2,8 @@
 
 - 블라인드: 시트에는 어느 실행이 찾았는지 넣지 않는다. 출처는 runs/pool_provenance.jsonl.
 - 질의 안에서 단위 순서를 seed 고정으로 섞는다.
-- A 는 전체 질의, B 는 질의 유형별 층화로 b_ratio 만큼 고른 질의의 전체 단위를 판정한다.
+- A 는 전체 질의(45개), B 는 support_group 별 층화로 config `b_queries`(search 4·meta 1·nonsearch 6)만큼
+  seed 고정으로 고른 질의의 전체 단위를 판정한다 (v4.3 §5).
 - CSV 는 Excel 호환 UTF-8 BOM.
 - 판정 기준 문서 data/judgments/판정기준.md 를 함께 만든다 (v4.2 J2).
 - 풀 통계(질의당 대상 수, 번역 단위 수, 잘라 보인 단위 수) → results/J1_pool.md (v4.2 J1).
@@ -11,7 +12,6 @@
 from __future__ import annotations
 
 import csv
-import math
 import random
 from collections import defaultdict
 from collections.abc import Callable
@@ -22,6 +22,7 @@ from ev4.io import (
     QUERY_TYPE_DEFS,
     QUERY_TYPE_NAMES,
     QUERY_TYPES,
+    SUPPORT_GROUPS,
     ExperimentConfig,
     Query,
     read_run,
@@ -40,6 +41,10 @@ GRADE_CRITERIA = [
     (1, "관련", "질의와 관련되어 감사인이 검토해야 하지만, 단독으로는 결론 근거가 되지 않는다"),
     (0, "무관", "질의와 관련이 없다"),
 ]
+# 집계·비교형 질문 판정 안내 (v4.3 §5, 사용자 확정)
+AGGREGATE_GUIDE = ("질문이 여러 자료를 모아야 답할 수 있는 형태이더라도, 그 답을 단독으로 보여 주는 단위"
+                   "(예: 입찰 참여 업체가 정리된 표, 견적 조건 변경을 지시한 메일)는 2, 답을 찾는 단서가 되는 단위는 1, "
+                   "관련 없는 단위는 0으로 매긴다.")
 
 
 def criteria_markdown() -> str:
@@ -47,7 +52,9 @@ def criteria_markdown() -> str:
     lines = ["# 판정 기준", "", "## 등급", "", "| 등급 | 구분 | 기준 |", "|---|---|---|"]
     lines += [f"| {g} | {name} | {desc} |" for g, name, desc in GRADE_CRITERIA]
     lines += ["", "등급은 원문 기준으로 매긴다.", "번역은 참고용이다.", "",
-              "## 질의 유형", "", "| `type` | 이름 | 정의 | 주요 검색 신호 |", "|---|---|---|---|"]
+              "### 집계·비교를 요구하는 질문 [사용자 확정]", "", f"> {AGGREGATE_GUIDE}", "",
+              "## 질의 유형 (search 집합 17개에만 적용, 나머지 질의는 `none`)", "",
+              "| `type` | 이름 | 정의 | 주요 검색 신호 |", "|---|---|---|---|"]
     lines += [f"| `{t}` | {QUERY_TYPE_NAMES[t]} | {QUERY_TYPE_DEFS[t][0]} | {QUERY_TYPE_DEFS[t][1]} |"
               for t in QUERY_TYPES]
     return "\n".join(lines) + "\n"
@@ -79,21 +86,22 @@ def pool_stats_markdown(stats: dict[str, Any]) -> str:
         f"| {lim}자를 넘어 잘라 보인 고유 단위 수 | {stats['truncated_units']} |",
         f"| B 판정 질의 수 | {stats['queries_B']} |",
         f"| B 판정 행 수 | {stats['rows_B']} |",
+        "",
+        "B 판정 질의 (qid): " + (", ".join(stats.get("qids_B", [])) or "없음"),
     ]
     return "\n".join(lines) + "\n"
 
 
-def select_b_queries(queries: list[Query], ratio: float, seed: int) -> list[str]:
-    """유형별 층화 표집 — 유형마다 ceil(n × ratio)개 (최소 1개, 유형에 질의가 있으면)"""
-    by_type: dict[str, list[str]] = defaultdict(list)
+def select_b_queries(queries: list[Query], quota: dict[str, int], seed: int) -> list[str]:
+    """support_group 별 층화 표집 (v4.3 §5) — 집합마다 quota 개 (집합 질의 수보다 많으면 전부), seed 고정"""
+    by_group: dict[str, list[str]] = defaultdict(list)
     for q in queries:
-        by_type[q.type].append(q.qid)
+        by_group[q.support_group].append(q.qid)
     rng = random.Random(seed)
     chosen: list[str] = []
-    for t in sorted(by_type):
-        qids = sorted(by_type[t])
-        k = min(len(qids), max(1, math.ceil(len(qids) * ratio))) if ratio > 0 else 0
-        chosen += rng.sample(qids, k)
+    for g in SUPPORT_GROUPS:
+        qids = sorted(by_group.get(g, []))
+        chosen += rng.sample(qids, min(len(qids), max(0, quota.get(g, 0))))
     return sorted(chosen)
 
 
@@ -121,7 +129,7 @@ def build_pool(
     idx = case_index.load(cfg.case_id)
     runs = {name: read_run(cfg.run_path(name, split)) for name in cfg.pool_runs}
     translator = Translator(cfg.cache_dir / "translations.jsonl") if translate else None
-    b_qids = set(select_b_queries(queries, cfg.b_ratio, cfg.seed))
+    b_qids = set(select_b_queries(queries, cfg.b_queries, cfg.seed))
 
     rows_a: list[dict] = []
     provenance: list[dict] = []
@@ -164,7 +172,8 @@ def build_pool(
     n_tr = translator.n_new if translator else 0
     tr_rows = [r for r in rows_a if r["translation_ko"]]
     stats: dict[str, Any] = {
-        "rows_A": len(rows_a), "rows_B": len(rows_b), "queries_B": len(b_qids), "translated": n_tr,
+        "rows_A": len(rows_a), "rows_B": len(rows_b), "queries_B": len(b_qids), "qids_B": sorted(b_qids),
+        "translated": n_tr,
         "n_runs": len(runs), "pool_depth": cfg.pool_depth, "n_queries": len(queries),
         "per_query_mean": sum(per_query) / len(per_query) if per_query else 0.0,
         "per_query_min": min(per_query, default=0), "per_query_max": max(per_query, default=0),
@@ -178,4 +187,5 @@ def build_pool(
     log(f"[pool] A {len(rows_a)}행 · B {len(rows_b)}행 (질의 {len(b_qids)}건) · 새 번역 {n_tr}건 · "
         f"질의당 {stats['per_query_mean']:.1f}건 ({stats['per_query_min']}~{stats['per_query_max']}) "
         f"→ {cfg.judgments_dir}")
+    log(f"[pool] B 판정 질의: {', '.join(sorted(b_qids))}")
     return stats
