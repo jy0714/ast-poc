@@ -50,6 +50,7 @@ import numpy as np
 from src.cases.case_store import CaseMetadata, CaseStatus, CaseStore
 from src.index import case_index
 from src.index.case_index import ProfileVectors, embed_input, input_hash, profile_spec
+from src.index.embed_cache import EmbedCheckpoint
 from src.parsers.document_parser import DocumentParser
 from src.units.builder import BuildStats, UnitBuilder, UnitCollector, relative_source_path
 from src.units.schema import EvidenceUnit, UnitPart
@@ -87,6 +88,8 @@ def _unload_llm_for_phase_a() -> None:
 
 # 파싱 풀 분기 임계값 — 1MB 이상이면 ProcessPool, 미만이면 ThreadPool로 라우팅.
 _PARSE_PROCESS_THRESHOLD_BYTES = 1024 * 1024  # 1MB
+# 파일이 이만큼 이상이면 크기와 무관하게 모두 ProcessPool로 (대량 EML·문서 케이스)
+_ALL_PROCESS_MIN_FILES = 1000
 
 
 def _get_parsing_worker_count() -> int:
@@ -141,8 +144,20 @@ _subprocess_builders: dict[str, UnitBuilder] = {}
 
 
 def _subprocess_init() -> None:
-    """ProcessPoolExecutor 워커 초기화 (빌더는 케이스별로 첫 task에서 생성)"""
+    """ProcessPoolExecutor 워커 초기화 (빌더는 케이스별로 첫 task에서 생성)
+
+    파싱 워커는 우선순위를 낮춘다. 워커가 CPU를 다 쓰면 Ollama와 임베딩 스레드가 밀려
+    GPU가 놀게 된다 (2026-10-19 실측: 보통 우선순위에서 GPU 0~100% 들쭉날쭉, 낮춘 뒤 80~100%).
+    """
     _subprocess_builders.clear()
+    with contextlib.suppress(Exception):
+        if os.name == "nt":
+            import ctypes
+
+            below_normal = 0x4000  # BELOW_NORMAL_PRIORITY_CLASS
+            ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), below_normal)
+        else:
+            os.nice(5)
 
 
 def _process_file_subprocess(args: tuple[str, str, str]) -> FileResult:
@@ -226,6 +241,9 @@ class IndexingProgress:
     phase: IndexingPhase = IndexingPhase.IDLE
     total_files: int = 0
     processed_files: int = 0
+    # 파일을 큰 것부터 처리하므로 파일 수 진행률은 초반에 크게 낮게 나온다 → 진행률·ETA는 바이트 기준
+    total_bytes: int = 0
+    processed_bytes: int = 0
     total_chunks: int = 0
     parsed_chunks: int = 0  # 파싱→chunk_queue로 전달된 누적 청크 수
     embedded_chunks: int = 0  # GPU 임베딩 완료된 청크 수 (저장 큐로 넘어간 청크)
@@ -273,7 +291,9 @@ class IndexingProgress:
 
     @property
     def progress_percent(self) -> float:
-        """진행률 (0.0 ~ 100.0)"""
+        """진행률 (0.0 ~ 100.0) — 바이트 기준 (크기 정보가 없으면 파일 수 기준)"""
+        if self.total_bytes > 0:
+            return min(100.0, (self.processed_bytes / self.total_bytes) * 100)
         if self.total_files == 0:
             return 0.0
         return min(100.0, (self.processed_files / self.total_files) * 100)
@@ -323,9 +343,15 @@ class IndexingProgress:
     def eta_seconds(self) -> float | None:
         """예상 남은 시간 (초), 추정 불가하면 None
 
-        파일 처리 속도 기반 (파싱 단계가 보통 가장 오래 걸림). 파일 메타가 없으면
-        임베딩 throughput으로 fallback.
+        처리한 바이트 속도 기반 (파일을 큰 것부터 처리하므로 파일 수 속도는 쓰지 않는다).
+        크기 정보가 없으면 파일 수, 그것도 없으면 임베딩 throughput으로 fallback.
         """
+        elapsed = self.elapsed_seconds
+        if self.total_bytes > 0 and self.processed_bytes > 0 and elapsed > 0:
+            remaining_bytes = self.total_bytes - self.processed_bytes
+            if remaining_bytes <= 0:
+                return 0.0
+            return remaining_bytes / (self.processed_bytes / elapsed)
         if self.total_files > 0 and self.processed_files > 0:
             remaining = self.total_files - self.processed_files
             if remaining <= 0:
@@ -371,6 +397,8 @@ class IndexingProgress:
             "phase": self.phase.value,
             "total_files": self.total_files,
             "processed_files": self.processed_files,
+            "total_bytes": self.total_bytes,
+            "processed_bytes": self.processed_bytes,
             "total_chunks": self.total_chunks,
             "parsed_chunks": self.parsed_chunks,
             "embedded_chunks": self.embedded_chunks,
@@ -666,6 +694,9 @@ class IndexingPipeline:
         reuse = case_index.reusable_vectors(case_id, spec.name)
         if reuse:
             logger.info(f"기존 색인 벡터 {len(reuse):,}개 재사용 가능 ({spec.name})")
+        # 중단된 이전 실행이 남긴 벡터도 재사용하고, 이번 실행의 새 벡터는 바로 조각 파일로 남긴다
+        ckpt = EmbedCheckpoint(case_id, spec.name, spec.embed_model)
+        reuse.update(ckpt.load())
 
         part_queue: queue.Queue[list[UnitPart] | None] = queue.Queue(maxsize=20)
         collector = UnitCollector()
@@ -687,11 +718,12 @@ class IndexingPipeline:
                     return
                 batch_num += 1
                 t0 = time.monotonic()
-                todo: list[tuple[UnitPart, str]] = []
+                todo: list[tuple[UnitPart, str, str]] = []
                 n_reused = 0
                 for p in batch:
                     text = embed_input(p, spec.header)
-                    v = reuse.get((p.part_id, input_hash(text)))
+                    h = input_hash(text)
+                    v = reuse.get((p.part_id, h))
                     if v is None and not text.strip():
                         # 입력이 빈 파트(본문 없는 메일의 nohdr 입력 등) → 영벡터 (cos 0, 색인에는 남김)
                         v = np.zeros(embedder.get_dimension(), dtype=np.float16)
@@ -699,16 +731,25 @@ class IndexingPipeline:
                         vectors[p.part_id] = v
                         n_reused += 1
                     else:
-                        todo.append((p, text))
+                        todo.append((p, text, h))
                 n_ok = 0
                 if todo:
                     try:
-                        embs = embedder.embed_texts([t for _, t in todo], cancel_event=cancel_flag)
+                        embs = embedder.embed_texts([t for _, t, _ in todo], cancel_event=cancel_flag)
                         failed = set(embedder._last_failed_indices)
-                        for i, (p, _) in enumerate(todo):
+                        new_keys: list[tuple[str, str]] = []
+                        new_vecs: list[np.ndarray] = []
+                        for i, (p, _, h) in enumerate(todo):
                             if i not in failed and embs[i]:
-                                vectors[p.part_id] = np.asarray(embs[i], dtype=np.float16)
+                                vec = np.asarray(embs[i], dtype=np.float16)
+                                vectors[p.part_id] = vec
+                                new_keys.append((p.part_id, h))
+                                new_vecs.append(vec)
                                 n_ok += 1
+                        try:
+                            ckpt.add(new_keys, new_vecs)
+                        except Exception as ce:  # 체크포인트 실패는 인덱싱을 멈추지 않는다
+                            logger.warning(f"임베딩 체크포인트 저장 실패 (무시): {ce}")
                         if failed and not (cancel_flag and cancel_flag.is_set()):
                             idx_sorted = sorted(failed)
                             _save_failed_parts(
@@ -727,7 +768,7 @@ class IndexingPipeline:
                     except Exception as e:
                         msg = f"임베딩 super-batch {batch_num} 실패 ({len(todo)}개): {e}"
                         try:
-                            _save_failed_parts(case_id, [p for p, _ in todo])
+                            _save_failed_parts(case_id, [p for p, _, _ in todo])
                             msg += " → failed_embeddings 저장"
                         except Exception as save_e:
                             msg += f" + 저장 실패 (DATA LOSS): {save_e}"
@@ -757,11 +798,26 @@ class IndexingPipeline:
                 while len(buffer) >= super_batch_size and not (cancel_flag and cancel_flag.is_set()):
                     flush(buffer[:super_batch_size])
                     buffer = buffer[super_batch_size:]
+            try:
+                ckpt.flush()
+            except Exception as ce:
+                logger.warning(f"임베딩 체크포인트 저장 실패 (무시): {ce}")
             wall_times["embed"] = active
             progress.embed_wall_seconds = active
 
         embed_thread = threading.Thread(target=embedding_worker, daemon=True, name=f"embed-{case_id}")
         embed_thread.start()
+
+        def put_parts(item: list[UnitPart] | None) -> None:
+            """part_queue에 넣는다. 취소로 임베딩 워커가 먼저 끝나면 가득 찬 큐에서 영원히
+            기다리지 않도록 1초마다 취소·워커 생존을 확인하고 포기한다."""
+            while True:
+                try:
+                    part_queue.put(item, timeout=1.0)
+                    return
+                except queue.Full:
+                    if (cancel_flag and cancel_flag.is_set()) or not embed_thread.is_alive():
+                        return
 
         # 파일을 크기로 분류: 큰 파일은 ProcessPool(GIL 우회), 작은 파일은 ThreadPool.
         # 파일 수가 적으면 ProcessPool 부팅 비용이 더 커서 ThreadPool만 쓴다.
@@ -774,8 +830,14 @@ class IndexingPipeline:
             sized.append((f, rel, size))
         sized.sort(key=lambda x: x[2], reverse=True)
         use_process = len(files) > num_workers * 2 and num_workers > 1
-        large = [(f, r) for f, r, s in sized if use_process and s >= _PARSE_PROCESS_THRESHOLD_BYTES]
-        small = [(f, r) for f, r, s in sized if not (use_process and s >= _PARSE_PROCESS_THRESHOLD_BYTES)]
+        # 파일이 많으면 작은 파일도 ProcessPool로 보낸다. 프로세스 부팅은 풀 생성 때 한 번뿐이고,
+        # 수만 개 EML·문서를 ThreadPool로 돌리면 GIL 때문에 사실상 코어 1개로 파싱하게 된다.
+        all_process = use_process and len(files) >= _ALL_PROCESS_MIN_FILES
+        to_proc = [use_process and (all_process or s >= _PARSE_PROCESS_THRESHOLD_BYTES) for _, _, s in sized]
+        large = [(f, r) for (f, r, _), tp in zip(sized, to_proc, strict=True) if tp]
+        small = [(f, r) for (f, r, _), tp in zip(sized, to_proc, strict=True) if not tp]
+        size_of = {f: s for f, _, s in sized}
+        progress.total_bytes = sum(size_of.values())
         process_workers = min(num_workers, len(large)) if large else 0
         thread_workers = min(num_workers, len(small)) if small else 0
         logger.info(
@@ -824,6 +886,7 @@ class IndexingPipeline:
                                 with counter_lock:
                                     progress.errors.append(msg)
                                     progress.processed_files += 1
+                                    progress.processed_bytes += size_of.get(f, 0)
                                 logger.warning(msg)
                             else:
                                 retry_large.append((f, rel))
@@ -862,6 +925,7 @@ class IndexingPipeline:
                                 with counter_lock:
                                     progress.errors.append(msg)
                                     progress.processed_files += 1
+                                    progress.processed_bytes += size_of.get(f, 0)
                                 logger.warning(msg)
                                 continue
                             pending[_thread_pool().submit(_process_file_thread, f, rel, case_id)] = (f, rel, False)
@@ -918,7 +982,7 @@ class IndexingPipeline:
                                 new_parts = [p for uid in new_ids for p in collector.units[uid].parts]
                                 if new_parts:
                                     # 큐가 가득 차면 여기서 block → 자연스러운 backpressure
-                                    part_queue.put(new_parts)
+                                    put_parts(new_parts)
                                     with counter_lock:
                                         progress.parsed_chunks += len(new_parts)
                         except Exception as e:
@@ -929,12 +993,13 @@ class IndexingPipeline:
                         finally:
                             with counter_lock:
                                 progress.processed_files += 1
+                                progress.processed_bytes += size_of.get(file_path, 0)
                         while len(pending) < max_pending and _submit_next():
                             pass
         finally:
             wall_times["parse"] = time.monotonic() - parse_start
             progress.parse_wall_seconds = wall_times["parse"]
-            part_queue.put(sentinel)
+            put_parts(sentinel)
             embed_thread.join()
 
         progress.errors.extend(state["embed_errors"])
@@ -972,6 +1037,7 @@ class IndexingPipeline:
             build_stats=stats_out,
         )
         progress.store_wall_seconds = time.monotonic() - t0
+        ckpt.clear()  # 색인에 다 들어갔으므로 다음 실행은 색인에서 재사용한다
 
         _check_failure_rate(
             progress=progress,

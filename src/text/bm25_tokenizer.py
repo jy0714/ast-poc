@@ -126,3 +126,26 @@ def tokenize(text: str, *, ko_pos_filter: bool = False) -> list[str]:
 def tokenize_many(texts: Iterable[str], *, ko_pos_filter: bool = False) -> list[list[str]]:
     """여러 텍스트를 같은 규칙으로 토큰화"""
     return [tokenize(t, ko_pos_filter=ko_pos_filter) for t in texts]
+
+
+# 이 수 이상이면 프로세스 병렬 토큰화 (그 아래는 프로세스 부팅·Kiwi 로드 비용이 더 크다)
+PARALLEL_MIN_TEXTS = 20_000
+_PARALLEL_CHUNK = 2_000
+
+
+def tokenize_many_parallel(texts: list[str], workers: int | None = None) -> list[list[str]]:
+    """tokenize_many 와 같은 결과를 프로세스 여러 개로 만든다 (수십만 파트 색인 저장용)
+
+    Args:
+        texts: 입력 텍스트 (결과 순서 = 입력 순서)
+        workers: 프로세스 수 (기본: min(CPU 수, 12)). 1 이하면 단일 프로세스
+    """
+    import os
+    from concurrent.futures import ProcessPoolExecutor
+
+    n = workers if workers is not None else min(os.cpu_count() or 1, 12)
+    if n <= 1 or len(texts) < 2:
+        return tokenize_many(texts)
+    chunks = [texts[i : i + _PARALLEL_CHUNK] for i in range(0, len(texts), _PARALLEL_CHUNK)]
+    with ProcessPoolExecutor(max_workers=min(n, len(chunks))) as ex:
+        return [toks for chunk in ex.map(tokenize_many, chunks) for toks in chunk]

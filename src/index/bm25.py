@@ -13,7 +13,13 @@ from typing import Any
 import numpy as np
 from rank_bm25 import BM25Okapi
 
-from src.text.bm25_tokenizer import TOKENIZER_VERSION, tokenize, tokenize_many
+from src.text.bm25_tokenizer import (
+    PARALLEL_MIN_TEXTS,
+    TOKENIZER_VERSION,
+    tokenize,
+    tokenize_many,
+    tokenize_many_parallel,
+)
 
 
 class TokenizerVersionError(Exception):
@@ -43,7 +49,9 @@ class BM25Index:
 
     @classmethod
     def from_texts(cls, texts: list[str]) -> BM25Index:
-        """원문 텍스트를 토큰화해 색인 생성"""
+        """원문 텍스트를 토큰화해 색인 생성 (많으면 프로세스 병렬 토큰화, 결과는 같다)"""
+        if len(texts) >= PARALLEL_MIN_TEXTS:
+            return cls(tokenize_many_parallel(texts))
         return cls(tokenize_many(texts))
 
     def scores(self, query: str) -> np.ndarray:

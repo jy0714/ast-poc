@@ -54,6 +54,8 @@ class IndexingProgress(BaseModel):
     phase: str
     total_files: int
     processed_files: int
+    total_bytes: int = 0  # 진행률·ETA는 바이트 기준 (파일을 큰 것부터 처리)
+    processed_bytes: int = 0
     total_chunks: int
     progress_percent: float
     elapsed: str = ""

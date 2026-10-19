@@ -129,3 +129,24 @@ def test_find_quote_start_ignores_leading_own_header_block():
     # 첫 줄부터 헤더 블록이면(파서가 붙인 자기 헤더일 수 있음) 인용으로 보지 않는다
     text = "From: Kim\nTo: Lee\n\n본문"
     assert find_quote_start(text) is None
+
+
+@pytest.mark.parametrize(
+    ("subject", "expected"),
+    [
+        ("(광고) 가을 할인", True),
+        ("[광고]신제품", True),
+        (" 【 광 고 】 소식", True),
+        ("（광고）안내", True),
+        ("RE: (광고) 행사 참여", False),  # 사내 회신은 남긴다
+        ("FW: [광고] 견적", False),
+        ("광고 집행 계획 검토", False),
+        ("[AD] 계정 잠금 안내", False),  # Active Directory 등 사내 메일 오탐 방지
+        ("회의 (광고) 건", False),
+        ("", False),
+    ],
+)
+def test_is_ad_subject(subject, expected):
+    from src.units.email_clean import is_ad_subject
+
+    assert is_ad_subject(subject) is expected

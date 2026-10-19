@@ -321,12 +321,15 @@ class EmbeddingService:
         return self.embed_query(text)
 
     def _payload(self, batch: list[str]) -> dict[str, object]:
-        """Ollama /api/embed 요청 본문 (num_ctx 옵션 포함)"""
+        """Ollama /api/embed 요청 본문 (num_ctx, 지정 시 num_batch 옵션 포함)"""
+        options: dict[str, int] = {"num_ctx": settings.embed_num_ctx}
+        if settings.embed_num_batch > 0:
+            options["num_batch"] = settings.embed_num_batch
         return {
             "model": self.model,
             "input": batch,
             "keep_alive": -1,
-            "options": {"num_ctx": settings.embed_num_ctx},
+            "options": options,
         }
 
     def _text_limits(self) -> tuple[int, int]:

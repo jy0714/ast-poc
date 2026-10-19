@@ -102,6 +102,17 @@ class TestIndexingProgress:
         p = IndexingProgress(case_id="test", total_files=5, processed_files=5)
         assert p.progress_percent == 100.0
 
+    def test_progress_and_eta_use_bytes(self):
+        """큰 파일부터 처리해도 진행률·ETA는 바이트 기준"""
+        from datetime import datetime, timedelta
+
+        p = IndexingProgress(case_id="t", phase=IndexingPhase.PARSING,
+                             started_at=datetime.now() - timedelta(seconds=100))
+        p.total_files, p.processed_files = 1000, 1
+        p.total_bytes, p.processed_bytes = 1000, 500
+        assert p.progress_percent == 50.0
+        assert p.eta_seconds == pytest.approx(100, rel=0.05)
+
     def test_is_running(self):
         p = IndexingProgress(case_id="test", phase=IndexingPhase.PARSING)
         assert p.is_running is True
@@ -574,6 +585,101 @@ class TestV4Pipeline:
         assert progress.phase == IndexingPhase.CANCELLED
         case_index._cache.clear()
         assert case_index.load(meta.case_id).n_parts == n_before
+
+    def test_cancel_with_full_queue_does_not_hang(self, case_store, tmpdir):
+        """임베딩 중 취소하면 파싱 쪽이 가득 찬 큐에서 멈추지 않고 끝난다"""
+        from src.embeddings.embedding_service import EmbeddingService
+
+        flag = threading.Event()
+
+        class SlowCancel(EmbeddingService):
+            def embed_texts(self, texts, cancel_event=None):
+                flag.set()  # 첫 배치에서 취소 → 워커 종료, 큐는 곧 가득 참
+                time.sleep(0.2)
+                return super().embed_texts(texts, cancel_event=cancel_event)
+
+        files = {f"f{i:03d}.txt": f"문서 {i} " * 5 for i in range(60)}
+        doc_dir = _create_test_files(tmpdir, files)
+        meta = case_store.create("취소 큐", doc_paths=[str(doc_dir)])
+        pl = IndexingPipeline(case_store=case_store, embedding_service_factory=lambda m: SlowCancel(model=m))
+        old = settings.embed_batch_size
+        settings.embed_batch_size = 1
+        try:
+            done = threading.Event()
+            result: list = []
+            th = threading.Thread(target=lambda: (result.append(pl.run(meta.case_id, cancel_flag=flag)), done.set()))
+            th.start()
+            assert done.wait(60), "취소 후 파이프라인이 끝나지 않음"
+            assert result[0].phase == IndexingPhase.CANCELLED
+        finally:
+            settings.embed_batch_size = old
+
+    def test_checkpoint_reused_after_crash(self, case_store, tmpdir, monkeypatch):
+        """색인 저장 전에 죽어도 임베딩은 체크포인트에 남고, 다시 돌리면 임베딩하지 않는다"""
+        from src.embeddings.embedding_service import EmbeddingService
+        from src.index.embed_cache import cache_dir
+
+        calls: list[int] = []
+
+        class CountingService(EmbeddingService):
+            def embed_texts(self, texts, cancel_event=None):
+                calls.append(len(texts))
+                return super().embed_texts(texts, cancel_event=cancel_event)
+
+        pl = IndexingPipeline(
+            case_store=case_store, embedding_service_factory=lambda m: CountingService(model=m)
+        )
+        doc_dir = _create_test_files(tmpdir, {"a.txt": "첫 문서 " * 20, "b.txt": "둘째 문서 " * 20})
+        meta = case_store.create("체크포인트", doc_paths=[str(doc_dir)])
+
+        real_write = case_index.write_index
+
+        def crash(*a, **k):
+            raise RuntimeError("저장 직전 비정상 종료")
+
+        monkeypatch.setattr(case_index, "write_index", crash)
+        assert pl.run(meta.case_id).phase == IndexingPhase.ERROR
+        first = sum(calls)
+        assert first == 2
+        assert list(cache_dir(meta.case_id, "hdr-qwen3").glob("shard_*.npz"))
+
+        monkeypatch.setattr(case_index, "write_index", real_write)
+        case_store.update_status(meta.case_id, CaseStatus.CREATED)
+        calls.clear()
+        progress = pl.run(meta.case_id)
+        assert progress.phase == IndexingPhase.COMPLETED
+        assert sum(calls) == 0
+        idx = case_index.load(meta.case_id)
+        assert idx.n_units == 2
+        assert idx.manifest["build_stats"]["embedding"]["reused"] == first
+        assert not cache_dir(meta.case_id, "hdr-qwen3").exists()  # 색인 저장 후 정리
+
+    def test_ad_emails_dropped(self, pipeline, case_store, tmpdir):
+        """제목이 (광고)·[광고]로 시작하는 메일은 색인에 넣지 않고 건수만 남긴다"""
+        mail = tmpdir / "mail"
+        _eml(mail / "a.eml", "(광고) 가을 할인 행사", "할인 안내 본문", "<ad1@x>")
+        _eml(mail / "b.eml", "[광고]신제품 소식", "신제품 본문", "<ad2@x>")
+        _eml(mail / "c.eml", "RE: (광고) 행사 참여 여부", "참여 검토 회신", "<re1@x>")
+        _eml(mail / "d.eml", "3월 정산 건", "정산 내역 공유", "<ok1@x>")
+        meta = case_store.create("광고", doc_paths=[str(mail)])
+        progress = pipeline.run(meta.case_id)
+        assert progress.phase == IndexingPhase.COMPLETED
+        idx = case_index.load(meta.case_id)
+        subjects = sorted(p.meta["subject"] for p in idx.parts)
+        assert subjects == ["3월 정산 건", "RE: (광고) 행사 참여 여부"]
+        assert idx.manifest["build_stats"]["counts"]["ads_removed"] == 2
+
+    def test_progress_bytes(self, pipeline, case_store, tmpdir):
+        """진행률은 바이트 기준으로 채워진다"""
+        doc_dir = _create_test_files(tmpdir, {"a.txt": "문서 " * 50, "b.txt": "짧은 문서"})
+        meta = case_store.create("바이트", doc_paths=[str(doc_dir)])
+        progress = pipeline.run(meta.case_id)
+        total = sum(f.stat().st_size for f in doc_dir.iterdir())
+        assert progress.total_bytes == total
+        assert progress.processed_bytes == total
+        assert progress.progress_percent == 100.0
+        d = progress.to_dict()
+        assert d["total_bytes"] == total and d["processed_bytes"] == total
 
 
 class TestProcessPoolCrash:

@@ -65,3 +65,10 @@ def test_hangul_not_treated_as_cjk_bigrams():
     # 이식 시 NFC 정규화로 CJK 범위가 한글까지 삼켜 '먼에'·'력오' 같은 한글 bigram 이 생기던 회귀
     assert tokenize("휴먼에러(입력오류)") == ["휴먼", "에러", "입력", "오류"]
     assert tokenize("豈") == ["豈"]  # 호환 한자는 여전히 CJK 처리
+
+
+def test_tokenize_many_parallel_matches_serial():
+    from src.text import bm25_tokenizer as bt
+
+    texts = [f"정산 금액 1,200,000원 INV-2024-{i:04d} payment 확인 {i}" for i in range(4500)]
+    assert bt.tokenize_many_parallel(texts, workers=2) == bt.tokenize_many(texts)

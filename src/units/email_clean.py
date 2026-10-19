@@ -102,6 +102,16 @@ def is_header_line(line: str) -> bool:
     return bool(_HEADER_LINE_RE.match(line))
 
 
+# 정보통신망법 제50조: 영리 목적 광고 메일은 제목 맨 앞에 "(광고)"를 표시한다. 괄호 모양만 넓게 받는다.
+# 회신·전달(RE:, FW: …)이 앞에 붙은 메일은 사내에서 광고를 두고 오간 대화일 수 있어 남긴다.
+_AD_SUBJECT_RE = re.compile(r"^\s*[\[(（【〔<［]\s*광\s*고\s*[\])）】〕>］]")
+
+
+def is_ad_subject(subject: str) -> bool:
+    """제목이 광고 표시("(광고)", "[광고]" 등)로 시작하는지"""
+    return bool(subject) and bool(_AD_SUBJECT_RE.match(subject))
+
+
 def is_forwarded(subject: str) -> bool:
     """제목이 전달 접두어로 시작하는지 (RE: FW: 처럼 회신이 먼저면 False)"""
     return bool(subject) and bool(_FORWARD_SUBJECT_RE.match(subject))

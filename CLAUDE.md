@@ -30,10 +30,13 @@ PST/EML 파일 / 내부 문서
   → 파싱 (libpff, PyMuPDF, python-docx, xlrd, OCR 등) [멀티프로세싱, 파서 크래시 시 풀 재시작]
   → 증거 단위 생성 (src/units): 이메일 1통 / 채팅 세션 1개 / 문서·첨부 1쪽
      · 이메일 정제(다국어 인용·서명 제거), 중복 메일 제거, 첨부↔부모 연결
+     · 제목이 "(광고)"·"[광고]"로 시작하는 메일은 첨부와 함께 제외 (EMAIL_DROP_ADS, 건수만 build_stats.ads_removed, units-v3)
      · 단위별 언어 감지(lingua), 한국어 레이블 헤더(문서·첨부는 작성자·최종 수정자 포함, units-v2), UNIT_MAX_PART_TOKENS(2048) 초과 시 파트 분할
   → 로컬 임베딩 (Ollama qwen3-embedding:4b-q8_0, 2560-dim, 헤더+본문)
   → 케이스 색인 data/index/{case_id}/ (units.jsonl + BM25 hdr/nohdr + profiles/{profile}/dense.npy)
      · 원자적 교체(임시 폴더 → rename), 변경 없는 파트는 기존 벡터 재사용
+     · 임베딩 체크포인트 data/embed_cache/{case_id}/{profile}/shard_*.npz — 중단·재시작 시 재사용, 색인 저장 후 삭제
+     · 파일 1,000개 이상이면 모든 파일을 ProcessPool로 파싱, 진행률·ETA는 바이트 기준, BM25 토큰화는 2만 파트 이상이면 프로세스 병렬
 ```
 
 ### RAG 질의 (Phase B) — `src/rag/retrieval.py` `retrieve()` (서비스·실험 공용)
@@ -82,7 +85,7 @@ PST/EML 파일 / 내부 문서
 ## 핵심 규칙
 
 ### 조사 데이터 기밀 (v4.2 P0) — 최우선
-- Claude Code는 조사 데이터 원문을 열지 않는다: `experiments_v4/{data,runs,cache}/**`, `experiments_v4/results/failures*`, `data/{processed,index,vectordb,bm25_index,unit_stats,failed_embeddings,ocr_cache,parity,benchmark,judgments,input,logs}/**`, `error_logs/**`, `D:\ast-file\**`(목록 조회 포함)
+- Claude Code는 조사 데이터 원문을 열지 않는다: `experiments_v4/{data,runs,cache}/**`, `experiments_v4/results/failures*`, `data/{processed,index,vectordb,bm25_index,unit_stats,failed_embeddings,embed_cache,ocr_cache,parity,benchmark,judgments,input,logs}/**`, `error_logs/**`, `D:\ast-file\**`(목록 조회 포함)
 - 예외(v4.3 §1): 표준 질문 45개는 사건 정보 없는 논문 부록 내용이라 읽어도 된다 — 원본 `docs/v4/data/queries_45.jsonl` 을 읽는다 (`experiments_v4/data/` 사본은 훅이 막는다)
 - 차단: `.claude/settings.json` permissions.deny(Read) + PreToolUse 훅 `.claude/hooks/p0_guard.py`(Bash·PowerShell, `grep -c`/`-l`만 허용). `.claude/`는 gitignore(이 PC 전용)
 - 보고는 집계 표(T0~T7, F1 요약, E1)와 로그의 건수·시간·오류 유형만. 식별자는 `qid`, `unit_id`만. 본문·질의 문장·실명·업체명·파일명 금지
@@ -146,22 +149,27 @@ python -m scripts.run_indexing <case_id>              # 인덱싱 CLI
 python -m scripts.build_profiles <case_id> --profiles nohdr-qwen3 hdr-bgem3
 python -m scripts.unit_stats <case_id>                # 단위 통계 (임베딩 없음, T1 초안)
 python -m scripts.repro_kiwi --out experiments_v4/results/S6_kiwi_repro.md   # kiwipiepy 현상 재현 (합성 문자열)
+python -m scripts.bench_embed --grid 16x2 16x8 --num-batch 0 2048   # 임베딩 처리량 (합성 문장, 숫자만 출력)
 python -m scripts.langdetect_compare <case_id>        # langdetect↔lingua 대조 (건수만, langdetect 별도 설치)
 docker compose up --build                             # Docker 전체 스택
 ```
 
-## 현재 상태 (2026-10-17 기준)
+## 현재 상태 (2026-10-19 기준)
 
 - **브랜치**: `v4-simplify` (지시서 1~5단계 + v4.2·v4.3 추가 지시 코드 반영 완료). 다음: 코퍼스 확정 → 색인 → smoke → 6단계 실측
-- **테스트**: tests + experiments_v4 합계 564
+- **테스트**: tests + experiments_v4 합계 582
 - **GPU**: NVIDIA GeForce RTX 3090 24GB, 드라이버 617.42(CUDA 13.4). 임베딩 일치 통과(cos 0.995), 세 모델 동시 적재 ≈24.1/24.6GB (`LLM_NUM_CTX=16384` 필수)
 - **케이스**: 685850a87ee2 (메일함 1, CREATED·미색인 — 코퍼스 확정 후 결정), 9dec87cd8d6c (메일함 1 중 300파일 실규모 점검, units-v2 색인 READY). 구 케이스 b392e4f27760·8cdadf2ab3db는 ARCHIVED 그대로 둠
+- **본 색인 (2026-10-19)**: 케이스 2b7885b9a43f (파일 140,517) 재시작 — 개선판(광고 제외·체크포인트·파싱 워커 낮은 우선순위) + OLLAMA_NUM_PARALLEL=8. 임베딩 실측 분당 약 350파트 (이전 134). 합성 벤치 상한 분당 약 490파트(732토큰), 약 6,000토큰/s
+- **장시간 인덱싱 중에는 백엔드를 `--reload` 없이 띄운다** — src 수정 시 서버가 재시작되어 진행 중인 인덱싱이 사라진다. Claude 세션 종료와 함께 꺼지지 않도록 별도 창으로 띄운다 (`Start-Process .venv\Scripts\python.exe -ArgumentList "-m","uvicorn","src.api.main:app","--port","8000"`). 중단 후 `/start` 재호출 시 30분 stuck timeout 뒤 자동 복구, 임베딩 체크포인트 재사용
 - **평가 코퍼스 폴더**: `D:\ast-file\corpus\` (사용자가 확정 자료를 넣으면 새 케이스로 색인)
 
 ### 환경 설정 파일
 - `.env.prod.example` — RTX 3090 24GB (gemma4:12b, Qwen3-Reranker-4B bf16, EMBED_BATCH_SIZE=16)
 - `.env.dev.example` — 구 개발 PC RTX 2060 12GB (gemma4:e4b, Reranker-0.6B fp16, EMBED_BATCH_SIZE=8)
 - 설정은 모르는 키를 무시(`extra="ignore"`)하므로 v3 키가 남은 `.env`도 기동된다
+
+> **대량 인덱싱 (Phase A)**: Ollama `OLLAMA_NUM_PARALLEL`(동시 처리 슬롯)과 `.env` `EMBED_MAX_CONCURRENT`를 함께 올려야 GPU가 찬다. `OLLAMA_NUM_PARALLEL`은 LLM에도 적용되므로(슬롯마다 KV 캐시) 서비스·LLM 동시 적재 전에는 1로 되돌린다. 값은 `scripts/bench_embed.py`로 정한다.
 
 > **임베딩 배치 크기 주의**: 큰 배치는 Ollama timeout 캐스케이드를 유발할 수 있다. 안정 동작 확인 후 단계적으로 상향하고 로그를 모니터링한다.
 

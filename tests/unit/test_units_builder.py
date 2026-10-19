@@ -282,3 +282,17 @@ def test_pdf_empty_page_numbering(builder: UnitBuilder, tmp_path: Path):
     assert units[1].unit_id.endswith(":p3")
     assert "| 3/3쪽" in units[1].header
     assert builder.stats.counts["empty_pages:pdf"] == 1
+
+
+def test_ad_email_dropped_with_attachments(builder, tmp_path):
+    raw = _eml(subject="(광고) 할인 행사", attachments=[("a.txt", "첨부 본문".encode(), "text", "plain")])
+    assert builder.build_file(_write(tmp_path, "m/ad.eml", raw), "m/ad.eml") == []
+    assert builder.stats.counts["ads_removed"] == 1
+    assert builder.stats.counts["ads_removed_attachments"] == 1
+    assert builder.stats.counts["attachments_total"] == 0  # 첨부를 파싱하지 않음
+
+
+def test_ad_filter_can_be_disabled(tmp_path):
+    b = UnitBuilder("case1", counter=COUNTER, max_part_tokens=200, drop_ads=False)
+    units = b.build_file(_write(tmp_path, "m/ad.eml", _eml(subject="[광고] 소식")), "m/ad.eml")
+    assert [u.unit_type for u in units] == ["email"]

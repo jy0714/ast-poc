@@ -26,7 +26,7 @@ from typing import Any
 from src.parsers.document_parser import DocumentParser, ParsedDocument, UnsupportedFormatError
 from src.parsers.pst_parser import Attachment, ChatMessage, EmailMessage, PSTParseResult
 from src.units import header as hdr
-from src.units.email_clean import is_forwarded, strip_quoted
+from src.units.email_clean import is_ad_subject, is_forwarded, strip_quoted
 from src.units.lang_detect import detect as detect_lang
 from src.units.schema import EvidenceUnit, UnitPart
 from src.units.split import docx_blocks, row_blocks, split_text
@@ -205,6 +205,7 @@ class UnitBuilder:
         counter: 토큰 카운터 (기본: settings 기준 싱글턴)
         max_part_tokens: 파트 상한 (기본: settings.unit_max_part_tokens)
         clean_enabled: 이메일 정제 여부 (기본: settings.email_clean_enabled)
+        drop_ads: 광고 메일 제외 여부 (기본: settings.email_drop_ads)
         gap_minutes: 채팅 세션 간격 (기본: settings.chat_session_gap_minutes)
         doc_parser: 첨부 파싱에 쓸 DocumentParser
     """
@@ -216,6 +217,7 @@ class UnitBuilder:
         counter: TokenCounter | None = None,
         max_part_tokens: int | None = None,
         clean_enabled: bool | None = None,
+        drop_ads: bool | None = None,
         gap_minutes: int | None = None,
         doc_parser: DocumentParser | None = None,
     ) -> None:
@@ -227,6 +229,7 @@ class UnitBuilder:
         self.clean_enabled = (
             settings.email_clean_enabled if clean_enabled is None else clean_enabled
         )
+        self.drop_ads = settings.email_drop_ads if drop_ads is None else drop_ads
         self.gap_minutes = gap_minutes or settings.chat_session_gap_minutes
         self.doc_parser = doc_parser or DocumentParser(detect_language=False)
         self.stats = BuildStats()
@@ -314,6 +317,11 @@ class UnitBuilder:
         return self._build_email(rec, source_file)
 
     def _build_email(self, rec: _EmailRecord, source_file: str) -> list[EvidenceUnit]:
+        if self.drop_ads and is_ad_subject(rec.subject):
+            # 첨부도 파싱하지 않는다 (파싱·임베딩 시간 절약)
+            self.stats.counts["ads_removed"] += 1
+            self.stats.counts["ads_removed_attachments"] += len(rec.attachments)
+            return []
         unit_id = make_email_id(rec.message_id, rec.sender, rec.date, rec.subject, rec.body)
         forwarded = is_forwarded(rec.subject)
         text = strip_quoted(rec.body, rec.subject) if self.clean_enabled else rec.body

@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     # 이메일 본문에서 인용 답장 체인, 서명, 법적 면책고지를 제거하여
     # 임베딩 벡터가 보일러플레이트에 오염되는 것을 방지 (src/units/email_clean.py).
     email_clean_enabled: bool = True
+    # 제목이 "(광고)"·"[광고]"로 시작하는 메일은 첨부와 함께 단위를 만들지 않는다 (건수만 집계)
+    email_drop_ads: bool = True
 
     # === v4 증거 단위 (src/units) ===
     # 이 토큰 수(Qwen3 토크나이저 기준, 헤더 제외)를 넘는 단위는 줄·문단 경계에서 파트로 나눈다.
@@ -86,6 +88,9 @@ class Settings(BaseSettings):
     embed_dim: int = 2560
     # Ollama 요청 옵션 num_ctx. 파트는 2,048토큰 이하라 잘리지 않아야 하고, 넘으면 경고 로그를 남긴다.
     embed_num_ctx: int = 8192
+    # Ollama 요청 옵션 num_batch (한 번의 forward에 넣는 최대 토큰 수). 0이면 Ollama 기본값.
+    # 크게 잡으면 긴 입력·동시 요청을 한 번에 처리해 GPU 활용률이 오른다 (scripts/bench_embed.py로 확인).
+    embed_num_batch: int = 0
     embed_query_task: str = (
         "Given an internal audit investigation query, retrieve emails, chat messages, "
         "and documents in any language that contain evidence relevant to the query"
