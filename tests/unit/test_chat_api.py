@@ -25,6 +25,7 @@ def store(tmpdir):
     db_url = f"sqlite:///{db_path}"
 
     from src.db.database import reset_globals
+
     reset_globals()
 
     temp_store = CaseStore(db_url=db_url)
@@ -88,28 +89,37 @@ class TestGetCases:
 class TestChatAPI:
     def test_chat_case_not_found(self, client):
         """POST / — 404"""
-        resp = client.post("/api/analyst/chat/", json={
-            "case_id": "nonexistent",
-            "message": "질문",
-        })
+        resp = client.post(
+            "/api/analyst/chat/",
+            json={
+                "case_id": "nonexistent",
+                "message": "질문",
+            },
+        )
         assert resp.status_code == 404
 
     def test_chat_case_not_ready(self, client, store):
         """POST / — 인덱싱 안 된 케이스 409"""
         meta = store.create("미완료")
-        resp = client.post("/api/analyst/chat/", json={
-            "case_id": meta.case_id,
-            "message": "질문",
-        })
+        resp = client.post(
+            "/api/analyst/chat/",
+            json={
+                "case_id": meta.case_id,
+                "message": "질문",
+            },
+        )
         assert resp.status_code == 409
 
     def test_chat_empty_message(self, client, store):
         """POST / — 빈 메시지 400"""
         case_id = _create_ready_case(store)
-        resp = client.post("/api/analyst/chat/", json={
-            "case_id": case_id,
-            "message": "   ",
-        })
+        resp = client.post(
+            "/api/analyst/chat/",
+            json={
+                "case_id": case_id,
+                "message": "   ",
+            },
+        )
         assert resp.status_code == 400
 
     @patch("src.api.routes.chat.RAGEngine")
@@ -151,11 +161,14 @@ class TestChatAPI:
         )
         mock_engine_cls.return_value = mock_engine
 
-        resp = client.post("/api/analyst/chat/", json={
-            "case_id": case_id,
-            "message": "비용 관련 내용 알려줘",
-            "security_mode": True,
-        })
+        resp = client.post(
+            "/api/analyst/chat/",
+            json={
+                "case_id": case_id,
+                "message": "비용 관련 내용 알려줘",
+                "security_mode": True,
+            },
+        )
 
         assert resp.status_code == 200
         data = resp.json()
@@ -180,11 +193,14 @@ class TestChatAPI:
         )
         mock_engine_cls.return_value = mock_engine
 
-        resp = client.post("/api/analyst/chat/", json={
-            "case_id": case_id,
-            "message": "이메일 내용 찾아줘",
-            "filters": {"source_type": "email"},
-        })
+        resp = client.post(
+            "/api/analyst/chat/",
+            json={
+                "case_id": case_id,
+                "message": "이메일 내용 찾아줘",
+                "filters": {"source_type": "email"},
+            },
+        )
 
         assert resp.status_code == 200
         # 필터가 전달되었는지 확인
@@ -206,11 +222,14 @@ class TestChatAPI:
         )
         mock_engine_cls.return_value = mock_engine
 
-        resp = client.post("/api/analyst/chat/", json={
-            "case_id": case_id,
-            "message": "rerank 테스트",
-            "rerank": True,
-        })
+        resp = client.post(
+            "/api/analyst/chat/",
+            json={
+                "case_id": case_id,
+                "message": "rerank 테스트",
+                "rerank": True,
+            },
+        )
 
         assert resp.status_code == 200
         # RAGEngine 생성 시 rerank_enabled=True 전달 확인
@@ -233,10 +252,13 @@ class TestChatAPI:
         )
         mock_engine_cls.return_value = mock_engine
 
-        resp = client.post("/api/analyst/chat/", json={
-            "case_id": case_id,
-            "message": "기본 테스트",
-        })
+        resp = client.post(
+            "/api/analyst/chat/",
+            json={
+                "case_id": case_id,
+                "message": "기본 테스트",
+            },
+        )
 
         assert resp.status_code == 200
         mock_engine_cls.assert_called_once_with(
@@ -251,19 +273,25 @@ class TestChatAPI:
 class TestStreamAPI:
     def test_stream_case_not_found(self, client):
         """POST /stream — 404"""
-        resp = client.post("/api/analyst/chat/stream", json={
-            "case_id": "fake",
-            "message": "질문",
-        })
+        resp = client.post(
+            "/api/analyst/chat/stream",
+            json={
+                "case_id": "fake",
+                "message": "질문",
+            },
+        )
         assert resp.status_code == 404
 
     def test_stream_case_not_ready(self, client, store):
         """POST /stream — 미준비 케이스 409"""
         meta = store.create("미완료")
-        resp = client.post("/api/analyst/chat/stream", json={
-            "case_id": meta.case_id,
-            "message": "질문",
-        })
+        resp = client.post(
+            "/api/analyst/chat/stream",
+            json={
+                "case_id": meta.case_id,
+                "message": "질문",
+            },
+        )
         assert resp.status_code == 409
 
     @patch("src.api.routes.chat.RAGEngine")
@@ -279,10 +307,13 @@ class TestStreamAPI:
         mock_engine.query_stream = AsyncMock(return_value=(fake_token_stream(), []))
         mock_engine_cls.return_value = mock_engine
 
-        resp = client.post("/api/analyst/chat/stream", json={
-            "case_id": case_id,
-            "message": "질문",
-        })
+        resp = client.post(
+            "/api/analyst/chat/stream",
+            json={
+                "case_id": case_id,
+                "message": "질문",
+            },
+        )
         assert resp.status_code == 200
         assert "답변" in resp.text
         assert "[DONE]" in resp.text
@@ -291,18 +322,14 @@ class TestStreamAPI:
         from src.db.models import ChatHistoryModel
 
         with store._get_session() as session:
-            rows = session.query(ChatHistoryModel).filter(
-                ChatHistoryModel.case_id == case_id
-            ).all()
+            rows = session.query(ChatHistoryModel).filter(ChatHistoryModel.case_id == case_id).all()
             assert len(rows) == 1
             assert rows[0].is_stopped == 0
             assert rows[0].answer == "답변 내용"
 
     @patch("starlette.requests.Request.is_disconnected", new_callable=AsyncMock)
     @patch("src.api.routes.chat.RAGEngine")
-    def test_stream_disconnect_saves_stopped(
-        self, mock_engine_cls, mock_disconnect, client, store
-    ):
+    def test_stream_disconnect_saves_stopped(self, mock_engine_cls, mock_disconnect, client, store):
         """중간에 클라이언트 끊김 → 부분 답변 + is_stopped=1 저장"""
         case_id = _create_ready_case(store)
 
@@ -317,18 +344,19 @@ class TestStreamAPI:
         # 첫 토큰은 통과(False), 두 번째 토큰 전 끊김(True)
         mock_disconnect.side_effect = [False, True, True, True, True]
 
-        resp = client.post("/api/analyst/chat/stream", json={
-            "case_id": case_id,
-            "message": "질문",
-        })
+        resp = client.post(
+            "/api/analyst/chat/stream",
+            json={
+                "case_id": case_id,
+                "message": "질문",
+            },
+        )
         assert resp.status_code == 200
 
         from src.db.models import ChatHistoryModel
 
         with store._get_session() as session:
-            rows = session.query(ChatHistoryModel).filter(
-                ChatHistoryModel.case_id == case_id
-            ).all()
+            rows = session.query(ChatHistoryModel).filter(ChatHistoryModel.case_id == case_id).all()
             assert len(rows) == 1
             assert rows[0].is_stopped == 1
             # 첫 토큰까지만 모임

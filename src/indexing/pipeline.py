@@ -155,7 +155,9 @@ def _subprocess_init() -> None:
             import ctypes
 
             below_normal = 0x4000  # BELOW_NORMAL_PRIORITY_CLASS
-            ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), below_normal)
+            ctypes.windll.kernel32.SetPriorityClass(
+                ctypes.windll.kernel32.GetCurrentProcess(), below_normal
+            )
         else:
             os.nice(5)
 
@@ -181,11 +183,15 @@ def case_source_files(case_meta: CaseMetadata) -> list[tuple[Path, str]]:
     상대 경로는 그 파일을 포함하는 가장 구체적인 데이터 소스 루트 기준이다. 문서 단위 ID가
     이 경로에서 나오므로(지시서 §5.1.2) 인덱싱과 scripts/unit_stats.py가 같은 함수를 쓴다.
     """
-    roots = [IndexingPipeline._normalize_path(p) for p in [*case_meta.pst_paths, *case_meta.doc_paths]]
+    roots = [
+        IndexingPipeline._normalize_path(p) for p in [*case_meta.pst_paths, *case_meta.doc_paths]
+    ]
     out: list[tuple[Path, str]] = []
     for f in collect_case_files(case_meta):
         resolved = f.resolve()
-        candidates = [r for r in roots if r == f or (r.is_dir() and resolved.is_relative_to(r.resolve()))]
+        candidates = [
+            r for r in roots if r == f or (r.is_dir() and resolved.is_relative_to(r.resolve()))
+        ]
         root = max(candidates, key=lambda r: len(str(r))) if candidates else f.parent
         out.append((f, relative_source_path(f, root)))
     return out
@@ -424,16 +430,12 @@ class IndexingProgress:
             "elapsed": elapsed,
             "elapsed_seconds": round(elapsed_secs, 1),
             "eta": eta_str,
-            "estimated_remaining_seconds": (
-                round(eta, 1) if eta is not None else None
-            ),
+            "estimated_remaining_seconds": (round(eta, 1) if eta is not None else None),
             "files_per_second": round(self.files_per_second, 1),
             "chunks_per_second": round(self.chunks_per_second, 1),
             "throughput_per_min": round(self.avg_embed_chunks_per_min, 1),
             "peak_throughput_per_min": round(self.peak_embed_chunks_per_min, 1),
-            "phase_times": {
-                k: round(v, 1) for k, v in self.phase_times.items()
-            },
+            "phase_times": {k: round(v, 1) for k, v in self.phase_times.items()},
             "stage_wall_seconds": {
                 "parse": round(self.parse_wall_seconds, 1),
                 "embed": round(self.embed_wall_seconds, 1),
@@ -441,7 +443,8 @@ class IndexingProgress:
             },
             "last_success_at": (
                 datetime.fromtimestamp(self.last_success_at).isoformat()
-                if self.last_success_at else None
+                if self.last_success_at
+                else None
             ),
             "stalled": self.stalled,
             "encrypted_pdfs": list(self.encrypted_pdfs),
@@ -750,7 +753,9 @@ class IndexingPipeline:
                 n_ok = 0
                 if todo:
                     try:
-                        embs = embedder.embed_texts([t for _, t, _ in todo], cancel_event=cancel_flag)
+                        embs = embedder.embed_texts(
+                            [t for _, t, _ in todo], cancel_event=cancel_flag
+                        )
                         failed = set(embedder._last_failed_indices)
                         new_keys: list[tuple[str, str]] = []
                         new_vecs: list[np.ndarray] = []
@@ -810,7 +815,9 @@ class IndexingPipeline:
                     flush(buffer)
                     break
                 buffer.extend(item)
-                while len(buffer) >= super_batch_size and not (cancel_flag and cancel_flag.is_set()):
+                while len(buffer) >= super_batch_size and not (
+                    cancel_flag and cancel_flag.is_set()
+                ):
                     flush(buffer[:super_batch_size])
                     buffer = buffer[super_batch_size:]
             try:
@@ -820,7 +827,9 @@ class IndexingPipeline:
             wall_times["embed"] = active
             progress.embed_wall_seconds = active
 
-        embed_thread = threading.Thread(target=embedding_worker, daemon=True, name=f"embed-{case_id}")
+        embed_thread = threading.Thread(
+            target=embedding_worker, daemon=True, name=f"embed-{case_id}"
+        )
         embed_thread.start()
 
         def put_parts(item: list[UnitPart] | None) -> None:
@@ -848,7 +857,10 @@ class IndexingPipeline:
         # 파일이 많으면 작은 파일도 ProcessPool로 보낸다. 프로세스 부팅은 풀 생성 때 한 번뿐이고,
         # 수만 개 EML·문서를 ThreadPool로 돌리면 GIL 때문에 사실상 코어 1개로 파싱하게 된다.
         all_process = use_process and len(files) >= _ALL_PROCESS_MIN_FILES
-        to_proc = [use_process and (all_process or s >= _PARSE_PROCESS_THRESHOLD_BYTES) for _, _, s in sized]
+        to_proc = [
+            use_process and (all_process or s >= _PARSE_PROCESS_THRESHOLD_BYTES)
+            for _, _, s in sized
+        ]
         large = [(f, r) for (f, r, _), tp in zip(sized, to_proc, strict=True) if tp]
         small = [(f, r) for (f, r, _), tp in zip(sized, to_proc, strict=True) if not tp]
         size_of = {f: s for f, _, s in sized}
@@ -866,24 +878,37 @@ class IndexingPipeline:
             with ExitStack() as stack:
                 pools: dict[str, Any] = {"proc": None, "thread": None, "restarts": 0}
                 if process_workers > 0:
-                    pools["proc"] = ProcessPoolExecutor(max_workers=process_workers, initializer=_subprocess_init)
-                    stack.callback(lambda: pools["proc"] and pools["proc"].shutdown(wait=True, cancel_futures=True))
+                    pools["proc"] = ProcessPoolExecutor(
+                        max_workers=process_workers, initializer=_subprocess_init
+                    )
+                    stack.callback(
+                        lambda: (
+                            pools["proc"] and pools["proc"].shutdown(wait=True, cancel_futures=True)
+                        )
+                    )
                 if thread_workers > 0:
                     pools["thread"] = stack.enter_context(
-                        ThreadPoolExecutor(max_workers=thread_workers, thread_name_prefix=f"parse-{case_id}")
+                        ThreadPoolExecutor(
+                            max_workers=thread_workers, thread_name_prefix=f"parse-{case_id}"
+                        )
                     )
 
                 large_iter = iter(large)
                 small_iter = iter(small)
                 retry_large: list[tuple[Path, str]] = []  # 풀이 깨질 때 처리 중이던 큰 파일
                 crash_count: dict[Path, int] = {}
-                pending: dict[Future, tuple[Path, str, bool]] = {}  # future → (파일, 상대경로, 프로세스 풀 여부)
+                pending: dict[
+                    Future, tuple[Path, str, bool]
+                ] = {}  # future → (파일, 상대경로, 프로세스 풀 여부)
                 max_pending = max(num_workers * 2, 4)
 
                 def _thread_pool() -> ThreadPoolExecutor:
                     if pools["thread"] is None:
                         pools["thread"] = stack.enter_context(
-                            ThreadPoolExecutor(max_workers=max(1, num_workers), thread_name_prefix=f"parse-{case_id}")
+                            ThreadPoolExecutor(
+                                max_workers=max(1, num_workers),
+                                thread_name_prefix=f"parse-{case_id}",
+                            )
                         )
                     return pools["thread"]
 
@@ -893,7 +918,9 @@ class IndexingPipeline:
                     if broken is None:
                         return
                     for fut, (f, rel, in_proc) in list(pending.items()):
-                        if in_proc and not (fut.done() and not fut.cancelled() and fut.exception() is None):
+                        if in_proc and not (
+                            fut.done() and not fut.cancelled() and fut.exception() is None
+                        ):
                             pending.pop(fut)
                             crash_count[f] = crash_count.get(f, 0) + 1
                             if crash_count[f] >= _MAX_CRASH_INVOLVEMENT:
@@ -912,9 +939,13 @@ class IndexingPipeline:
                             f"파싱 프로세스 풀이 깨짐 → 다시 생성 ({pools['restarts']}/{_MAX_PROCESS_POOL_RESTARTS}), "
                             f"처리 중이던 파일 재시도"
                         )
-                        pools["proc"] = ProcessPoolExecutor(max_workers=process_workers, initializer=_subprocess_init)
+                        pools["proc"] = ProcessPoolExecutor(
+                            max_workers=process_workers, initializer=_subprocess_init
+                        )
                     else:
-                        logger.warning("파싱 프로세스 풀 재생성 한도 초과 → 남은 큰 파일은 ThreadPool로 처리")
+                        logger.warning(
+                            "파싱 프로세스 풀 재생성 한도 초과 → 남은 큰 파일은 ThreadPool로 처리"
+                        )
                         pools["proc"] = None
 
                 def _next_large() -> tuple[Path, str] | None:
@@ -943,10 +974,14 @@ class IndexingPipeline:
                                     progress.processed_bytes += size_of.get(f, 0)
                                 logger.warning(msg)
                                 continue
-                            pending[_thread_pool().submit(_process_file_thread, f, rel, case_id)] = (f, rel, False)
+                            pending[
+                                _thread_pool().submit(_process_file_thread, f, rel, case_id)
+                            ] = (f, rel, False)
                             return True
                         try:
-                            fut = pools["proc"].submit(_process_file_subprocess, (str(f), rel, case_id))
+                            fut = pools["proc"].submit(
+                                _process_file_subprocess, (str(f), rel, case_id)
+                            )
                         except BrokenExecutor:
                             retry_large.insert(0, item)
                             _on_pool_broken()
@@ -954,7 +989,11 @@ class IndexingPipeline:
                         pending[fut] = (f, rel, True)
                         return True
                     for f, rel in small_iter:
-                        pending[_thread_pool().submit(_process_file_thread, f, rel, case_id)] = (f, rel, False)
+                        pending[_thread_pool().submit(_process_file_thread, f, rel, case_id)] = (
+                            f,
+                            rel,
+                            False,
+                        )
                         return True
                     return False
 
@@ -974,7 +1013,11 @@ class IndexingPipeline:
                         if future not in pending:  # 풀 깨짐 처리에서 이미 재시도 목록으로 옮김
                             continue
                         file_path, _rel, in_proc = pending[future]
-                        if in_proc and not future.cancelled() and isinstance(future.exception(), BrokenExecutor):
+                        if (
+                            in_proc
+                            and not future.cancelled()
+                            and isinstance(future.exception(), BrokenExecutor)
+                        ):
                             _on_pool_broken()
                             while len(pending) < max_pending and _submit_next():
                                 pass
@@ -991,10 +1034,13 @@ class IndexingPipeline:
                                 before = set(collector.units)
                                 collector.add(units)
                                 new_ids = [
-                                    uid for uid in dict.fromkeys(u.unit_id for u in units)
+                                    uid
+                                    for uid in dict.fromkeys(u.unit_id for u in units)
                                     if uid not in before
                                 ]
-                                new_parts = [p for uid in new_ids for p in collector.units[uid].parts]
+                                new_parts = [
+                                    p for uid in new_ids for p in collector.units[uid].parts
+                                ]
                                 if new_parts:
                                     # 큐가 가득 차면 여기서 block → 자연스러운 backpressure
                                     put_parts(new_parts)
@@ -1029,7 +1075,8 @@ class IndexingPipeline:
         dim = int(next(iter(vectors.values())).shape[0]) if vectors else embedder.get_dimension()
         mat = (
             np.stack([vectors[p.part_id] for p in parts]).astype(np.float16)
-            if parts else np.zeros((0, dim), dtype=np.float16)
+            if parts
+            else np.zeros((0, dim), dtype=np.float16)
         )
         progress.set_phase(IndexingPhase.STORING)
         t0 = time.monotonic()
@@ -1055,14 +1102,17 @@ class IndexingPipeline:
         ckpt.clear()  # 색인에 다 들어갔으므로 다음 실행은 색인에서 재사용한다
         # 단계별 시간 (v4.4 §1·§7 E1) — 로그를 열지 않고도 색인 시간 분해를 보고할 수 있게 manifest 에 남긴다.
         # 저장 시간(BM25 토큰화 포함)은 색인을 쓴 뒤에야 알 수 있어서 manifest 를 한 번 더 고친다.
-        _record_timing(case_id, {
-            "parse_wall_seconds": round(wall_times.get("parse", 0.0), 1),
-            "embed_active_seconds": round(wall_times.get("embed", 0.0), 1),
-            "store_seconds": round(progress.store_wall_seconds, 1),
-            "total_seconds": round(time.monotonic() - parse_start, 1),
-            "n_parts": len(parts),
-            "embedded_new": state["embedded"] - state["reused"],
-        })
+        _record_timing(
+            case_id,
+            {
+                "parse_wall_seconds": round(wall_times.get("parse", 0.0), 1),
+                "embed_active_seconds": round(wall_times.get("embed", 0.0), 1),
+                "store_seconds": round(progress.store_wall_seconds, 1),
+                "total_seconds": round(time.monotonic() - parse_start, 1),
+                "n_parts": len(parts),
+                "embedded_new": state["embedded"] - state["reused"],
+            },
+        )
 
         _check_failure_rate(
             progress=progress,
@@ -1106,7 +1156,9 @@ class IndexingPipeline:
         # PST 경로 처리
         for pst_path_str in case_meta.pst_paths:
             pst_path = IndexingPipeline._normalize_path(pst_path_str)
-            logger.debug(f"PST 경로 확인: '{pst_path_str}' → {pst_path} (exists={pst_path.exists()})")
+            logger.debug(
+                f"PST 경로 확인: '{pst_path_str}' → {pst_path} (exists={pst_path.exists()})"
+            )
 
             if pst_path.is_file():
                 if pst_path.suffix.lower() in pst_extensions:
@@ -1127,7 +1179,9 @@ class IndexingPipeline:
         # 문서 경로 처리
         for doc_path_str in case_meta.doc_paths:
             doc_path = IndexingPipeline._normalize_path(doc_path_str)
-            logger.debug(f"문서 경로 확인: '{doc_path_str}' → {doc_path} (exists={doc_path.exists()})")
+            logger.debug(
+                f"문서 경로 확인: '{doc_path_str}' → {doc_path} (exists={doc_path.exists()})"
+            )
 
             if doc_path.is_file():
                 if doc_path.suffix.lower() in all_extensions:
@@ -1193,7 +1247,9 @@ def _check_failure_rate(
         return
 
     # 배치 단위 실패율 (간단 근사)
-    total_attempts = max(1, store_errors + max(1, stored // max(1, settings.indexing_store_batch_size)))
+    total_attempts = max(
+        1, store_errors + max(1, stored // max(1, settings.indexing_store_batch_size))
+    )
     failure_rate = store_errors / total_attempts
 
     if failure_rate > _FAILURE_RATE_THRESHOLD:
@@ -1236,9 +1292,7 @@ def _save_indexing_log(progress: IndexingProgress, status: str) -> None:
         with get_session() as session:
             case_exists = session.get(CaseModel, progress.case_id) is not None
             if not case_exists:
-                logger.info(
-                    f"인덱싱 이력 저장 skip: 케이스 {progress.case_id}가 이미 삭제됨"
-                )
+                logger.info(f"인덱싱 이력 저장 skip: 케이스 {progress.case_id}가 이미 삭제됨")
                 return
 
             log = IndexingLogModel(
@@ -1257,9 +1311,7 @@ def _save_indexing_log(progress: IndexingProgress, status: str) -> None:
                 session.commit()
             except IntegrityError as ie:
                 # 사전 확인과 commit 사이에 케이스가 삭제되는 race
-                logger.info(
-                    f"인덱싱 이력 저장 skip (FK race): 케이스 {progress.case_id} — {ie}"
-                )
+                logger.info(f"인덱싱 이력 저장 skip (FK race): 케이스 {progress.case_id} — {ie}")
                 session.rollback()
                 return
             except OperationalError as oe:
@@ -1271,9 +1323,7 @@ def _save_indexing_log(progress: IndexingProgress, status: str) -> None:
                         f"{progress.case_id} — {oe}"
                     )
                 else:
-                    logger.warning(
-                        f"인덱싱 이력 저장 실패: {progress.case_id} — {oe}"
-                    )
+                    logger.warning(f"인덱싱 이력 저장 실패: {progress.case_id} — {oe}")
                 session.rollback()
                 return
 

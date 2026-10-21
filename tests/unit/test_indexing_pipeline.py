@@ -42,7 +42,9 @@ def _fake_models(tmpdir, monkeypatch):
     monkeypatch.setattr(settings, "service_index_profile", "hdr-qwen3")
     monkeypatch.setattr(settings, "ollama_embed_model", "qwen3-embedding:4b-q8_0")
     saved: list = []
-    monkeypatch.setattr(pipeline_mod, "_save_failed_parts", lambda cid, parts, diag=None: saved.extend(parts))
+    monkeypatch.setattr(
+        pipeline_mod, "_save_failed_parts", lambda cid, parts, diag=None: saved.extend(parts)
+    )
     case_index._cache.clear()
     yield saved
     case_index._cache.clear()
@@ -54,6 +56,7 @@ def case_store(tmpdir):
     db_url = f"sqlite:///{db_path}"
 
     from src.db.database import reset_globals
+
     reset_globals()
 
     store = CaseStore(db_url=db_url)
@@ -106,8 +109,11 @@ class TestIndexingProgress:
         """큰 파일부터 처리해도 진행률·ETA는 바이트 기준"""
         from datetime import datetime, timedelta
 
-        p = IndexingProgress(case_id="t", phase=IndexingPhase.PARSING,
-                             started_at=datetime.now() - timedelta(seconds=100))
+        p = IndexingProgress(
+            case_id="t",
+            phase=IndexingPhase.PARSING,
+            started_at=datetime.now() - timedelta(seconds=100),
+        )
         p.total_files, p.processed_files = 1000, 1
         p.total_bytes, p.processed_bytes = 1000, 500
         assert p.progress_percent == 50.0
@@ -139,11 +145,14 @@ class TestIndexingProgress:
 class TestCollectFiles:
     def test_collect_txt_files(self, pipeline, case_store, tmpdir):
         """문서 폴더에서 TXT 파일 수집"""
-        doc_dir = _create_test_files(tmpdir, {
-            "a.txt": "내용 A",
-            "b.txt": "내용 B",
-            "c.bmp": "이미지",  # 지원하지 않는 형식
-        })
+        doc_dir = _create_test_files(
+            tmpdir,
+            {
+                "a.txt": "내용 A",
+                "b.txt": "내용 B",
+                "c.bmp": "이미지",  # 지원하지 않는 형식
+            },
+        )
         meta = case_store.create("수집 테스트", doc_paths=[str(doc_dir)])
         files = pipeline._collect_files(meta)
         names = {f.name for f in files}
@@ -225,8 +234,6 @@ class TestCollectFiles:
         assert "mail.pst" in names
 
 
-
-
 # === 파일 → 단위 ===
 
 
@@ -284,13 +291,17 @@ class TestBuildFile:
 
 # === 전체 파이프라인 실행 테스트 ===
 
+
 class TestRun:
     def test_run_with_documents(self, pipeline, case_store, tmpdir):
         """문서 파일 인덱싱 전체 흐름"""
-        doc_dir = _create_test_files(tmpdir, {
-            "doc1.txt": "첫 번째 문서입니다. 감사 보고서 내용을 포함합니다. " * 10,
-            "doc2.txt": "두 번째 문서입니다. 재무 분석 자료입니다. " * 10,
-        })
+        doc_dir = _create_test_files(
+            tmpdir,
+            {
+                "doc1.txt": "첫 번째 문서입니다. 감사 보고서 내용을 포함합니다. " * 10,
+                "doc2.txt": "두 번째 문서입니다. 재무 분석 자료입니다. " * 10,
+            },
+        )
         meta = case_store.create("전체 흐름", doc_paths=[str(doc_dir)])
 
         progress = pipeline.run(meta.case_id)
@@ -486,10 +497,13 @@ class TestV4Pipeline:
         """완료 후 케이스 색인이 생기고 retrieve()로 검색된다"""
         from src.rag.retrieval import RetrievalConfig, retrieve
 
-        doc_dir = _create_test_files(tmpdir, {
-            "doc1.txt": "첫 번째 문서입니다. 감사 보고서 내용을 포함합니다. " * 10,
-            "doc2.txt": "두 번째 문서입니다. 재무 분석 자료입니다. " * 10,
-        })
+        doc_dir = _create_test_files(
+            tmpdir,
+            {
+                "doc1.txt": "첫 번째 문서입니다. 감사 보고서 내용을 포함합니다. " * 10,
+                "doc2.txt": "두 번째 문서입니다. 재무 분석 자료입니다. " * 10,
+            },
+        )
         meta = case_store.create("검색", doc_paths=[str(doc_dir)])
         progress = pipeline.run(meta.case_id)
         idx = case_index.load(meta.case_id)
@@ -563,8 +577,12 @@ class TestV4Pipeline:
                 self._last_failed_indices = bad
                 return out
 
-        pl = IndexingPipeline(case_store=case_store, embedding_service_factory=lambda m: FailSome(model=m))
-        doc_dir = _create_test_files(tmpdir, {"ok.txt": "정상 문서 " * 10, "bad.txt": "실패 문서 " * 10})
+        pl = IndexingPipeline(
+            case_store=case_store, embedding_service_factory=lambda m: FailSome(model=m)
+        )
+        doc_dir = _create_test_files(
+            tmpdir, {"ok.txt": "정상 문서 " * 10, "bad.txt": "실패 문서 " * 10}
+        )
         meta = case_store.create("실패", doc_paths=[str(doc_dir)])
         pl.run(meta.case_id)
         idx = case_index.load(meta.case_id)
@@ -604,7 +622,12 @@ class TestV4Pipeline:
         pipeline.run(meta.case_id)
         case_index._cache.clear()
         timing = case_index.load(meta.case_id).manifest["build_stats"]["timing"]
-        assert {"parse_wall_seconds", "embed_active_seconds", "store_seconds", "total_seconds"} <= set(timing)
+        assert {
+            "parse_wall_seconds",
+            "embed_active_seconds",
+            "store_seconds",
+            "total_seconds",
+        } <= set(timing)
 
     def test_cancel_with_full_queue_does_not_hang(self, case_store, tmpdir):
         """임베딩 중 취소하면 파싱 쪽이 가득 찬 큐에서 멈추지 않고 끝난다"""
@@ -621,13 +644,17 @@ class TestV4Pipeline:
         files = {f"f{i:03d}.txt": f"문서 {i} " * 5 for i in range(60)}
         doc_dir = _create_test_files(tmpdir, files)
         meta = case_store.create("취소 큐", doc_paths=[str(doc_dir)])
-        pl = IndexingPipeline(case_store=case_store, embedding_service_factory=lambda m: SlowCancel(model=m))
+        pl = IndexingPipeline(
+            case_store=case_store, embedding_service_factory=lambda m: SlowCancel(model=m)
+        )
         old = settings.embed_batch_size
         settings.embed_batch_size = 1
         try:
             done = threading.Event()
             result: list = []
-            th = threading.Thread(target=lambda: (result.append(pl.run(meta.case_id, cancel_flag=flag)), done.set()))
+            th = threading.Thread(
+                target=lambda: (result.append(pl.run(meta.case_id, cancel_flag=flag)), done.set())
+            )
             th.start()
             assert done.wait(60), "취소 후 파이프라인이 끝나지 않음"
             assert result[0].phase == IndexingPhase.CANCELLED
@@ -721,5 +748,7 @@ class TestProcessPoolCrash:
         assert progress.processed_files == 7
         assert [e for e in progress.errors if "crash.txt" in e and "비정상 종료" in e]
         assert not [e for e in progress.errors if "doc" in e]
-        sources = {p.meta["source_file"].rsplit("/", 1)[-1] for p in case_index.load(meta.case_id).parts}
+        sources = {
+            p.meta["source_file"].rsplit("/", 1)[-1] for p in case_index.load(meta.case_id).parts
+        }
         assert sources == {f"doc{i}.txt" for i in range(6)}

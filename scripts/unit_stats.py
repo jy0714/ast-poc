@@ -89,8 +89,14 @@ def _process(path: str, rel: str) -> dict[str, Any]:
     return {
         "path": path,
         "units": [
-            {"unit_id": u.unit_id, "unit_type": u.unit_type, "header": u.header, "text": u.text,
-             "meta": u.meta, "parts": [p.to_dict() for p in u.parts]}
+            {
+                "unit_id": u.unit_id,
+                "unit_type": u.unit_type,
+                "header": u.header,
+                "text": u.text,
+                "meta": u.meta,
+                "parts": [p.to_dict() for p in u.parts],
+            }
             for u in units
         ],
         "stats": _builder.stats.to_dict(),
@@ -102,8 +108,14 @@ def _process(path: str, rel: str) -> dict[str, Any]:
 
 
 def _unit_from_dict(d: dict[str, Any]) -> EvidenceUnit:
-    return EvidenceUnit(d["unit_id"], d["unit_type"], d["header"], d["text"], d["meta"],
-                        [UnitPart.from_dict(p) for p in d["parts"]])
+    return EvidenceUnit(
+        d["unit_id"],
+        d["unit_type"],
+        d["header"],
+        d["text"],
+        d["meta"],
+        [UnitPart.from_dict(p) for p in d["parts"]],
+    )
 
 
 def _stats_from_dict(d: dict[str, Any]) -> BuildStats:
@@ -122,8 +134,9 @@ def _collect_source_files(case_id: str) -> list[tuple[str, str]]:
     return sorted(((str(f), rel) for f, rel in files), key=lambda x: x[1])
 
 
-def _write_samples(units: list[EvidenceUnit], paths_by_unit: dict[str, str], out_dir: Path,
-                   n: int, seed: int) -> list[str]:
+def _write_samples(
+    units: list[EvidenceUnit], paths_by_unit: dict[str, str], out_dir: Path, n: int, seed: int
+) -> list[str]:
     """정제 전후 샘플: 언어별 층화 + 전달 메일 포함. 원문 재파싱으로 '전'을 만든다"""
     from src.parsers.document_parser import DocumentParser
     from src.units.builder import _email_body_from_parsed
@@ -226,8 +239,9 @@ def main() -> None:
     ocr_seconds = 0.0
     ocr_pages = 0
     t0 = time.perf_counter()
-    with ProcessPoolExecutor(args.workers, initializer=_init_worker,
-                             initargs=(args.case_id, args.no_ocr)) as pool:
+    with ProcessPoolExecutor(
+        args.workers, initializer=_init_worker, initargs=(args.case_id, args.no_ocr)
+    ) as pool:
         futures = [pool.submit(_process, p, rel) for p, rel in files]
         for i, fut in enumerate(as_completed(futures), 1):
             r = fut.result()
@@ -241,7 +255,9 @@ def main() -> None:
             if r["error"]:
                 failed.append((r["path"], r["error"]))
             if i % 500 == 0 or i == len(futures):
-                print(f"  {i:,}/{len(futures):,} 파일 · {time.perf_counter() - t0:,.0f}초", flush=True)
+                print(
+                    f"  {i:,}/{len(futures):,} 파일 · {time.perf_counter() - t0:,.0f}초", flush=True
+                )
     elapsed = time.perf_counter() - t0
 
     units = list(collector.units.values())
@@ -249,33 +265,45 @@ def main() -> None:
     build_stats = stats.to_dict()
     build_stats["duplicates_removed"] = dict(collector.duplicates)
     try:
-        summary = stats_from_parts(collector.parts(), build_stats, counter,
-                                   build_counter_kind=counter.kind)
+        summary = stats_from_parts(
+            collector.parts(), build_stats, counter, build_counter_kind=counter.kind
+        )
     except CorpusStopError as e:
         print(f"중단: {e}")
         sys.exit(2)
-    summary.update({
-        "case_id": args.case_id,
-        "created_at": time.strftime("%Y-%m-%d %H:%M"),
-        "unit_rules_version": UNIT_RULES_VERSION,
-        "max_part_tokens": settings.unit_max_part_tokens,
-        "workers": args.workers,
-        "elapsed_sec": elapsed,
-        "files": {"total": len(files), "failed": len(failed)},
-        "failed_errors": dict(Counter(err.split(":", 1)[0] for _p, err in failed)),
-        "counts": dict(stats.counts),
-        "ocr": {"pages": ocr_pages, "seconds": ocr_seconds,
-                "sec_per_page": ocr_seconds / ocr_pages if ocr_pages else 0.0},
-    })
+    summary.update(
+        {
+            "case_id": args.case_id,
+            "created_at": time.strftime("%Y-%m-%d %H:%M"),
+            "unit_rules_version": UNIT_RULES_VERSION,
+            "max_part_tokens": settings.unit_max_part_tokens,
+            "workers": args.workers,
+            "elapsed_sec": elapsed,
+            "files": {"total": len(files), "failed": len(failed)},
+            "failed_errors": dict(Counter(err.split(":", 1)[0] for _p, err in failed)),
+            "counts": dict(stats.counts),
+            "ocr": {
+                "pages": ocr_pages,
+                "seconds": ocr_seconds,
+                "sec_per_page": ocr_seconds / ocr_pages if ocr_pages else 0.0,
+            },
+        }
+    )
 
     with open(out_dir / "units.jsonl", "w", encoding="utf-8") as f:
         for p in collector.parts():
             f.write(json.dumps(p.to_dict(), ensure_ascii=False) + "\n")
     samples = _write_samples(units, paths_by_unit, out_dir, args.samples, args.seed)
     summary["clean_samples"] = samples
-    (out_dir / "stats.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    (out_dir / "T1_corpus.md").write_text(render_t1(summary) + _render_extra(summary), encoding="utf-8")
-    print(f"완료: {out_dir} (단위 {len(units):,} · 파트 {len(collector.parts()):,} · {elapsed:,.0f}초)")
+    (out_dir / "stats.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (out_dir / "T1_corpus.md").write_text(
+        render_t1(summary) + _render_extra(summary), encoding="utf-8"
+    )
+    print(
+        f"완료: {out_dir} (단위 {len(units):,} · 파트 {len(collector.parts()):,} · {elapsed:,.0f}초)"
+    )
 
 
 if __name__ == "__main__":

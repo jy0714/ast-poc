@@ -150,7 +150,9 @@ async def get_case(case_id: str):
     try:
         meta = store.get(case_id)
     except CaseNotFoundError:
-        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}") from None
+        raise HTTPException(
+            status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}"
+        ) from None
 
     return _to_response(meta)
 
@@ -166,7 +168,9 @@ async def update_case_sources(case_id: str, request: CaseUpdateSources):
             doc_paths=request.doc_paths or None,
         )
     except CaseNotFoundError:
-        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}") from None
+        raise HTTPException(
+            status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}"
+        ) from None
     except InvalidStatusTransitionError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
 
@@ -185,7 +189,9 @@ async def delete_case(case_id: str):
     try:
         store.get(case_id)
     except CaseNotFoundError:
-        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}") from None
+        raise HTTPException(
+            status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}"
+        ) from None
 
     # 인덱싱 실행 중이면 워커부터 정지 (orphan write 방지)
     from src.api.routes.indexing import get_pipeline
@@ -195,9 +201,7 @@ async def delete_case(case_id: str):
         logger.info(f"삭제 전 실행 중 인덱싱 중단: {case_id}")
         finished = pipeline.cancel_and_wait(case_id, timeout=10.0)
         if not finished:
-            logger.warning(
-                f"인덱싱 워커가 timeout 안에 종료되지 않음: {case_id} — 삭제는 진행"
-            )
+            logger.warning(f"인덱싱 워커가 timeout 안에 종료되지 않음: {case_id} — 삭제는 진행")
 
     # v4 케이스 색인 폴더 삭제
     from src.index import case_index
@@ -220,7 +224,9 @@ async def archive_case(case_id: str):
     try:
         meta = store.update_status(case_id, CaseStatus.ARCHIVED)
     except CaseNotFoundError:
-        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}") from None
+        raise HTTPException(
+            status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}"
+        ) from None
     except InvalidStatusTransitionError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
 

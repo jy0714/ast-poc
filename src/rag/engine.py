@@ -190,7 +190,12 @@ class RAGEngine:
         for hit in result.hits:
             if len(sources) >= n:
                 break
-            if cfg.rerank and min_score > 0 and "rerank" in hit.stage_ranks and hit.score < min_score:
+            if (
+                cfg.rerank
+                and min_score > 0
+                and "rerank" in hit.stage_ranks
+                and hit.score < min_score
+            ):
                 continue
             part = idx.part(hit.best_part_id)
             sources.append(_to_source(part, hit.score, method))
@@ -248,9 +253,7 @@ class RAGEngine:
             and filtered
             and not self._has_keyword_overlap(search_query, filtered)
         ):
-            logger.warning(
-                f"검색 결과와 질문의 키워드 일치도가 낮습니다 (case={self.case_id})"
-            )
+            logger.warning(f"검색 결과와 질문의 키워드 일치도가 낮습니다 (case={self.case_id})")
             extra_warning = (
                 "주의: 검색 결과가 질문과 직접적으로 관련되지 않을 수 있습니다. "
                 "확실한 근거가 없으면 반드시 '찾을 수 없습니다'로 답하세요."
@@ -343,10 +346,7 @@ class RAGEngine:
             )
         except Exception as e:
             logger.error(f"LLM 응답 생성 실패: {e}")
-            answer = (
-                f"LLM 응답 생성에 실패했습니다: {e}\n\n"
-                "아래 검색 결과를 직접 확인해 주세요."
-            )
+            answer = f"LLM 응답 생성에 실패했습니다: {e}\n\n아래 검색 결과를 직접 확인해 주세요."
 
         # 5. 출처 인용 검증 (할루시네이션 감지)
         citation_count, invalid_citations, uncited_response = validate_citations(
@@ -358,9 +358,7 @@ class RAGEngine:
                 f"{len(sources)}개를 초과 (case={self.case_id})"
             )
         if uncited_response:
-            logger.warning(
-                f"LLM이 출처 인용 없이 답변 — 할루시네이션 위험 (case={self.case_id})"
-            )
+            logger.warning(f"LLM이 출처 인용 없이 답변 — 할루시네이션 위험 (case={self.case_id})")
 
         # 최종 답변 로깅 (context와 비교 가능하도록)
         logger.info(
@@ -417,7 +415,11 @@ class RAGEngine:
         if not is_secure:
             logger.info(f"외부 조회 (보안 모드 OFF, 케이스 자료 미사용): case={self.case_id}")
             return self.llm_router.generate_stream(
-                question=question, context=[], secure_mode=False, case_id=self.case_id, on_complete=on_complete,
+                question=question,
+                context=[],
+                secure_mode=False,
+                case_id=self.case_id,
+                on_complete=on_complete,
             ), []
 
         # 0. 질의 파싱
@@ -465,13 +467,22 @@ class RAGEngine:
         logger.info(f"외부 조회 (보안 모드 OFF, 케이스 자료 미사용): case={self.case_id}")
         try:
             answer = await self.llm_router.generate(
-                question=question, context=[], secure_mode=False, case_id=self.case_id, on_complete=_capture_usage,
+                question=question,
+                context=[],
+                secure_mode=False,
+                case_id=self.case_id,
+                on_complete=_capture_usage,
             )
         except Exception as e:
             logger.error(f"외부 LLM 응답 생성 실패: {e}")
             answer = f"외부 LLM 응답 생성에 실패했습니다: {e}"
-        return QueryResult(answer=answer, sources=[], case_id=self.case_id, secure_mode=False,
-                           token_usage=token_usage)
+        return QueryResult(
+            answer=answer,
+            sources=[],
+            case_id=self.case_id,
+            secure_mode=False,
+            token_usage=token_usage,
+        )
 
     def _log_sources(
         self,
@@ -508,9 +519,7 @@ class RAGEngine:
             "attachment": "첨부파일",
         }
         if source.source_type:
-            header_parts.append(
-                f"유형: {type_labels.get(source.source_type, source.source_type)}"
-            )
+            header_parts.append(f"유형: {type_labels.get(source.source_type, source.source_type)}")
         if source.filename:
             header_parts.append(f"파일: {source.filename}")
         if source.subject:

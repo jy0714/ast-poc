@@ -45,13 +45,23 @@ class _NoOcr:
 def builder(monkeypatch: pytest.MonkeyPatch) -> UnitBuilder:
     parser = DocumentParser(ocr_languages="eng")
     monkeypatch.setattr(parser, "_get_ocr_engine", lambda: _NoOcr())
-    return UnitBuilder("case1", counter=COUNTER, max_part_tokens=200, doc_parser=parser,
-                       clean_enabled=True, gap_minutes=30)
+    return UnitBuilder(
+        "case1",
+        counter=COUNTER,
+        max_part_tokens=200,
+        doc_parser=parser,
+        clean_enabled=True,
+        gap_minutes=30,
+    )
 
 
-def _eml(message_id: str = "<A1@x.com>", body: str = "검토 결과 회신드립니다.",
-         subject: str = "RE: 3월 정산 건", attachments: list[tuple[str, bytes, str, str]] | None = None,
-         to: str = "김철수 <cs@x.com>, 이영희 <yh@x.com>") -> bytes:
+def _eml(
+    message_id: str = "<A1@x.com>",
+    body: str = "검토 결과 회신드립니다.",
+    subject: str = "RE: 3월 정산 건",
+    attachments: list[tuple[str, bytes, str, str]] | None = None,
+    to: str = "김철수 <cs@x.com>, 이영희 <yh@x.com>",
+) -> bytes:
     m = PyEmail()
     m["From"] = "홍길동 <gd@x.com>"
     m["To"] = to
@@ -80,7 +90,11 @@ def test_email_id_rules():
     assert make_email_id("<ABC@x.com>") == make_email_id("<abc@x.com>  ")
     assert make_email_id("<abc@x.com>").startswith("em:") and len(make_email_id("x")) == 19
     fb1 = make_email_id("", "a", "2024", "s", "body")
-    assert fb1 == make_email_id("", "a", "2024", "s", "body") != make_email_id("", "b", "2024", "s", "body")
+    assert (
+        fb1
+        == make_email_id("", "a", "2024", "s", "body")
+        != make_email_id("", "b", "2024", "s", "body")
+    )
     start = datetime(2024, 3, 5, 14, 0, tzinfo=timezone(timedelta(hours=9)))
     assert make_chat_id("room", start).endswith(":20240305T050000")
     assert make_attachment_id("em:0123456789abcdef", 2, ":p3") == "att:0123456789abcdef:2:p3"
@@ -111,7 +125,9 @@ def test_email_header_format_and_timezone(builder: UnitBuilder, tmp_path: Path):
 
 
 def test_reply_quote_stripped_but_forward_kept(builder: UnitBuilder, tmp_path: Path):
-    quoted = "확인했습니다.\n\nFrom: 김철수\nSent: Monday\nTo: 홍길동\nSubject: 정산\n\n이전 메일 본문"
+    quoted = (
+        "확인했습니다.\n\nFrom: 김철수\nSent: Monday\nTo: 홍길동\nSubject: 정산\n\n이전 메일 본문"
+    )
     reply = builder.build_file(_write(tmp_path, "r.eml", _eml(body=quoted)), "r.eml")[0]
     assert reply.text == "확인했습니다."
     fwd = builder.build_file(
@@ -135,26 +151,41 @@ def test_long_email_split_into_parts_with_same_header(builder: UnitBuilder, tmp_
 
 
 def test_eml_attachment_linked_to_parent(builder: UnitBuilder, tmp_path: Path):
-    p = _write(tmp_path, "m.eml", _eml(attachments=[
-        ("견적서.txt", "단가 1,200,000원".encode(), "text", "plain"),
-        ("photo.png", b"\x89PNG....", "image", "png"),
-    ]))
+    p = _write(
+        tmp_path,
+        "m.eml",
+        _eml(
+            attachments=[
+                ("견적서.txt", "단가 1,200,000원".encode(), "text", "plain"),
+                ("photo.png", b"\x89PNG....", "image", "png"),
+            ]
+        ),
+    )
     units = builder.build_file(p, "m.eml")
     email, att = units[0], units[1]
     assert len(units) == 2  # 이미지는 단위 없음
     assert att.unit_type == "attachment"
     assert att.meta["parent_unit_id"] == email.unit_id
     assert att.meta["parent_subject"] == "RE: 3월 정산 건"
-    assert att.header.startswith("[첨부] 견적서.txt | 1/1부 | 부모 메일: 2024-03-05 홍길동→김철수 외 1명")
+    assert att.header.startswith(
+        "[첨부] 견적서.txt | 1/1부 | 부모 메일: 2024-03-05 홍길동→김철수 외 1명"
+    )
     assert builder.stats.excluded_types[".png"] == 1
 
 
 def test_pst_attachments_linked_and_orphans(builder: UnitBuilder):
     linked = Attachment("a.txt", "첨부 본문 내용입니다".encode())
     orphan = Attachment("o.txt", "부모 없는 첨부 내용".encode())
-    em = EmailMessage(subject="견적", sender="홍길동", recipients=["김철수"], body="첨부 확인 바랍니다",
-                      date=datetime(2024, 3, 5, 9, 0), attachments=[linked], message_id="<P1@x>",
-                      folder_path="Inbox")
+    em = EmailMessage(
+        subject="견적",
+        sender="홍길동",
+        recipients=["김철수"],
+        body="첨부 확인 바랍니다",
+        date=datetime(2024, 3, 5, 9, 0),
+        attachments=[linked],
+        message_id="<P1@x>",
+        folder_path="Inbox",
+    )
     result = PSTParseResult(emails=[em], attachments=[linked, orphan])
     units = builder.build_from_pst(result, "box.pst")
     by_type = {u.unit_type: [] for u in units}
@@ -190,19 +221,31 @@ def test_duplicate_email_merged(builder: UnitBuilder, tmp_path: Path):
 # ─────────────── 채팅 ───────────────
 
 
-def _chat(sender: str, minute: int, topic: str = "정산팀", folder: str = "TeamsMessagesData",
-          participants: list[str] | None = None) -> ChatMessage:
+def _chat(
+    sender: str,
+    minute: int,
+    topic: str = "정산팀",
+    folder: str = "TeamsMessagesData",
+    participants: list[str] | None = None,
+) -> ChatMessage:
     return ChatMessage(
-        sender=sender, body=f"{sender} 메시지 {minute}", timestamp=datetime(2024, 3, 5, 14, 0) +
-        timedelta(minutes=minute), conversation_id=chat_room_key(folder, topic),
-        participants=participants or [sender], conversation_topic=topic, folder_path=folder,
+        sender=sender,
+        body=f"{sender} 메시지 {minute}",
+        timestamp=datetime(2024, 3, 5, 14, 0) + timedelta(minutes=minute),
+        conversation_id=chat_room_key(folder, topic),
+        participants=participants or [sender],
+        conversation_topic=topic,
+        folder_path=folder,
     )
 
 
 def test_chat_sessions_gap_and_room_key(builder: UnitBuilder):
     chats = [
-        _chat("홍길동", 0), _chat("김철수", 10), _chat("이영희", 25),  # 세션 1 (참여자 바뀌어도 같은 방)
-        _chat("홍길동", 70), _chat("김철수", 80),  # 45분 넘게 쉬고 → 세션 2
+        _chat("홍길동", 0),
+        _chat("김철수", 10),
+        _chat("이영희", 25),  # 세션 1 (참여자 바뀌어도 같은 방)
+        _chat("홍길동", 70),
+        _chat("김철수", 80),  # 45분 넘게 쉬고 → 세션 2
         _chat("홍길동", 5, topic="다른방"),  # 다른 방
     ]
     units = builder.build_from_pst(PSTParseResult(chats=chats), "box.pst")
@@ -211,9 +254,13 @@ def test_chat_sessions_gap_and_room_key(builder: UnitBuilder):
     main = sorted((u for u in sessions if u.meta["room"] == "정산팀"), key=lambda u: u.meta["date"])
     assert [u.meta["n_messages"] for u in main] == [3, 2]
     assert main[0].meta["chat_type"] == "group" and main[1].meta["chat_type"] == "1:1"
-    assert main[0].unit_id == make_chat_id(chat_room_key("TeamsMessagesData", "정산팀"),
-                                           datetime(2024, 3, 5, 14, 0))
-    assert main[0].header == "[채팅] 2024-03-05 14:00~14:25 | 참여자: 홍길동, 김철수, 이영희 | 방: 정산팀"
+    assert main[0].unit_id == make_chat_id(
+        chat_room_key("TeamsMessagesData", "정산팀"), datetime(2024, 3, 5, 14, 0)
+    )
+    assert (
+        main[0].header
+        == "[채팅] 2024-03-05 14:00~14:25 | 참여자: 홍길동, 김철수, 이영희 | 방: 정산팀"
+    )
     assert main[0].text.split("\n")[0] == "14:00 홍길동: 홍길동 메시지 0"
 
 
@@ -285,7 +332,9 @@ def test_pdf_empty_page_numbering(builder: UnitBuilder, tmp_path: Path):
 
 
 def test_ad_email_dropped_with_attachments(builder, tmp_path):
-    raw = _eml(subject="(광고) 할인 행사", attachments=[("a.txt", "첨부 본문".encode(), "text", "plain")])
+    raw = _eml(
+        subject="(광고) 할인 행사", attachments=[("a.txt", "첨부 본문".encode(), "text", "plain")]
+    )
     assert builder.build_file(_write(tmp_path, "m/ad.eml", raw), "m/ad.eml") == []
     assert builder.stats.counts["ads_removed"] == 1
     assert builder.stats.counts["ads_removed_attachments"] == 1

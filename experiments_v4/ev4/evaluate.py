@@ -45,9 +45,22 @@ N_PERMUTATIONS = 10000
 N_BOOTSTRAP = 1000
 SMALL_N = 5
 SMALL_MARK = "†사례 수준"
-METRIC_LABELS = {"ndcg@10": "nDCG@10", "precision@10": "P@10", "recall@10": "Recall@10",
-                 "recall@10-l2": "Recall@10(등급 2)", "mrr@10": "MRR@10", "recall@100": "Recall@100"}
-T2_METRICS = ["ndcg@10", "precision@10", "recall@10", "recall@10-l2", "mrr@10", "recall@100"]  # v4.3 §4 순서
+METRIC_LABELS = {
+    "ndcg@10": "nDCG@10",
+    "precision@10": "P@10",
+    "recall@10": "Recall@10",
+    "recall@10-l2": "Recall@10(등급 2)",
+    "mrr@10": "MRR@10",
+    "recall@100": "Recall@100",
+}
+T2_METRICS = [
+    "ndcg@10",
+    "precision@10",
+    "recall@10",
+    "recall@10-l2",
+    "mrr@10",
+    "recall@100",
+]  # v4.3 §4 순서
 T8_LABELS = ["R1", "R2", "R3", "R5"]  # 논문 번호 (v4.4 §2)
 T8_METRICS = ["ndcg@10", "precision@10"]
 SUBSET_LABELS = {"search": "S17 (search)", "meta": "meta", "nonsearch": "nonsearch"}
@@ -97,7 +110,9 @@ def _ranx_qrels(qrels: Qrels, qids: list[str]) -> Any:
     return RanxQrels({q: {u: g for u, g in qrels[q].items() if g > 0} for q in qids})
 
 
-def per_query_scores(qrels: Qrels, run: Run, qids: list[str], l2_qids: list[str], name: str) -> dict[str, dict[str, float]]:
+def per_query_scores(
+    qrels: Qrels, run: Run, qids: list[str], l2_qids: list[str], name: str
+) -> dict[str, dict[str, float]]:
     """{metric: {qid: 값}} — recall@10-l2 는 l2_qids 만"""
     from ranx import evaluate
 
@@ -107,8 +122,13 @@ def per_query_scores(qrels: Qrels, run: Run, qids: list[str], l2_qids: list[str]
     out = {m: dict(zip(qids, map(float, scores[m]), strict=True)) for m in base}
     out[L2_METRIC] = {}
     if l2_qids:
-        s = evaluate(_ranx_qrels(qrels, l2_qids), _ranx_run(run, l2_qids, name), [L2_METRIC],
-                     return_mean=False, make_comparable=True)
+        s = evaluate(
+            _ranx_qrels(qrels, l2_qids),
+            _ranx_run(run, l2_qids, name),
+            [L2_METRIC],
+            return_mean=False,
+            make_comparable=True,
+        )
         vals = s[L2_METRIC] if isinstance(s, dict) else s
         out[L2_METRIC] = dict(zip(l2_qids, map(float, vals), strict=True))
     return out
@@ -118,9 +138,16 @@ def fisher_p(qrels: Qrels, run_a: Run, run_b: Run, qids: list[str], seed: int) -
     """두 실행의 nDCG@10 fisher 무작위화 검정 p (ranx, 양측)"""
     from ranx import compare
 
-    rep = compare(_ranx_qrels(qrels, qids), [_ranx_run(run_a, qids, "A"), _ranx_run(run_b, qids, "B")],
-                  metrics=[PRIMARY], stat_test="fisher", n_permutations=N_PERMUTATIONS, max_p=1.0,
-                  random_seed=seed, make_comparable=True)
+    rep = compare(
+        _ranx_qrels(qrels, qids),
+        [_ranx_run(run_a, qids, "A"), _ranx_run(run_b, qids, "B")],
+        metrics=[PRIMARY],
+        stat_test="fisher",
+        n_permutations=N_PERMUTATIONS,
+        max_p=1.0,
+        random_seed=seed,
+        make_comparable=True,
+    )
     return float(rep.to_dict()["A"]["comparisons"]["B"][PRIMARY])
 
 
@@ -166,12 +193,17 @@ def _run_label(cfg: ExperimentConfig, run: str) -> str:
 # ─────────────────────────── 실행 ───────────────────────────
 
 
-def _summarize(scores: dict[str, dict[str, dict[str, float]]], qs: list[str], l2_qs: list[str],
-               seed: int) -> dict[str, dict[str, tuple[float, float, float]]]:
+def _summarize(
+    scores: dict[str, dict[str, dict[str, float]]], qs: list[str], l2_qs: list[str], seed: int
+) -> dict[str, dict[str, tuple[float, float, float]]]:
     """{run: {metric: (mean, lo, hi)}} — qs 집합만 (recall@10-l2 는 l2_qs 만)"""
     return {
-        name: {m: bootstrap_ci([s[m][q] for q in (l2_qs if m == L2_METRIC else qs)], n=N_BOOTSTRAP, seed=seed)
-               for m in METRICS}
+        name: {
+            m: bootstrap_ci(
+                [s[m][q] for q in (l2_qs if m == L2_METRIC else qs)], n=N_BOOTSTRAP, seed=seed
+            )
+            for m in METRICS
+        }
         for name, s in scores.items()
     }
 
@@ -199,7 +231,9 @@ def evaluate_all(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> d
     qids = [q for q in qids_all if queries[q].support_group == primary]
     l2_qids = [q for q in l2_all if queries[q].support_group == primary]
     if not qids:
-        raise ValueError(f"관련 단위(등급 ≥1)가 있는 {primary} 질의가 없습니다 — qrels 를 확인하세요")
+        raise ValueError(
+            f"관련 단위(등급 ≥1)가 있는 {primary} 질의가 없습니다 — qrels 를 확인하세요"
+        )
 
     idx = case_index.load(cfg.case_id)
 
@@ -207,9 +241,17 @@ def evaluate_all(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> d
         parts = idx.unit_parts(uid)
         return str(parts[0].meta.get("lang", "und")) if parts else "und"
 
-    ev_lang = {q: evidence_lang([_lang(u) for u, g in qrels[q].items() if g == 2]) for q in qids_all}
-    cross = {q: ("n/a" if ev_lang[q] == "n/a" else ("yes" if lang_bucket(queries[q].query_lang) != ev_lang[q] else "no"))
-             for q in qids_all}
+    ev_lang = {
+        q: evidence_lang([_lang(u) for u, g in qrels[q].items() if g == 2]) for q in qids_all
+    }
+    cross = {
+        q: (
+            "n/a"
+            if ev_lang[q] == "n/a"
+            else ("yes" if lang_bucket(queries[q].query_lang) != ev_lang[q] else "no")
+        )
+        for q in qids_all
+    }
 
     runs: dict[str, Run] = {}
     for name in cfg.runs:
@@ -218,7 +260,9 @@ def evaluate_all(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> d
             runs[name] = read_run(path)
         else:
             log(f"[evaluate] {name} 실행 파일 없음 — 건너뜀 ({path})")
-    scores = {name: per_query_scores(qrels, run, qids_all, l2_all, name) for name, run in runs.items()}
+    scores = {
+        name: per_query_scores(qrels, run, qids_all, l2_all, name) for name, run in runs.items()
+    }
     summary = _summarize(scores, qids, l2_qids, cfg.seed)
     summary_all = _summarize(scores, qids_all, l2_all, cfg.seed)
 
@@ -230,13 +274,27 @@ def evaluate_all(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> d
         va = [scores[a][PRIMARY][q] for q in qids]
         vb = [scores[b][PRIMARY][q] for q in qids]
         d, lo, hi = paired_bootstrap_ci(va, vb, n=N_BOOTSTRAP, seed=cfg.seed)
-        comps.append({"family": fam, "A": a, "B": b, "comparison": f"{a}→{b}",
-                      "label_A": cfg.label(a), "label_B": cfg.label(b),
-                      "comparison_label": f"{cfg.label(a)}→{cfg.label(b)}", "metric": PRIMARY,
-                      "subset": primary, "n": len(qids), "mean_A": _mean(va), "mean_B": _mean(vb),
-                      "diff": d, "ci_lo": lo, "ci_hi": hi,
-                      "p": fisher_p(qrels, runs[a], runs[b], qids, cfg.seed),
-                      "p_check": paired_randomization_p(va, vb, n=N_PERMUTATIONS, seed=cfg.seed)})
+        comps.append(
+            {
+                "family": fam,
+                "A": a,
+                "B": b,
+                "comparison": f"{a}→{b}",
+                "label_A": cfg.label(a),
+                "label_B": cfg.label(b),
+                "comparison_label": f"{cfg.label(a)}→{cfg.label(b)}",
+                "metric": PRIMARY,
+                "subset": primary,
+                "n": len(qids),
+                "mean_A": _mean(va),
+                "mean_B": _mean(vb),
+                "diff": d,
+                "ci_lo": lo,
+                "ci_hi": hi,
+                "p": fisher_p(qrels, runs[a], runs[b], qids, cfg.seed),
+                "p_check": paired_randomization_p(va, vb, n=N_PERMUTATIONS, seed=cfg.seed),
+            }
+        )
     for key in ("p", "p_check"):
         adj = holm({str(i): c[key] for i, c in enumerate(comps)})
         for i, c in enumerate(comps):
@@ -245,8 +303,27 @@ def evaluate_all(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> d
     res_dir = cfg.results_dir
     res_dir.mkdir(parents=True, exist_ok=True)
     _write_per_query(res_dir / "per_query.csv", scores, queries, qids_all, ev_lang, cross)
-    comp_cols = ["family", "comparison_label", "comparison", "label_A", "label_B", "A", "B", "metric", "subset", "n", "mean_A", "mean_B", "diff", "ci_lo",
-                 "ci_hi", "p", "p_holm", "p_check", "p_check_holm"]
+    comp_cols = [
+        "family",
+        "comparison_label",
+        "comparison",
+        "label_A",
+        "label_B",
+        "A",
+        "B",
+        "metric",
+        "subset",
+        "n",
+        "mean_A",
+        "mean_B",
+        "diff",
+        "ci_lo",
+        "ci_hi",
+        "p",
+        "p_holm",
+        "p_check",
+        "p_check_holm",
+    ]
     with open(res_dir / "comparisons.csv", "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=comp_cols, extrasaction="ignore")
         w.writeheader()
@@ -261,41 +338,78 @@ def evaluate_all(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> d
         f"- 주 분석 집합 {plabel} (`primary_subset: {primary}`): 질의 {n_primary}건 중 평가 {len(qids)}건 · "
         f"등급 2 단위 있는 질의 {len(l2_qids)}건. 검정·Holm 보정·T2 는 이 집합으로 한다",
         f"- ALL45: 질의 {len(queries)}건 중 평가 {len(qids_all)}건 (관련 단위 없는 질의 {len(no_rel)}건 제외"
-        + (f": {', '.join(no_rel)}" if no_rel else "") + "). 기술 통계(평균·95% CI)만, 검정하지 않는다",
+        + (f": {', '.join(no_rel)}" if no_rel else "")
+        + "). 기술 통계(평균·95% CI)만, 검정하지 않는다",
         f"- 실행 깊이 {cfg.depth} · bootstrap {N_BOOTSTRAP}회 95% CI(차이는 짝지은 bootstrap) · "
         f"fisher {N_PERMUTATIONS}회 양측 · Holm 보정 {len(comps)}개 비교(주 지표 {METRIC_LABELS[PRIMARY]})",
         f"- {SMALL_MARK}: 질의 {SMALL_N}개 미만 그룹 (값은 내되 일반화하지 않는다)",
         "",
     ]
-    md += _t2(cfg, summary, len(qids), len(l2_qids), f"T2 검색 구성별 성능 — {plabel} (평균 [95% CI])")
-    md += _t2(cfg, summary_all, len(qids_all), len(l2_all), "T2 부가 — ALL45 (평균 [95% CI], 검정 없음)")
+    md += _t2(
+        cfg, summary, len(qids), len(l2_qids), f"T2 검색 구성별 성능 — {plabel} (평균 [95% CI])"
+    )
+    md += _t2(
+        cfg, summary_all, len(qids_all), len(l2_all), "T2 부가 — ALL45 (평균 [95% CI], 검정 없음)"
+    )
     md += _comparisons_table(cfg, comps)
     md += _t8(cfg, scores, queries, qids_all, no_rel)
     md += _language_aux_md(aux, plabel)
     (res_dir / "tables.md").write_text("\n".join(md) + "\n", encoding="utf-8")
     out = {
-        "primary_subset": primary, "n_queries": len(qids), "n_l2": len(l2_qids),
-        "n_queries_all": len(qids_all), "n_l2_all": len(l2_all), "excluded": no_rel,
+        "primary_subset": primary,
+        "n_queries": len(qids),
+        "n_l2": len(l2_qids),
+        "n_queries_all": len(qids_all),
+        "n_l2_all": len(l2_all),
+        "excluded": no_rel,
         "runs": {r: {m: list(v) for m, v in s.items()} for r, s in summary.items()},
         "runs_all": {r: {m: list(v) for m, v in s.items()} for r, s in summary_all.items()},
-        "comparisons": comps, "labels": {r: cfg.label(r) for r in runs}, "language_aux": aux,
+        "comparisons": comps,
+        "labels": {r: cfg.label(r) for r in runs},
+        "language_aux": aux,
     }
-    (res_dir / "evaluation.json").write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
-    log(f"[evaluate] {plabel} {len(qids)}건 · ALL45 {len(qids_all)}건 · 실행 {len(runs)}개 · 비교 {len(comps)}개 "
-        f"→ {res_dir / 'tables.md'}")
+    (res_dir / "evaluation.json").write_text(
+        json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    log(
+        f"[evaluate] {plabel} {len(qids)}건 · ALL45 {len(qids_all)}건 · 실행 {len(runs)}개 · 비교 {len(comps)}개 "
+        f"→ {res_dir / 'tables.md'}"
+    )
     return out
 
 
 def _write_per_query(path, scores, queries, qids, ev_lang, cross) -> None:
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["run", "qid", "support_group", "support_class", "type", "query_lang", "evidence_lang",
-                    "cross_lingual", *METRICS])
+        w.writerow(
+            [
+                "run",
+                "qid",
+                "support_group",
+                "support_class",
+                "type",
+                "query_lang",
+                "evidence_lang",
+                "cross_lingual",
+                *METRICS,
+            ]
+        )
         for run, s in scores.items():
             for q in qids:
                 qq = queries[q]
-                w.writerow([run, q, qq.support_group, qq.support_class, qq.type, qq.query_lang, ev_lang[q], cross[q],
-                            *[_f(s[m].get(q, math.nan), 4) if q in s[m] else "" for m in METRICS]])
+                w.writerow(
+                    [
+                        run,
+                        q,
+                        qq.support_group,
+                        qq.support_class,
+                        qq.type,
+                        qq.query_lang,
+                        ev_lang[q],
+                        cross[q],
+                        *[_f(s[m].get(q, math.nan), 4) if q in s[m] else "" for m in METRICS],
+                    ]
+                )
 
 
 # ─────────────────────────── 표 ───────────────────────────
@@ -304,25 +418,37 @@ def _write_per_query(path, scores, queries, qids, ev_lang, cross) -> None:
 def _t2(cfg, summary, n, n_l2, title: str) -> list[str]:
     """T2 (논문 [표 12]) — 실행 5개(논문 번호 순), 평균 [95% CI]"""
     heads = [METRIC_LABELS[m] + (f" (n={n_l2})" if m == L2_METRIC else "") for m in T2_METRICS]
-    lines = [f"## {title}", "",
-             "| 실행 | 하네스 | 색인 | 구성 | " + " | ".join(heads) + " |", "|---|---|---|---|" + "---|" * len(heads)]
+    lines = [
+        f"## {title}",
+        "",
+        "| 실행 | 하네스 | 색인 | 구성 | " + " | ".join(heads) + " |",
+        "|---|---|---|---|" + "---|" * len(heads),
+    ]
     for r in cfg.runs_by_label([r for r in cfg.runs if r in summary]):
         prof = cfg.runs[r].get("profile", "")
-        lines.append(f"| {cfg.label(r)} | {r} | {prof} | {_run_label(cfg, r)} | "
-                     + " | ".join(_ci(summary[r][m]) for m in T2_METRICS) + " |")
+        lines.append(
+            f"| {cfg.label(r)} | {r} | {prof} | {_run_label(cfg, r)} | "
+            + " | ".join(_ci(summary[r][m]) for m in T2_METRICS)
+            + " |"
+        )
     lines += ["", f"n = {n} (Recall@10(등급 2): 등급 2 단위가 있는 질의 n = {n_l2})", ""]
     return lines
 
 
 def _comparisons_table(cfg, comps) -> list[str]:
     """사전 지정 비교 4개 (E2) — comparisons.csv 와 같은 값, 실행 이름은 논문 번호"""
-    lines = ["## 사전 지정 비교 (nDCG@10, 차이 = 대상 − 기준)", "",
-             "| 기준→대상 | 하네스 | 기준 | 대상 | 차이 [95% CI] | p(fisher) | p(Holm) | p(교차 확인) |",
-             "|---|---|---:|---:|---|---:|---:|---:|"]
+    lines = [
+        "## 사전 지정 비교 (nDCG@10, 차이 = 대상 − 기준)",
+        "",
+        "| 기준→대상 | 하네스 | 기준 | 대상 | 차이 [95% CI] | p(fisher) | p(Holm) | p(교차 확인) |",
+        "|---|---|---:|---:|---|---:|---:|---:|",
+    ]
     for c in comps:
-        lines.append(f"| {cfg.label(c['A'])}→{cfg.label(c['B'])} | {c['comparison']} | {_f(c['mean_A'])} | "
-                     f"{_f(c['mean_B'])} | {_dci((c['diff'], c['ci_lo'], c['ci_hi']))} | {_p(c['p'])} | "
-                     f"{_p(c['p_holm'])} | {_p(c['p_check'])} |")
+        lines.append(
+            f"| {cfg.label(c['A'])}→{cfg.label(c['B'])} | {c['comparison']} | {_f(c['mean_A'])} | "
+            f"{_f(c['mean_B'])} | {_dci((c['diff'], c['ci_lo'], c['ci_hi']))} | {_p(c['p'])} | "
+            f"{_p(c['p_holm'])} | {_p(c['p_check'])} |"
+        )
     return [*lines, ""]
 
 
@@ -331,8 +457,13 @@ def _run_by_label(cfg: ExperimentConfig, label: str) -> str | None:
     return next((r for r in cfg.runs if cfg.label(r) == label), None)
 
 
-def language_aux(cfg: ExperimentConfig, qrels: Qrels, runs: dict[str, Run], qids: list[str],
-                 unit_lang: Callable[[str], str]) -> dict[str, Any]:
+def language_aux(
+    cfg: ExperimentConfig,
+    qrels: Qrels,
+    runs: dict[str, Run],
+    qids: list[str],
+    unit_lang: Callable[[str], str],
+) -> dict[str, Any]:
     """언어별 보조 값 (v4.4 §2, 표 아님 — 본문용)
 
     현지 언어 = ko·en 이 아닌 단위 언어. 주 분석 집합 질의 가운데 등급 2 단위에 현지 언어 단위가 있는
@@ -342,8 +473,14 @@ def language_aux(cfg: ExperimentConfig, qrels: Qrels, runs: dict[str, Run], qids
         {n_local_queries, hits: {R5: n, R1: n, R2: n}, per_query: [{qid, R5, R1, R2}], runs: {R5: 하네스 이름}}
     """
     names = {lab: _run_by_label(cfg, lab) for lab in ("R5", "R1", "R2")}
-    local_q = {q: {u for u, g in qrels.get(q, {}).items() if g == 2 and lang_bucket(unit_lang(u)) == "other"}
-               for q in qids}
+    local_q = {
+        q: {
+            u
+            for u, g in qrels.get(q, {}).items()
+            if g == 2 and lang_bucket(unit_lang(u)) == "other"
+        }
+        for q in qids
+    }
     local_q = {q: us for q, us in local_q.items() if us}
     per_query: list[dict[str, Any]] = []
     for q in sorted(local_q):
@@ -353,20 +490,31 @@ def language_aux(cfg: ExperimentConfig, qrels: Qrels, runs: dict[str, Run], qids
             row[lab] = None if top is None else bool(local_q[q] & top)
         per_query.append(row)
     hits = {lab: sum(1 for r in per_query if r[lab]) for lab in names}
-    return {"n_local_queries": len(local_q), "hits": hits, "per_query": per_query,
-            "runs": {lab: n for lab, n in names.items() if n}}
+    return {
+        "n_local_queries": len(local_q),
+        "hits": hits,
+        "per_query": per_query,
+        "runs": {lab: n for lab, n in names.items() if n},
+    }
 
 
 def _language_aux_md(aux: dict[str, Any], plabel: str) -> list[str]:
     n = aux["n_local_queries"]
-    lines = ["## 언어별 보조 값 (본문용, 표 아님)", "",
-             f"- 등급 2 단위에 현지 언어(한국어·영어 외) 단위가 있는 {plabel} 질의: {n}건",
-             f"- 그중 R5 가 현지 언어 등급 2 단위를 상위 10개에 넣은 질의: {aux['hits']['R5']}건"
-             + (f" / {n}" if n else ""), ""]
+    lines = [
+        "## 언어별 보조 값 (본문용, 표 아님)",
+        "",
+        f"- 등급 2 단위에 현지 언어(한국어·영어 외) 단위가 있는 {plabel} 질의: {n}건",
+        f"- 그중 R5 가 현지 언어 등급 2 단위를 상위 10개에 넣은 질의: {aux['hits']['R5']}건"
+        + (f" / {n}" if n else ""),
+        "",
+    ]
     if aux["per_query"]:
         lines += ["| qid | R1 상위 10 | R2 상위 10 | R5 상위 10 |", "|---|---|---|---|"]
         mark = {True: "포함", False: "없음", None: "–"}
-        lines += [f"| {r['qid']} | {mark[r['R1']]} | {mark[r['R2']]} | {mark[r['R5']]} |" for r in aux["per_query"]]
+        lines += [
+            f"| {r['qid']} | {mark[r['R1']]} | {mark[r['R2']]} | {mark[r['R5']]} |"
+            for r in aux["per_query"]
+        ]
         lines.append("")
     return lines
 
@@ -375,14 +523,33 @@ def _t8(cfg, scores, queries, qids_all, no_rel) -> list[str]:
     """T8 (논문 [표 13]) — 집합별(search·meta·nonsearch·전체) R1·R2·R3·R5 nDCG@10·P@10, 기술 통계"""
     runs = [r for r in (_run_by_label(cfg, lab) for lab in T8_LABELS) if r and r in scores]
     head = " | ".join(f"{cfg.label(r)} {METRIC_LABELS[m]}" for r in runs for m in T8_METRICS)
-    groups = {SUBSET_LABELS[g]: [q for q in qids_all if queries[q].support_group == g] for g in SUPPORT_GROUPS}
+    groups = {
+        SUBSET_LABELS[g]: [q for q in qids_all if queries[q].support_group == g]
+        for g in SUPPORT_GROUPS
+    }
     groups["전체 (ALL45)"] = qids_all
-    lines = ["## T8 분석 집합별 성능 (표준 질문 분류 확인)", "", f"| 집합 | n | {head} |",
-             "|---|---:|" + "---:|" * (len(runs) * len(T8_METRICS))]
+    lines = [
+        "## T8 분석 집합별 성능 (표준 질문 분류 확인)",
+        "",
+        f"| 집합 | n | {head} |",
+        "|---|---:|" + "---:|" * (len(runs) * len(T8_METRICS)),
+    ]
     for label, qs in groups.items():
-        cells = [_f(_mean([scores[r][m][q] for q in qs])) if qs else "–" for r in runs for m in T8_METRICS]
+        cells = [
+            _f(_mean([scores[r][m][q] for q in qs])) if qs else "–"
+            for r in runs
+            for m in T8_METRICS
+        ]
         lines.append(f"| {label} | {_n(len(qs))} | " + " | ".join(cells) + " |")
-    excl = {SUBSET_LABELS[g]: sum(1 for q in no_rel if queries[q].support_group == g) for g in SUPPORT_GROUPS}
-    lines += ["", "n 은 관련 단위(등급 ≥1)가 있는 질의 수. 제외된 질의: "
-              + ", ".join(f"{k} {v}건" for k, v in excl.items()) + ". 검정하지 않은 기술 통계다.", ""]
+    excl = {
+        SUBSET_LABELS[g]: sum(1 for q in no_rel if queries[q].support_group == g)
+        for g in SUPPORT_GROUPS
+    }
+    lines += [
+        "",
+        "n 은 관련 단위(등급 ≥1)가 있는 질의 수. 제외된 질의: "
+        + ", ".join(f"{k} {v}건" for k, v in excl.items())
+        + ". 검정하지 않은 기술 통계다.",
+        "",
+    ]
     return lines

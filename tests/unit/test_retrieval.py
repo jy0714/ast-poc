@@ -18,13 +18,17 @@ def _idx(unit_of_row: list[str]) -> CaseIndex:
     parts = []
     for uid in unit_of_row:
         counts[uid] = counts.get(uid, 0) + 1
-        parts.append(UnitPart(f"{uid}#{counts[uid]}", uid, "email", f"H {uid}", f"text {uid}", 3, {}))
+        parts.append(
+            UnitPart(f"{uid}#{counts[uid]}", uid, "email", f"H {uid}", f"text {uid}", 3, {})
+        )
     idx = CaseIndex("c", None, {}, parts)  # type: ignore[arg-type]
     idx.check_embedding = MagicMock()  # type: ignore[method-assign]
     return idx
 
 
-def _inject(idx: CaseIndex, bm25: list[float] | None = None, dense: list[float] | None = None) -> None:
+def _inject(
+    idx: CaseIndex, bm25: list[float] | None = None, dense: list[float] | None = None
+) -> None:
     if bm25 is not None:
         idx.bm25_scores = MagicMock(return_value=np.array(bm25, dtype=float))  # type: ignore[method-assign]
     if dense is not None:
@@ -57,7 +61,13 @@ def _fake_reranker(monkeypatch, scores_by_unit: dict[str, float]):
 class TestDefaults:
     def test_fixed_defaults(self):
         cfg = RetrievalConfig()
-        assert (cfg.k_bm25, cfg.k_dense, cfg.rrf_k, cfg.rerank_candidates, cfg.depth) == (50, 50, 60, 30, 100)
+        assert (cfg.k_bm25, cfg.k_dense, cfg.rrf_k, cfg.rerank_candidates, cfg.depth) == (
+            50,
+            50,
+            60,
+            30,
+            100,
+        )
         assert cfg.profile == "hdr-qwen3" and cfg.reranker == "qwen3"
 
     def test_service_config_reads_settings(self, monkeypatch):
@@ -84,7 +94,9 @@ class TestPartsToUnits:
         n = 120
         idx = _idx([f"u{i:03d}" for i in range(n)])
         _inject(idx, dense=[float(n - i) for i in range(n)])
-        res = retrieve("c", "q", RetrievalConfig(use_bm25=False, rerank=False, k_dense=5, depth=100), index=idx)
+        res = retrieve(
+            "c", "q", RetrievalConfig(use_bm25=False, rerank=False, k_dense=5, depth=100), index=idx
+        )
         assert len(res.hits) == 100
         assert res.hits[-1].unit_id == "u099"
 
@@ -93,8 +105,13 @@ class TestPartsToUnits:
         idx.parts[0].unit_type = "chat"
         idx._types = np.array(["chat", "email"], dtype=object)
         _inject(idx, bm25=[1.0, 0.5])
-        res = retrieve("c", "q", RetrievalConfig(use_dense=False, rerank=False), filters={"source_type": "email"},
-                       index=idx)
+        res = retrieve(
+            "c",
+            "q",
+            RetrievalConfig(use_dense=False, rerank=False),
+            filters={"source_type": "email"},
+            index=idx,
+        )
         assert [h.unit_id for h in res.hits] == ["b"]
 
 
@@ -147,7 +164,9 @@ class TestRerank:
         units = [f"u{i}" for i in range(6)]
         idx = _idx(units)
         _inject(idx, bm25=[6, 5, 4, 3, 2, 1], dense=[6, 5, 4, 3, 2, 1])
-        rr = _fake_reranker(monkeypatch, {"u0": 0.1, "u1": 0.9, "u2": 0.5, "u3": 1.0, "u4": 1.0, "u5": 1.0})
+        rr = _fake_reranker(
+            monkeypatch, {"u0": 0.1, "u1": 0.9, "u2": 0.5, "u3": 1.0, "u4": 1.0, "u5": 1.0}
+        )
         res = retrieve("c", "q", RetrievalConfig(rerank_candidates=3), index=idx)
         # 상위 3(u0,u1,u2)만 재순위 → u1, u2, u0 / 꼬리 u3,u4,u5는 RRF 순서 그대로
         assert [h.unit_id for h in res.hits] == ["u1", "u2", "u0", "u3", "u4", "u5"]
@@ -172,6 +191,7 @@ class TestRerank:
         rr = MagicMock(n_truncated=0)
         rr.score.side_effect = lambda q, docs: seen.extend(docs) or [0.5] * len(docs)
         import src.rag.reranker as reranker_mod
+
         monkeypatch.setattr(reranker_mod, "get_reranker", lambda backend=None, model_name=None: rr)
         retrieve("c", "q", RetrievalConfig(profile="hdr-qwen3"), index=idx)
         retrieve("c", "q", RetrievalConfig(profile="nohdr-qwen3"), index=idx)
@@ -193,10 +213,16 @@ class TestEndToEndFake:
         monkeypatch.setattr(retrieval, "get_embedder", _real_get_embedder())
         reranker_mod.release_rerankers()
         case_index._cache.clear()
-        texts = {"em:1": "선급금 송금 결재 누락", "em:2": "점심 메뉴 안내", "em:3": "supplier invoice payment"}
+        texts = {
+            "em:1": "선급금 송금 결재 누락",
+            "em:2": "점심 메뉴 안내",
+            "em:3": "supplier invoice payment",
+        }
         parts = [UnitPart(f"{u}#1", u, "email", "[이메일]", t, 3, {}) for u, t in texts.items()]
         vecs = np.array([fake_embed(embed_input(p, True), 64) for p in parts])
-        case_index.write_index("c9", parts, {"hdr-qwen3": ProfileVectors(vecs, "qwen3-embedding:4b-q8_0")})
+        case_index.write_index(
+            "c9", parts, {"hdr-qwen3": ProfileVectors(vecs, "qwen3-embedding:4b-q8_0")}
+        )
 
         res = retrieve("c9", "선급금 결재")
         assert res.hits[0].unit_id == "em:1"

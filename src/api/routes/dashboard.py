@@ -151,10 +151,9 @@ def aggregate_dashboard(case_id: str, all_metadatas: list[dict[str, Any]]) -> di
                     participant_sources[name].add(source_type)
 
             # 엣지: 같은 단위에 등장하는 참여자 쌍
-            unique_names = sorted(set(
-                p.strip() for p in participants
-                if isinstance(p, str) and p.strip()
-            ))
+            unique_names = sorted(
+                set(p.strip() for p in participants if isinstance(p, str) and p.strip())
+            )
             for i in range(len(unique_names)):
                 for j in range(i + 1, len(unique_names)):
                     edge = (unique_names[i], unique_names[j])
@@ -210,10 +209,7 @@ def aggregate_dashboard(case_id: str, all_metadatas: list[dict[str, Any]]) -> di
     ]
 
     # Top 20 토픽
-    top_topics = [
-        TopicItem(topic=t, count=c)
-        for t, c in topic_counts.most_common(20)
-    ]
+    top_topics = [TopicItem(topic=t, count=c) for t, c in topic_counts.most_common(20)]
 
     return {
         "source_type_counts": dict(source_counts),
@@ -236,7 +232,9 @@ async def get_dashboard(case_id: str):
     try:
         case_meta = store.get(case_id)
     except CaseNotFoundError:
-        raise HTTPException(status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}") from None
+        raise HTTPException(
+            status_code=404, detail=f"케이스를 찾을 수 없습니다: {case_id}"
+        ) from None
 
     if case_meta.status not in (CaseStatus.READY, CaseStatus.ARCHIVED):
         raise HTTPException(

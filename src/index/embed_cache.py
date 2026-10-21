@@ -41,7 +41,9 @@ class EmbedCheckpoint:
         shard_size: 조각 하나의 벡터 수
     """
 
-    def __init__(self, case_id: str, profile: str, embed_model: str, shard_size: int = SHARD_SIZE) -> None:
+    def __init__(
+        self, case_id: str, profile: str, embed_model: str, shard_size: int = SHARD_SIZE
+    ) -> None:
         self.root = cache_dir(case_id, profile)
         self.embed_model = embed_model
         self.shard_size = shard_size
@@ -70,7 +72,9 @@ class EmbedCheckpoint:
                 logger.warning(f"임베딩 체크포인트 조각 읽기 실패 (건너뜀): {path.name} — {e}")
         self._next = len(shards)
         if out or skipped:
-            logger.info(f"임베딩 체크포인트: 조각 {len(shards)}개에서 벡터 {len(out):,}개 (건너뜀 {skipped})")
+            logger.info(
+                f"임베딩 체크포인트: 조각 {len(shards)}개에서 벡터 {len(out):,}개 (건너뜀 {skipped})"
+            )
         return out
 
     def add(self, keys: list[tuple[str, str]], vecs: list[np.ndarray]) -> None:

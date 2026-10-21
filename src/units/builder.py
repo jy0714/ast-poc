@@ -37,11 +37,37 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 # 단위를 만들지 않는 첨부 형식 (건수만 집계)
-EXCLUDED_EXTENSIONS = frozenset({
-    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".emf", ".wmf", ".ico",
-    ".hwp", ".hwpx", ".dwg", ".dxf", ".zip", ".7z", ".rar", ".mp4", ".mov", ".avi", ".mp3",
-    ".wav", ".exe", ".dll", ".vcf", ".ics",
-})
+EXCLUDED_EXTENSIONS = frozenset(
+    {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".bmp",
+        ".tif",
+        ".tiff",
+        ".webp",
+        ".emf",
+        ".wmf",
+        ".ico",
+        ".hwp",
+        ".hwpx",
+        ".dwg",
+        ".dxf",
+        ".zip",
+        ".7z",
+        ".rar",
+        ".mp4",
+        ".mov",
+        ".avi",
+        ".mp3",
+        ".wav",
+        ".exe",
+        ".dll",
+        ".vcf",
+        ".ics",
+    }
+)
 EMAIL_FILE_TYPES = frozenset({"eml", "msg"})
 _TAB_RUN_RE = re.compile(r"\t{2,}")
 
@@ -53,8 +79,9 @@ def _sha1(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()
 
 
-def make_email_id(message_id: str, sender: str = "", date: str = "", subject: str = "",
-                  body: str = "") -> str:
+def make_email_id(
+    message_id: str, sender: str = "", date: str = "", subject: str = "", body: str = ""
+) -> str:
     """이메일 ID: em: + sha1(소문자 message_id)[:16], 없으면 sha1(sender|date|subject|본문 앞 200자)"""
     mid = (message_id or "").strip().lower()
     if mid:
@@ -236,7 +263,9 @@ class UnitBuilder:
 
     # ── 공통: 메타 마무리 + 파트 분할 ──
 
-    def _finish(self, unit_id: str, unit_type: str, text: str, meta: dict[str, Any]) -> EvidenceUnit:
+    def _finish(
+        self, unit_id: str, unit_type: str, text: str, meta: dict[str, Any]
+    ) -> EvidenceUnit:
         """언어 감지·토픽·헤더·파트를 채워 EvidenceUnit 생성"""
         text = (text or "").strip()
         lang = detect_lang(text)
@@ -451,7 +480,8 @@ class UnitBuilder:
         unit_id = make_chat_id(room_key, start)
         participants = _unique([p for m in session for p in [m.sender, *m.participants]])
         lines = [
-            f"{m.timestamp:%H:%M} {m.sender}: {m.body}".strip() if m.timestamp
+            f"{m.timestamp:%H:%M} {m.sender}: {m.body}".strip()
+            if m.timestamp
             else f"{m.sender}: {m.body}".strip()
             for m in session
         ]
@@ -538,8 +568,10 @@ class UnitBuilder:
         first = docs[0].metadata
         base_meta = {
             "source_file": PurePath(rel_path).as_posix(),
-            "date": first.get("last_modified") or first.get("modified_date")
-            or first.get("created_date") or "",
+            "date": first.get("last_modified")
+            or first.get("modified_date")
+            or first.get("created_date")
+            or "",
             "date_end": "",
             "participants": _unique([first.get("author", ""), first.get("last_modified_by", "")]),
             "filename": first.get("filename") or PurePath(rel_path).name,
@@ -573,8 +605,11 @@ class UnitBuilder:
             for sheet_idx, sheet in enumerate(docs, 1):
                 name = sheet.metadata.get("sheet_name", str(sheet_idx))
                 # 빈 셀이 많은 시트의 연속 탭은 토큰만 늘리므로 하나로 줄인다
-                rows = [_TAB_RUN_RE.sub("\t", r) for r in sheet.content.split("\n")] \
-                    if sheet.content else []
+                rows = (
+                    [_TAB_RUN_RE.sub("\t", r) for r in sheet.content.split("\n")]
+                    if sheet.content
+                    else []
+                )
                 for blk in row_blocks(rows, sheet.row_numbers, self.max_part_tokens, self.counter):
                     meta = {
                         **common,
@@ -641,8 +676,9 @@ class UnitCollector:
                 continue
             self.duplicates[u.unit_type] += 1
             if u.unit_type == "email":
-                merged = _unique([*kept.meta.get("folder_paths", []),
-                                  *u.meta.get("folder_paths", [])])
+                merged = _unique(
+                    [*kept.meta.get("folder_paths", []), *u.meta.get("folder_paths", [])]
+                )
                 kept.meta["folder_paths"] = merged
                 for p in kept.parts:
                     p.meta["folder_paths"] = merged

@@ -48,8 +48,10 @@ class TestGetLLM:
 
     def test_ollama_passes_num_ctx(self, router):
         """로컬 LLM에 LLM_NUM_CTX를 넘긴다 (미지정 시 Ollama가 모델 최대 컨텍스트로 VRAM을 잡음)"""
-        with patch("src.llm.router.settings") as mock_settings, \
-                patch("langchain_ollama.ChatOllama") as mock_chat:
+        with (
+            patch("src.llm.router.settings") as mock_settings,
+            patch("langchain_ollama.ChatOllama") as mock_chat,
+        ):
             mock_settings.ollama_llm_model = "test-model"
             mock_settings.ollama_base_url = "http://localhost:11434"
             mock_settings.llm_temperature = 0.1
@@ -145,8 +147,11 @@ class TestGenerate:
             patch("src.llm.router.log_token_usage_detail"),
         ):
             await router.generate(
-                "질문", ["컨텍스트"], secure_mode=False,
-                case_id="case1", on_complete=captured.update,
+                "질문",
+                ["컨텍스트"],
+                secure_mode=False,
+                case_id="case1",
+                on_complete=captured.update,
             )
 
         assert captured["input_tokens"] == 200
@@ -256,19 +261,29 @@ class TestExternalIsolation:
     async def test_generate_drops_case_context(self, router):
         llm = _CaptureLLM()
         with patch.object(router, "get_llm", return_value=llm):
-            await router.generate("공개 법령 질문", [CASE_TEXT], secure_mode=False,
-                                  extra_system_warning=f"경고 {CASE_TEXT}")
+            await router.generate(
+                "공개 법령 질문",
+                [CASE_TEXT],
+                secure_mode=False,
+                extra_system_warning=f"경고 {CASE_TEXT}",
+            )
         text = _all_text(llm.sent)
         assert CASE_TEXT not in text and "공개 법령 질문" in text
-        assert llm.sent[0][0] == ("system", llm.sent[0][0][1]) and "케이스 자료" in llm.sent[0][0][1]
+        assert (
+            llm.sent[0][0] == ("system", llm.sent[0][0][1]) and "케이스 자료" in llm.sent[0][0][1]
+        )
         assert "Context" not in text and "[출처" not in llm.sent[0][1][1]
 
     @pytest.mark.asyncio
     async def test_generate_stream_drops_case_context(self, router):
         llm = _CaptureLLM()
         with patch.object(router, "get_llm", return_value=llm):
-            out = [t async for t in router.generate_stream("공개 질문", [CASE_TEXT, "둘째 " + CASE_TEXT],
-                                                            secure_mode=False)]
+            out = [
+                t
+                async for t in router.generate_stream(
+                    "공개 질문", [CASE_TEXT, "둘째 " + CASE_TEXT], secure_mode=False
+                )
+            ]
         assert "".join(out) == "외부 답변"
         assert CASE_TEXT not in _all_text(llm.sent)
         assert [role for role, _c in llm.sent[0]] == ["system", "human"]

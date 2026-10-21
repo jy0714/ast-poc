@@ -22,9 +22,9 @@ from ev4.stats import percentile
 from src.units.schema import UnitPart
 
 UNIT_TYPES = ("email", "chat", "document", "attachment")
-MAX_PART_TOKENS = 2048       # 논문 3.3.1절 상한 (settings.unit_max_part_tokens 와 같아야 함)
-RERANK_LIMIT = 4096          # 재순위 입력 상한 (settings.rerank_max_length)
-QUERY_SLOT_TOKENS = 64       # 재순위 입력 길이 추정에서 질의 자리로 잡는 토큰 수 (S2)
+MAX_PART_TOKENS = 2048  # 논문 3.3.1절 상한 (settings.unit_max_part_tokens 와 같아야 함)
+RERANK_LIMIT = 4096  # 재순위 입력 상한 (settings.rerank_max_length)
+QUERY_SLOT_TOKENS = 64  # 재순위 입력 길이 추정에서 질의 자리로 잡는 토큰 수 (S2)
 
 # [표 6] 행: (행 이름, 해당 file_type). 이메일·채팅은 unit_type 으로 나눈다.
 FORMAT_ROWS: list[tuple[str, frozenset[str]]] = [
@@ -42,8 +42,24 @@ LOCAL_LABEL = "현지 언어(합산)"  # v4.4 §8: 한국어·영어 외 언어�
 
 # S4 제외 형식 묶음
 EXCLUDED_GROUPS: list[tuple[str, frozenset[str]]] = [
-    ("이미지", frozenset({".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp",
-                          ".emf", ".wmf", ".ico"})),
+    (
+        "이미지",
+        frozenset(
+            {
+                ".jpg",
+                ".jpeg",
+                ".png",
+                ".gif",
+                ".bmp",
+                ".tif",
+                ".tiff",
+                ".webp",
+                ".emf",
+                ".wmf",
+                ".ico",
+            }
+        ),
+    ),
     ("HWP", frozenset({".hwp", ".hwpx"})),
     ("DWG", frozenset({".dwg", ".dxf"})),
     ("판별 불가", frozenset({"(none)"})),
@@ -104,8 +120,11 @@ def rerank_overhead_tokens(counter: Any) -> int:
     """재순위 입력에서 문서 외 고정 길이: 템플릿 + 지시문 + 질의 자리(QUERY_SLOT_TOKENS)"""
     from src.rag.reranker import RERANK_PREFIX, RERANK_SUFFIX, format_rerank_pair
 
-    fixed = counter.count(RERANK_PREFIX) + counter.count(format_rerank_pair("", "")) \
+    fixed = (
+        counter.count(RERANK_PREFIX)
+        + counter.count(format_rerank_pair("", ""))
         + counter.count(RERANK_SUFFIX)
+    )
     return fixed + QUERY_SLOT_TOKENS
 
 
@@ -180,9 +199,14 @@ def stats_from_parts(
             f["split"] += int(r["n_parts"] > 1)
             f["tokens"].append(r["tokens"])
     table6 = {
-        name: {"units": f["units"], "from_attachment": f["from_attachment"], "split": f["split"],
-               "tokens": _dist(f["tokens"])}
-        for name, f in fmt.items() if f["units"] or name == "계"
+        name: {
+            "units": f["units"],
+            "from_attachment": f["from_attachment"],
+            "split": f["split"],
+            "tokens": _dist(f["tokens"]),
+        }
+        for name, f in fmt.items()
+        if f["units"] or name == "계"
     }
     all_tokens = [r["tokens"] for r in rows.values()]
 
@@ -203,7 +227,8 @@ def stats_from_parts(
     body_ok = sum(1 for u in email_ids if rows[u]["tokens"] <= MAX_PART_TOKENS)
     # 헤더 포함: 헤더 + 빈 줄(2토큰 내외) + 본문. 빈 줄은 1토큰으로 센다
     with_hdr_ok = sum(
-        1 for u, h in zip(email_ids, email_hdr, strict=True)
+        1
+        for u, h in zip(email_ids, email_hdr, strict=True)
         if rows[u]["tokens"] + h + 1 <= MAX_PART_TOKENS
     )
     overhead = rerank_overhead_tokens(counter)
@@ -245,8 +270,10 @@ def stats_from_parts(
     for label, code in LANG_ROWS:
         table7[label] = {"units": lang_units.get(code, 0), "mixed": lang_mixed.get(code, 0)}
     other = {k: v for k, v in lang_units.items() if k not in named and k != "und"}
-    table7[LOCAL_LABEL] = {"units": sum(other.values()),
-                           "mixed": sum(lang_mixed.get(k, 0) for k in other)}
+    table7[LOCAL_LABEL] = {
+        "units": sum(other.values()),
+        "mixed": sum(lang_mixed.get(k, 0) for k in other),
+    }
     table7["und"] = {"units": lang_units.get("und", 0), "mixed": lang_mixed.get("und", 0)}
     table7["계"] = {"units": len(rows), "mixed": sum(lang_mixed.values())}
     lang_by_type: dict[str, Counter] = defaultdict(Counter)
@@ -306,17 +333,21 @@ def corpus_stats(case_id: str) -> dict[str, Any]:
     idx = case_index.load(case_id)
     bs = idx.manifest.get("build_stats", {}) or {}
     s = stats_from_parts(
-        list(idx.parts), bs, get_token_counter(),
+        list(idx.parts),
+        bs,
+        get_token_counter(),
         require_exact=not settings.ast_fake_models,
         build_counter_kind=str(bs.get("token_counter") or ""),
     )
-    s.update({
-        "case_id": case_id,
-        "created_at": idx.manifest.get("created_at", ""),
-        "unit_rules_version": idx.manifest.get("unit_rules_version", ""),
-        "tokenizer_version": idx.manifest.get("tokenizer_version", ""),
-        "profiles": idx.profiles(),
-    })
+    s.update(
+        {
+            "case_id": case_id,
+            "created_at": idx.manifest.get("created_at", ""),
+            "unit_rules_version": idx.manifest.get("unit_rules_version", ""),
+            "tokenizer_version": idx.manifest.get("tokenizer_version", ""),
+            "profiles": idx.profiles(),
+        }
+    )
     return s
 
 
@@ -387,11 +418,17 @@ def render_t1(s: dict[str, Any]) -> str:
     for label in [*(lb for lb, _ in LANG_ROWS), LOCAL_LABEL, "계"]:
         r = t7[label]
         bold = "**" if label == "계" else ""
-        lines.append(f"| {bold}{label}{bold} | {r['units']:,} | {_pct(r['units'], total)} | {r['mixed']:,} |")
+        lines.append(
+            f"| {bold}{label}{bold} | {r['units']:,} | {_pct(r['units'], total)} | {r['mixed']:,} |"
+        )
     und = t7["und"]["units"]
-    lines += ["", "집계 메모 (표에 넣지 않음):",
-              "- 현지 언어 세부: " + (", ".join(f"{k} {v:,}" for k, v in s["lang_other_detail"].items()) or "없음"),
-              f"- 판정 불가(und) {und:,}건 ({_pct(und, total)}) — 계에 포함, 언어 행에는 없음"]
+    lines += [
+        "",
+        "집계 메모 (표에 넣지 않음):",
+        "- 현지 언어 세부: "
+        + (", ".join(f"{k} {v:,}" for k, v in s["lang_other_detail"].items()) or "없음"),
+        f"- 판정 불가(und) {und:,}건 ({_pct(und, total)}) — 계에 포함, 언어 행에는 없음",
+    ]
 
     s2 = s["s2"]
     ri = s2["rerank_input"]
@@ -440,8 +477,13 @@ def render_t1(s: dict[str, Any]) -> str:
         if name in s["excluded_grouped"]:
             lines.append(f"| {name} | {s['excluded_grouped'][name]:,} |")
     if s["excluded_types"]:
-        lines += ["", "제외 확장자 세부: " + ", ".join(
-            f"{k} {v:,}" for k, v in sorted(s["excluded_types"].items(), key=lambda kv: -kv[1]))]
+        lines += [
+            "",
+            "제외 확장자 세부: "
+            + ", ".join(
+                f"{k} {v:,}" for k, v in sorted(s["excluded_types"].items(), key=lambda kv: -kv[1])
+            ),
+        ]
     if s["errors"]:
         lines += ["", "| 오류 유형 | 건수 |", "|---|---:|"]
         for k, n in sorted(s["errors"].items(), key=lambda kv: -kv[1]):
@@ -457,7 +499,11 @@ def build_corpus(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> d
     """
     s = corpus_stats(cfg.case_id)
     cfg.results_dir.mkdir(parents=True, exist_ok=True)
-    (cfg.results_dir / "corpus.json").write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
+    (cfg.results_dir / "corpus.json").write_text(
+        json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     (cfg.results_dir / "T1_corpus.md").write_text(render_t1(s), encoding="utf-8")
-    log(f"[corpus] 단위 {s['n_units']:,} · 파트 {s['n_parts']:,} → {cfg.results_dir / 'T1_corpus.md'}")
+    log(
+        f"[corpus] 단위 {s['n_units']:,} · 파트 {s['n_parts']:,} → {cfg.results_dir / 'T1_corpus.md'}"
+    )
     return s

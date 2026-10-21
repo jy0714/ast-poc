@@ -31,6 +31,7 @@ def case_store(tmpdir):
     db_url = f"sqlite:///{db_path}"
 
     from src.db.database import reset_globals
+
     reset_globals()
 
     store = CaseStore(db_url=db_url)
@@ -41,6 +42,7 @@ def case_store(tmpdir):
 @pytest.fixture
 def client(case_store):
     from src.api.routes import dashboard
+
     dashboard._case_store = case_store
     return TestClient(app)
 
@@ -182,7 +184,9 @@ def _write_units(case_id: str, metas: list[tuple[str, str, dict]]) -> None:
         for k in range(1, n + 1):
             parts.append(UnitPart(f"{uid}#{k}", uid, utype, "[헤더]", f"본문 {k}", 2, meta))
     vecs = np.zeros((len(parts), 4), dtype=np.float32)
-    case_index.write_index(case_id, parts, {"hdr-qwen3": ProfileVectors(vecs, settings.ollama_embed_model)})
+    case_index.write_index(
+        case_id, parts, {"hdr-qwen3": ProfileVectors(vecs, settings.ollama_embed_model)}
+    )
 
 
 def _ready(case_store, name: str) -> str:
@@ -216,14 +220,38 @@ class TestDashboardAPI:
     def test_dashboard_success(self, client, case_store):
         """단위 메타 집계 — 파트가 여러 개인 단위도 한 번만 센다"""
         case_id = _ready(case_store, "대시보드 테스트")
-        _write_units(case_id, [
-            ("em:1", "email", {"participants": ["Alice", "Bob"], "date": "2025-01-15T09:00:00+09:00",
-                               "topics": ["감사"]}),
-            ("em:2", "email", {"participants": ["Alice"], "date": "2025-02-10T09:00:00+09:00",
-                               "topics": ["계약"]}),
-            ("ch:3", "chat", {"participants": ["Bob", "Charlie"], "date": "2025-02-20T10:00:00+09:00",
-                              "topics": ["회의"]}),
-        ])
+        _write_units(
+            case_id,
+            [
+                (
+                    "em:1",
+                    "email",
+                    {
+                        "participants": ["Alice", "Bob"],
+                        "date": "2025-01-15T09:00:00+09:00",
+                        "topics": ["감사"],
+                    },
+                ),
+                (
+                    "em:2",
+                    "email",
+                    {
+                        "participants": ["Alice"],
+                        "date": "2025-02-10T09:00:00+09:00",
+                        "topics": ["계약"],
+                    },
+                ),
+                (
+                    "ch:3",
+                    "chat",
+                    {
+                        "participants": ["Bob", "Charlie"],
+                        "date": "2025-02-20T10:00:00+09:00",
+                        "topics": ["회의"],
+                    },
+                ),
+            ],
+        )
 
         resp = client.get(f"/api/analyst/dashboard/{case_id}")
         assert resp.status_code == 200

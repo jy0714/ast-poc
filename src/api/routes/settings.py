@@ -79,7 +79,6 @@ async def set_rerank_mode(request: RerankModeRequest):
     }
 
 
-
 def _cases_needing_reindex(model: str, dim: int | None) -> list[str]:
     """서비스 프로필 색인이 이 임베딩 모델·차원과 다른 READY/ARCHIVED 케이스 (v4 색인이 없는 케이스 포함)
 

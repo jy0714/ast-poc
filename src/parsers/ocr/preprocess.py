@@ -29,6 +29,7 @@ def _check_cv2() -> bool:
         return _cv2_available
     try:
         import cv2  # noqa: F401
+
         _cv2_available = True
         return True
     except ImportError as e:
@@ -131,8 +132,11 @@ def _rotate(gray, angle: float):  # noqa: ANN001, ANN201
     center = (w // 2, h // 2)
     matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
     return cv2.warpAffine(
-        gray, matrix, (w, h),
-        flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE,
+        gray,
+        matrix,
+        (w, h),
+        flags=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_REPLICATE,
     )
 
 

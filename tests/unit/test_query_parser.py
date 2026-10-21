@@ -1,6 +1,5 @@
 """질의 파서 유닛 테스트"""
 
-
 from src.rag.query_parser import parse_query
 
 # === 기본 동작 ===

@@ -146,8 +146,15 @@ def document_header(meta: dict[str, Any]) -> str:
         "[문서]",
         [
             ("", meta.get("filename") or ""),
-            ("", position(meta.get("page_kind", ""), meta.get("page", 0),
-                          meta.get("page_count", 0), meta.get("position_extra", ""))),
+            (
+                "",
+                position(
+                    meta.get("page_kind", ""),
+                    meta.get("page", 0),
+                    meta.get("page_count", 0),
+                    meta.get("position_extra", ""),
+                ),
+            ),
             ("작성자", meta.get("author") or ""),
             ("최종 수정자", meta.get("last_modified_by") or ""),
             ("수정일", fmt_date(meta.get("last_modified") or meta.get("modified_date") or "")),
@@ -165,7 +172,8 @@ def attachment_header(meta: dict[str, Any]) -> str:
         arrow = f"{sender}→{join_limited(recips, limit=1)}" if recips else sender
         subject = meta.get("parent_subject") or ""
         parent = " ".join(
-            x for x in (fmt_date(meta.get("parent_date")), arrow, f'"{subject}"' if subject else "")
+            x
+            for x in (fmt_date(meta.get("parent_date")), arrow, f'"{subject}"' if subject else "")
             if x
         )
     parent_label = "부모 대화" if meta.get("parent_kind") == "chat" else "부모 메일"
@@ -173,8 +181,15 @@ def attachment_header(meta: dict[str, Any]) -> str:
         "[첨부]",
         [
             ("", meta.get("filename") or ""),
-            ("", position(meta.get("page_kind", ""), meta.get("page", 0),
-                          meta.get("page_count", 0), meta.get("position_extra", ""))),
+            (
+                "",
+                position(
+                    meta.get("page_kind", ""),
+                    meta.get("page", 0),
+                    meta.get("page_count", 0),
+                    meta.get("position_extra", ""),
+                ),
+            ),
             ("작성자", meta.get("author") or ""),
             ("최종 수정자", meta.get("last_modified_by") or ""),
             (parent_label, parent),

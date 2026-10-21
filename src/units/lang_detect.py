@@ -32,8 +32,16 @@ _NOISE_RE = re.compile(r"<?mailto:[^\s>]+>?|https?://\S+|[\w.+-]+@[\w-]+(?:\.[\w
 
 # 후보 언어 (지시서 §5.1.8) — lingua Language 이름
 CANDIDATE_LANGUAGES = (
-    "KOREAN", "ENGLISH", "CHINESE", "JAPANESE", "GERMAN",
-    "CZECH", "SPANISH", "FRENCH", "POLISH", "VIETNAMESE",
+    "KOREAN",
+    "ENGLISH",
+    "CHINESE",
+    "JAPANESE",
+    "GERMAN",
+    "CZECH",
+    "SPANISH",
+    "FRENCH",
+    "POLISH",
+    "VIETNAMESE",
 )
 MIN_TOKENS = 5
 MIXED_THRESHOLD = 0.20
@@ -85,7 +93,9 @@ def _word_weight(text: str) -> int:
     SAP 표처럼 코드(EX20231228043, G25N7-EB20)와 영어 열 이름이 많은 한국어 본문이
     코드 토큰 때문에 독일어 등으로 판정되던 문제를 막는다 (2단계 실측에서 발견).
     """
-    return sum(1 for t in tokenize(text) if not _HAS_DIGIT_RE.search(t) and _HAS_LETTER_RE.search(t))
+    return sum(
+        1 for t in tokenize(text) if not _HAS_DIGIT_RE.search(t) and _HAS_LETTER_RE.search(t)
+    )
 
 
 def _line_votes(line: str, detector: Any) -> Counter[str]:

@@ -54,7 +54,9 @@ def _default_annotator(path: Path) -> str:
     return stem.split("_", 1)[1] if stem.startswith("pool_") and "_" in stem else ""
 
 
-def import_judgments(cfg: ExperimentConfig, csv_paths: list[Path], log: Callable[[str], None] = print) -> int:
+def import_judgments(
+    cfg: ExperimentConfig, csv_paths: list[Path], log: Callable[[str], None] = print
+) -> int:
     """판정 CSV 를 판정 기록에 반영한다 (같은 (qid, unit_id, 판정자) 는 덮어씀)
 
     Returns:
@@ -85,8 +87,13 @@ def import_judgments(cfg: ExperimentConfig, csv_paths: list[Path], log: Callable
                 ann = ADJUDICATOR if adj else ((row.get("annotator") or "").strip() or default_ann)
                 if not ann:
                     raise JudgmentError(f"{p}:{ln}: annotator 가 비어 있습니다")
-                rec = {"qid": row["qid"].strip(), "unit_id": row["unit_id"].strip(), "grade": int(g),
-                       "annotator": ann, "note": (row.get("note") or "").strip()}
+                rec = {
+                    "qid": row["qid"].strip(),
+                    "unit_id": row["unit_id"].strip(),
+                    "grade": int(g),
+                    "annotator": ann,
+                    "note": (row.get("note") or "").strip(),
+                }
                 keyed[(rec["qid"], rec["unit_id"], ann)] = rec
                 n += 1
     write_jsonl(out, keyed.values())
@@ -104,8 +111,9 @@ def _by_unit(cfg: ExperimentConfig) -> dict[tuple[str, str], dict[str, int]]:
     return by_unit
 
 
-def _pair_stats(by_unit: dict[tuple[str, str], dict[str, int]], a1: str, a2: str,
-                qgroups: dict[str, str]) -> dict[str, Any] | None:
+def _pair_stats(
+    by_unit: dict[tuple[str, str], dict[str, int]], a1: str, a2: str, qgroups: dict[str, str]
+) -> dict[str, Any] | None:
     """두 판정자의 일치도 (함께 판정한 단위가 없으면 None)"""
     shared = {k: d for k, d in by_unit.items() if a1 in d and a2 in d}
     pairs = [(d[a1], d[a2]) for d in shared.values()]
@@ -119,16 +127,24 @@ def _pair_stats(by_unit: dict[tuple[str, str], dict[str, int]], a1: str, a2: str
         "n_queries": len({q for q, _u in shared}),
         "exact_agreement": sum(x == y for x, y in pairs) / len(pairs),
         "relevant_agreement": sum((x >= 1) == (y >= 1) for x, y in pairs) / len(pairs),
-        "quadratic_weighted_kappa": quadratic_weighted_kappa([x for x, _ in pairs], [y for _, y in pairs], 3),
-        "confusion": {f"{x}{y}": sum(1 for p in pairs if p == (x, y)) for x in GRADES for y in GRADES},
+        "quadratic_weighted_kappa": quadratic_weighted_kappa(
+            [x for x, _ in pairs], [y for _, y in pairs], 3
+        ),
+        "confusion": {
+            f"{x}{y}": sum(1 for p in pairs if p == (x, y)) for x in GRADES for y in GRADES
+        },
         "n_disagree": sum(1 for x, y in pairs if x != y),
         "disagree": sorted(k for k, d in shared.items() if d[a1] != d[a2]),
         # 두 번째 판정자 질의 비율·집합별 분포 (v4.2 J3, v4.3 §5)
         "n_queries_A": len(q_a),
         "n_queries_B": len(q_o),
         "b_query_ratio": len(q_o) / len(q_a) if q_a else float("nan"),
-        "a_queries_by_group": {g: sum(1 for q in q_a if qgroups.get(q) == g) for g in SUPPORT_GROUPS},
-        "b_queries_by_group": {g: sum(1 for q in q_o if qgroups.get(q) == g) for g in SUPPORT_GROUPS},
+        "a_queries_by_group": {
+            g: sum(1 for q in q_a if qgroups.get(q) == g) for g in SUPPORT_GROUPS
+        },
+        "b_queries_by_group": {
+            g: sum(1 for q in q_o if qgroups.get(q) == g) for g in SUPPORT_GROUPS
+        },
         "qids_B": sorted(q_o),
     }
 
@@ -158,7 +174,9 @@ def agreement(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> dict
         return res
     first = next(iter(pairs.values()))
     res.update({k: v for k, v in first.items() if k != "disagree"})
-    res["pairs"] = {k: {kk: vv for kk, vv in v.items() if kk != "disagree"} for k, v in pairs.items()}
+    res["pairs"] = {
+        k: {kk: vv for kk, vv in v.items() if kk != "disagree"} for k, v in pairs.items()
+    }
     dis = sorted({k for st in pairs.values() for k in st["disagree"]})
     res["n_disagree"] = len(dis)
 
@@ -169,20 +187,35 @@ def agreement(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> dict
     adj_path.parent.mkdir(parents=True, exist_ok=True)
     with open(adj_path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["qid", "query_text", "unit_id", *[f"grade_{a}" for a in annotators], "adjudicated_grade", "note"])
+        w.writerow(
+            [
+                "qid",
+                "query_text",
+                "unit_id",
+                *[f"grade_{a}" for a in annotators],
+                "adjudicated_grade",
+                "note",
+            ]
+        )
         for qid, uid in dis:
             d = by_unit[(qid, uid)]
             pg, pn = prev.get((qid, uid), ("", ""))
             if not pg and ADJUDICATOR in d:
                 pg = str(d[ADJUDICATOR])
-            w.writerow([qid, queries.get(qid, ""), uid, *[d.get(a, "") for a in annotators], pg, pn])
+            w.writerow(
+                [qid, queries.get(qid, ""), uid, *[d.get(a, "") for a in annotators], pg, pn]
+            )
     cfg.results_dir.mkdir(parents=True, exist_ok=True)
-    (cfg.results_dir / "agreement.json").write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
+    (cfg.results_dir / "agreement.json").write_text(
+        json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     (cfg.results_dir / "J3_agreement.md").write_text(_agreement_markdown(res), encoding="utf-8")
     for name, st in res["pairs"].items():
-        log(f"[agreement] {name}: n={st['n']} (질의 {st['n_queries']}) 정확 일치 {st['exact_agreement']:.3f} · "
+        log(
+            f"[agreement] {name}: n={st['n']} (질의 {st['n_queries']}) 정확 일치 {st['exact_agreement']:.3f} · "
             f"관련성(≥1) 일치 {st['relevant_agreement']:.3f} · QWK {st['quadratic_weighted_kappa']:.3f} · "
-            f"불일치 {st['n_disagree']}건")
+            f"불일치 {st['n_disagree']}건"
+        )
     log(f"[agreement] 중재 대상 {len(dis)}건 → {adj_path}")
     return res
 
@@ -191,8 +224,13 @@ def _read_adjudication(path: Path) -> dict[tuple[str, str], tuple[str, str]]:
     if not path.exists():
         return {}
     with open(path, encoding="utf-8-sig", newline="") as f:
-        return {(r["qid"], r["unit_id"]): ((r.get("adjudicated_grade") or "").strip(), r.get("note") or "")
-                for r in csv.DictReader(f)}
+        return {
+            (r["qid"], r["unit_id"]): (
+                (r.get("adjudicated_grade") or "").strip(),
+                r.get("note") or "",
+            )
+            for r in csv.DictReader(f)
+        }
 
 
 def _query_texts(cfg: ExperimentConfig) -> dict[str, str]:
@@ -225,27 +263,37 @@ def _query_groups(cfg: ExperimentConfig) -> dict[str, str]:
 
 def _agreement_markdown(res: dict[str, Any]) -> str:
     """J3 일치도 표 (건수·비율만) — 판정자 쌍마다 한 절"""
-    lines = ["# J3 판정자 간 일치도", "",
-             "- 2차 가중 카파: 등급 3단계(0/1/2, n_levels=3) · 관련 여부 일치: 등급 1 이상 기준",
-             f"- 중재 대상 단위(어느 쌍이든 불일치) {res['n_disagree']}건", ""]
+    lines = [
+        "# J3 판정자 간 일치도",
+        "",
+        "- 2차 가중 카파: 등급 3단계(0/1/2, n_levels=3) · 관련 여부 일치: 등급 1 이상 기준",
+        f"- 중재 대상 단위(어느 쌍이든 불일치) {res['n_disagree']}건",
+        "",
+    ]
     for name, st in res["pairs"].items():
         a1, a2 = st["pair"]
         lines += [
-            f"## {name} — 함께 판정한 단위 {st['n']}건 (질의 {st['n_queries']}건)", "",
-            "| 항목 | 값 |", "|---|---:|",
+            f"## {name} — 함께 판정한 단위 {st['n']}건 (질의 {st['n_queries']}건)",
+            "",
+            "| 항목 | 값 |",
+            "|---|---:|",
             f"| 등급 완전 일치율 | {st['exact_agreement']:.3f} |",
             f"| 관련 여부(≥1) 일치율 | {st['relevant_agreement']:.3f} |",
             f"| 2차 가중 카파 | {st['quadratic_weighted_kappa']:.3f} |",
             f"| 불일치 단위 수 | {st['n_disagree']} |",
             f"| {a2} 판정 질의 비율 | {st['n_queries_B']}/{st['n_queries_A']} = {st['b_query_ratio']:.3f} |",
-            "", f"| 집합 | {a1} 판정 질의 | {a2} 판정 질의 |", "|---|---:|---:|",
+            "",
+            f"| 집합 | {a1} 판정 질의 | {a2} 판정 질의 |",
+            "|---|---:|---:|",
         ]
         for g in SUPPORT_GROUPS:
             lines.append(f"| {g} | {st['a_queries_by_group'][g]} | {st['b_queries_by_group'][g]} |")
         lines += ["", f"{a2} 판정 질의 (qid): " + (", ".join(st.get("qids_B", [])) or "없음")]
         lines += ["", f"| {a1}\\{a2} | 0 | 1 | 2 |", "|---|---:|---:|---:|"]
         for x in GRADES:
-            lines.append(f"| {x} | " + " | ".join(str(st["confusion"][f"{x}{y}"]) for y in GRADES) + " |")
+            lines.append(
+                f"| {x} | " + " | ".join(str(st["confusion"][f"{x}{y}"]) for y in GRADES) + " |"
+            )
         lines.append("")
     return "\n".join(lines) + "\n"
 
@@ -271,8 +319,10 @@ def qrels_stats(qrels: Qrels, test_qids: set[str] | None = None) -> dict[str, An
 
 def _qrels_markdown(st: dict[str, Any], n_adj: int) -> str:
     lines = [
-        "# J4 최종 정답 통계 (평가용 질의)", "",
-        "| 항목 | 값 |", "|---|---:|",
+        "# J4 최종 정답 통계 (평가용 질의)",
+        "",
+        "| 항목 | 값 |",
+        "|---|---:|",
         f"| 질의 수 | {st['n_queries']} |",
         f"| 등급 2 단위 수 | {st['grade2_units']} |",
         f"| 등급 1 단위 수 | {st['grade1_units']} |",
@@ -318,8 +368,10 @@ def finalize(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> Qrels
     write_qrels(cfg.qrels_path, qrels)
     n = sum(len(v) for v in qrels.values())
     dist = {g: sum(1 for v in qrels.values() for x in v.values() if x == g) for g in GRADES}
-    log(f"[finalize] 질의 {len(qrels)} · 단위 {n} (등급 0/1/2 = {dist[0]}/{dist[1]}/{dist[2]}, 중재 {n_adj}) "
-        f"→ {cfg.qrels_path}")
+    log(
+        f"[finalize] 질의 {len(qrels)} · 단위 {n} (등급 0/1/2 = {dist[0]}/{dist[1]}/{dist[2]}, 중재 {n_adj}) "
+        f"→ {cfg.qrels_path}"
+    )
     queries = read_queries(cfg.queries_path, split="test") if cfg.queries_path.exists() else []
     st = qrels_stats(qrels, {q.qid for q in queries} if queries else None)
     cfg.results_dir.mkdir(parents=True, exist_ok=True)
@@ -328,6 +380,8 @@ def finalize(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> Qrels
         from ev4.querystats import write_t0b
 
         write_t0b(cfg, queries, qrels)  # v4.3 §4
-    log(f"[finalize] 평가용: 등급 2 {st['grade2_units']} · 등급 1 {st['grade1_units']} · "
-        f"등급 2 없는 질의 {len(st['queries_without_grade2'])}건")
+    log(
+        f"[finalize] 평가용: 등급 2 {st['grade2_units']} · 등급 1 {st['grade1_units']} · "
+        f"등급 2 없는 질의 {len(st['queries_without_grade2'])}건"
+    )
     return qrels

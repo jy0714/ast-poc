@@ -90,8 +90,7 @@ class TestTesseractAvailability:
             # 두 번 호출해도 WARNING 1번
             engine.is_available()
             engine.is_available()
-        warns = [r for r in caplog.records
-                 if r.levelname == "WARNING" and "Tesseract" in r.message]
+        warns = [r for r in caplog.records if r.levelname == "WARNING" and "Tesseract" in r.message]
         assert len(warns) == 1
 
     def test_ocr_image_returns_empty_when_unavailable(self, monkeypatch):
@@ -114,8 +113,7 @@ class TestPaddleAvailability:
         engine = PaddleEngine()
         with caplog.at_level(logging.WARNING):
             assert engine.is_available() is False
-        warns = [r for r in caplog.records
-                 if r.levelname == "WARNING" and "PaddleOCR" in r.message]
+        warns = [r for r in caplog.records if r.levelname == "WARNING" and "PaddleOCR" in r.message]
         assert len(warns) == 1
 
     def test_paddle_supports_parallel_false(self):

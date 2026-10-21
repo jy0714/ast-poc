@@ -36,7 +36,10 @@ class ParsedQuery:
 _SOURCE_TYPE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"이메일|메일|mail|email|eml", re.IGNORECASE), "email"),
     (re.compile(r"팀즈|teams|채팅|chat|대화", re.IGNORECASE), "teams_chat"),
-    (re.compile(r"문서|보고서|리포트|document|report|pdf|docx|pptx|xlsx", re.IGNORECASE), "document"),
+    (
+        re.compile(r"문서|보고서|리포트|document|report|pdf|docx|pptx|xlsx", re.IGNORECASE),
+        "document",
+    ),
     (re.compile(r"첨부\s*파일|attachment", re.IGNORECASE), "attachment"),
 ]
 
@@ -177,9 +180,7 @@ def parse_query(query: str, year_hint: int = 2025) -> ParsedQuery:
         filters["author"] = authors[0] if len(authors) == 1 else authors
     modifiers = _extract_modifiers(original)
     if modifiers:
-        filters["last_modified_by"] = (
-            modifiers[0] if len(modifiers) == 1 else modifiers
-        )
+        filters["last_modified_by"] = modifiers[0] if len(modifiers) == 1 else modifiers
 
     # 5. 의도 분석
     intent = _detect_intent(original)

@@ -30,7 +30,9 @@ class Translator:
 
     def __init__(self, cache_path: Path) -> None:
         if not settings.is_secure_mode:
-            raise RuntimeError("번역은 SECURITY_MODE=on 에서만 실행합니다 (조사 텍스트 외부 전송 금지)")
+            raise RuntimeError(
+                "번역은 SECURITY_MODE=on 에서만 실행합니다 (조사 텍스트 외부 전송 금지)"
+            )
         self.cache_path = cache_path
         self.model = "fake" if settings.ast_fake_models else settings.ollama_llm_model
         self._cache: dict[str, str] = {}

@@ -25,17 +25,31 @@ QUERY_TYPES = ("exact", "semantic", "relation")
 # 논문 부록 [표 A-1] 이름·정의 (v4.2 Q1) — README·판정 기준 문서·표 머리에 그대로 쓴다
 QUERY_TYPE_NAMES = {"exact": "정확 일치", "semantic": "정황", "relation": "관계"}
 QUERY_TYPE_DEFS = {
-    "exact": ("인명, 업체명, 계약번호, 금액, 특정 문구처럼 본문이나 파일명에 같은 문자열로 나타나는 대상을 찾는 질의",
-              "문자열 일치(BM25)"),
-    "semantic": ("본문에 직접 드러나지 않는 행위, 회피 표현, 사내 은어를 서술하여 찾는 질의", "의미 유사도(밀집 검색)"),
-    "relation": ("특정 인물이나 업체 사이 소통, 또는 날짜 선후를 조건으로 하는 질의", "메타데이터 헤더와 의미 유사도"),
+    "exact": (
+        "인명, 업체명, 계약번호, 금액, 특정 문구처럼 본문이나 파일명에 같은 문자열로 나타나는 대상을 찾는 질의",
+        "문자열 일치(BM25)",
+    ),
+    "semantic": (
+        "본문에 직접 드러나지 않는 행위, 회피 표현, 사내 은어를 서술하여 찾는 질의",
+        "의미 유사도(밀집 검색)",
+    ),
+    "relation": (
+        "특정 인물이나 업체 사이 소통, 또는 날짜 선후를 조건으로 하는 질의",
+        "메타데이터 헤더와 의미 유사도",
+    ),
 }
 TYPE_NONE = "none"  # search 집합이 아닌 질의의 type (v4.3 §1)
 # 부록 A 지원 분류 → 분석 집합 (v4.3 §1, §3)
 SUPPORT_GROUPS = ("search", "meta", "nonsearch")
 # v4.4 §3: A → A1, A′ → A2
-SUPPORT_CLASS_GROUP = {"A1": "search", "A2": "search", "C": "meta", "D": "nonsearch", "B": "nonsearch",
-                       "E": "nonsearch"}
+SUPPORT_CLASS_GROUP = {
+    "A1": "search",
+    "A2": "search",
+    "C": "meta",
+    "D": "nonsearch",
+    "B": "nonsearch",
+    "E": "nonsearch",
+}
 SUPPORT_CLASSES = tuple(SUPPORT_CLASS_GROUP)
 AREAS = tuple(str(i) for i in range(1, 8))
 EXPECTED_QUERIES = 45
@@ -67,7 +81,9 @@ class ExperimentConfig:
     latency_runs: list[str]
     primary_subset: str = "search"
     b_queries: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_B_QUERIES))
-    c_queries: dict[str, int] = field(default_factory=dict)  # 판정자 C 질의 수 (v4.4 §9, 비면 C 없음)
+    c_queries: dict[str, int] = field(
+        default_factory=dict
+    )  # 판정자 C 질의 수 (v4.4 §9, 비면 C 없음)
     smoke_qids: list[str] = field(default_factory=lambda: list(DEFAULT_SMOKE_QIDS))
     text_max_chars: int = 6000
     latency_warmup: int = 3
@@ -139,11 +155,15 @@ class ExperimentConfig:
         if path.exists():
             locked = json.loads(path.read_text(encoding="utf-8")).get("primary_subset")
             if locked != self.primary_subset:
-                raise ConfigError(f"primary_subset 이 실행 뒤에 바뀌었습니다 (기록 {locked!r} → config "
-                                  f"{self.primary_subset!r}). 실행 전에 고정한 값으로 되돌리세요 ({path})")
+                raise ConfigError(
+                    f"primary_subset 이 실행 뒤에 바뀌었습니다 (기록 {locked!r} → config "
+                    f"{self.primary_subset!r}). 실행 전에 고정한 값으로 되돌리세요 ({path})"
+                )
         elif write:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({"primary_subset": self.primary_subset}) + "\n", encoding="utf-8")
+            path.write_text(
+                json.dumps({"primary_subset": self.primary_subset}) + "\n", encoding="utf-8"
+            )
 
     def run_path(self, run: str, split: str = "test") -> Path:
         """실행 파일 경로 (dev 는 runs/dev/ 아래 — test 실행을 덮어쓰지 않게)"""
@@ -184,10 +204,13 @@ def load_config(path: Path | None = None, root: Path | None = None) -> Experimen
     for name, spec in raw["runs"].items():
         bad = set(spec) - _RUN_FIELDS
         if bad:
-            raise ConfigError(f"{path}: 실행 {name} 에 바꿀 수 없는 필드 {sorted(bad)} (k값은 고정)")
+            raise ConfigError(
+                f"{path}: 실행 {name} 에 바꿀 수 없는 필드 {sorted(bad)} (k값은 고정)"
+            )
         runs[str(name)] = dict(spec)
     comparisons = {
-        fam: [(str(a), str(b)) for a, b in pairs] for fam, pairs in (raw.get("comparisons") or {}).items()
+        fam: [(str(a), str(b)) for a, b in pairs]
+        for fam, pairs in (raw.get("comparisons") or {}).items()
     }
     cfg = ExperimentConfig(
         root=root,
@@ -207,10 +230,29 @@ def load_config(path: Path | None = None, root: Path | None = None) -> Experimen
         latency_warmup=int(raw.get("latency_warmup", 3)),
         latency_repeats=int(raw.get("latency_repeats", 5)),
         labels={str(k): str(v) for k, v in (raw.get("labels") or {}).items()},
-        extra={k: v for k, v in raw.items() if k not in {
-            "case_id", "depth", "pool_depth", "seed", "runs", "pool_runs", "comparisons",
-            "latency_runs", "primary_subset", "b_queries", "c_queries", "smoke_qids", "text_max_chars", "latency_warmup",
-            "latency_repeats", "labels"}},
+        extra={
+            k: v
+            for k, v in raw.items()
+            if k
+            not in {
+                "case_id",
+                "depth",
+                "pool_depth",
+                "seed",
+                "runs",
+                "pool_runs",
+                "comparisons",
+                "latency_runs",
+                "primary_subset",
+                "b_queries",
+                "c_queries",
+                "smoke_qids",
+                "text_max_chars",
+                "latency_warmup",
+                "latency_repeats",
+                "labels",
+            }
+        },
     )
     bad_labels = set(cfg.labels) - set(runs)
     if bad_labels:
@@ -218,12 +260,20 @@ def load_config(path: Path | None = None, root: Path | None = None) -> Experimen
     if len(set(cfg.labels.values())) != len(cfg.labels):
         raise ConfigError(f"{path}: labels 의 논문 번호가 겹칩니다")
     if cfg.primary_subset not in SUPPORT_GROUPS:
-        raise ConfigError(f"{path}: primary_subset 은 {SUPPORT_GROUPS} 중 하나 (입력 {cfg.primary_subset!r})")
+        raise ConfigError(
+            f"{path}: primary_subset 은 {SUPPORT_GROUPS} 중 하나 (입력 {cfg.primary_subset!r})"
+        )
     for key, quota in (("b_queries", cfg.b_queries), ("c_queries", cfg.c_queries)):
         bad_q = set(quota) - set(SUPPORT_GROUPS)
         if bad_q:
-            raise ConfigError(f"{path}: {key} 의 집합 {sorted(bad_q)} 는 {SUPPORT_GROUPS} 가 아닙니다")
-    used = set(cfg.pool_runs) | set(cfg.latency_runs) | {r for _f, a, b in cfg.comparison_pairs() for r in (a, b)}
+            raise ConfigError(
+                f"{path}: {key} 의 집합 {sorted(bad_q)} 는 {SUPPORT_GROUPS} 가 아닙니다"
+            )
+    used = (
+        set(cfg.pool_runs)
+        | set(cfg.latency_runs)
+        | {r for _f, a, b in cfg.comparison_pairs() for r in (a, b)}
+    )
     unknown = used - set(runs)
     if unknown:
         raise ConfigError(f"{path}: 정의되지 않은 실행 {sorted(unknown)}")
@@ -261,10 +311,10 @@ class Query:
     query_lang: str = "ko"
     note: str = ""
     target_evidence_lang: str = ""  # v4.3: 빈칸 (증거 언어는 판정 후 등급 2 단위로 정한다)
-    source_question: str = ""       # 부록 A 감사인 질문 번호, 예 "1.3"
-    area: str = ""                  # 부록 A 영역 1~7
-    support_class: str = ""         # 부록 A 분류 A1·A2·C·D·B·E
-    support_group: str = ""         # 분석 집합 search·meta·nonsearch
+    source_question: str = ""  # 부록 A 감사인 질문 번호, 예 "1.3"
+    area: str = ""  # 부록 A 영역 1~7
+    support_class: str = ""  # 부록 A 분류 A1·A2·C·D·B·E
+    support_group: str = ""  # 분석 집합 search·meta·nonsearch
 
 
 def read_queries(path: Path, split: str | None = None) -> list[Query]:
@@ -299,13 +349,19 @@ def read_queries(path: Path, split: str | None = None) -> list[Query]:
         if q.qid in seen:
             raise ConfigError(f"{path}:{i}: 중복 qid {q.qid}")
         if q.support_class not in SUPPORT_CLASSES:
-            raise ConfigError(f"{path}:{i}: support_class 는 {SUPPORT_CLASSES} 중 하나 (입력 {q.support_class!r})")
+            raise ConfigError(
+                f"{path}:{i}: support_class 는 {SUPPORT_CLASSES} 중 하나 (입력 {q.support_class!r})"
+            )
         if q.support_group != SUPPORT_CLASS_GROUP[q.support_class]:
-            raise ConfigError(f"{path}:{i}: support_class {q.support_class} 의 support_group 은 "
-                              f"{SUPPORT_CLASS_GROUP[q.support_class]} (입력 {q.support_group!r})")
+            raise ConfigError(
+                f"{path}:{i}: support_class {q.support_class} 의 support_group 은 "
+                f"{SUPPORT_CLASS_GROUP[q.support_class]} (입력 {q.support_group!r})"
+            )
         allowed = QUERY_TYPES if q.support_group == "search" else (TYPE_NONE,)
         if q.type not in allowed:
-            raise ConfigError(f"{path}:{i}: {q.support_group} 집합의 type 은 {allowed} 중 하나 (입력 {q.type!r})")
+            raise ConfigError(
+                f"{path}:{i}: {q.support_group} 집합의 type 은 {allowed} 중 하나 (입력 {q.type!r})"
+            )
         if q.split not in SPLITS:
             raise ConfigError(f"{path}:{i}: split 은 {SPLITS} 중 하나 (입력 {q.split!r})")
         seen.add(q.qid)

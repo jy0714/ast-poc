@@ -19,6 +19,7 @@ def store():
         db_url = f"sqlite:///{db_path}"
 
         from src.db.database import reset_globals
+
         reset_globals()
 
         temp_store = CaseStore(db_url=db_url)
@@ -41,11 +42,14 @@ def client(store):
 class TestCreateAPI:
     def test_create_case(self, client: TestClient):
         """POST / — 케이스 생성"""
-        resp = client.post("/api/admin/cases/", json={
-            "name": "API 테스트 케이스",
-            "description": "테스트용",
-            "pst_paths": ["/data/test.pst"],
-        })
+        resp = client.post(
+            "/api/admin/cases/",
+            json={
+                "name": "API 테스트 케이스",
+                "description": "테스트용",
+                "pst_paths": ["/data/test.pst"],
+            },
+        )
         assert resp.status_code == 201
         data = resp.json()
         assert data["name"] == "API 테스트 케이스"
@@ -132,10 +136,13 @@ class TestUpdateSourcesAPI:
         create_resp = client.post("/api/admin/cases/", json={"name": "소스 추가"})
         case_id = create_resp.json()["case_id"]
 
-        resp = client.patch(f"/api/admin/cases/{case_id}", json={
-            "pst_paths": ["/new.pst"],
-            "doc_paths": ["/new/docs"],
-        })
+        resp = client.patch(
+            f"/api/admin/cases/{case_id}",
+            json={
+                "pst_paths": ["/new.pst"],
+                "doc_paths": ["/new/docs"],
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert "/new.pst" in data["pst_paths"]
@@ -176,7 +183,9 @@ class TestDeleteAPI:
         monkeypatch.setattr(settings, "index_dir", str(tmp_path / "index"))
         case_id = client.post("/api/admin/cases/", json={"name": "색인 삭제"}).json()["case_id"]
         part = UnitPart("doc:a:p1#1", "doc:a:p1", "document", "[문서]", "본문", 1, {})
-        case_index.write_index(case_id, [part], {"hdr-qwen3": ProfileVectors(np.zeros((1, 4)), "m")})
+        case_index.write_index(
+            case_id, [part], {"hdr-qwen3": ProfileVectors(np.zeros((1, 4)), "m")}
+        )
         assert case_index.exists(case_id)
 
         assert client.delete(f"/api/admin/cases/{case_id}").status_code == 200

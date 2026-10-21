@@ -33,14 +33,13 @@ class TesseractEngine(BaseOcrEngine):
         try:
             import pytesseract
             from PIL import Image  # noqa: F401
+
             try:
                 pytesseract.get_tesseract_version()
             except Exception as bin_err:
                 TesseractEngine._available = False
                 TesseractEngine._unavailable_reason = f"tesseract 바이너리 미설치: {bin_err}"
-                logger.warning(
-                    f"Tesseract OCR 비활성화 — {TesseractEngine._unavailable_reason}"
-                )
+                logger.warning(f"Tesseract OCR 비활성화 — {TesseractEngine._unavailable_reason}")
                 return False
             TesseractEngine._available = True
             logger.info("Tesseract OCR 가용 — pytesseract + 바이너리 확인됨")
@@ -48,9 +47,7 @@ class TesseractEngine(BaseOcrEngine):
         except ImportError as e:
             TesseractEngine._available = False
             TesseractEngine._unavailable_reason = f"pytesseract/Pillow 미설치: {e}"
-            logger.warning(
-                f"Tesseract OCR 비활성화 — {TesseractEngine._unavailable_reason}"
-            )
+            logger.warning(f"Tesseract OCR 비활성화 — {TesseractEngine._unavailable_reason}")
             return False
 
     def ocr_image(self, image_bytes: bytes) -> str:

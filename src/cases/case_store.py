@@ -92,7 +92,9 @@ class CaseMetadata:
             doc_paths=data.get("doc_paths", []),
             total_documents=data.get("total_documents", 0),
             total_chunks=data.get("total_chunks", 0),
-            indexed_at=datetime.fromisoformat(data["indexed_at"]) if data.get("indexed_at") else None,
+            indexed_at=datetime.fromisoformat(data["indexed_at"])
+            if data.get("indexed_at")
+            else None,
             error_message=data.get("error_message", ""),
         )
 
@@ -269,9 +271,7 @@ class CaseStore:
         logger.info(f"케이스 상태 변경: {case_id} → {new_status.value}")
         return meta
 
-    def recover_if_stuck(
-        self, case_id: str, timeout_min: int = 30
-    ) -> CaseMetadata | None:
+    def recover_if_stuck(self, case_id: str, timeout_min: int = 30) -> CaseMetadata | None:
         """INDEXING 상태에서 멈춰있는 케이스를 ERROR로 강제 복구
 
         프로세스 kill / OOM / 정전 등으로 인덱싱이 비정상 종료된 후 케이스 상태가
@@ -304,8 +304,7 @@ class CaseStore:
             row.status = CaseStatus.ERROR.value
             row.updated_at = datetime.now()
             row.error_message = (
-                f"비정상 종료로 자동 복구됨 (INDEXING 상태에서 "
-                f"{elapsed_sec / 60:.0f}분 멈춤)"
+                f"비정상 종료로 자동 복구됨 (INDEXING 상태에서 {elapsed_sec / 60:.0f}분 멈춤)"
             )
             session.commit()
             session.refresh(row)

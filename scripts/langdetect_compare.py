@@ -95,8 +95,12 @@ def main() -> None:
         langs.setdefault(p.unit_id, str(p.meta.get("lang") or "und"))
     units = {u: (langs[u], "\n".join(t)) for u, t in texts.items()}
     r = compare(units)
-    md = render(args.case_id, "전체 단위" if args.all_types else "이메일 단위",
-                r, getattr(langdetect, "__version__", "1.0.9"))
+    md = render(
+        args.case_id,
+        "전체 단위" if args.all_types else "이메일 단위",
+        r,
+        getattr(langdetect, "__version__", "1.0.9"),
+    )
     print(md)
     if args.out:
         Path(args.out).write_text(md, encoding="utf-8")

@@ -52,7 +52,10 @@ def _nvidia_smi_used() -> int | None:
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=10, check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
         ).stdout
         return int(out.strip().splitlines()[0])
     except Exception:
@@ -91,9 +94,7 @@ def check_embedding() -> dict[str, Any]:
 
 def _long_doc(n_tokens: int, i: int) -> str:
     """약 n_tokens 토큰의 합성 문서 (한·영 혼합 문장 반복)"""
-    base = (
-        f"[이메일] 2024-03-{(i % 28) + 1:02d} | 보낸이: 담당자{i} | 제목: 업무 보고 {i}\n\n"
-    )
+    base = f"[이메일] 2024-03-{(i % 28) + 1:02d} | 보낸이: 담당자{i} | 제목: 업무 보고 {i}\n\n"
     sent = "이번 분기 협력업체 계약 진행 상황을 공유드립니다. The vendor review meeting is scheduled next week. "
     # 한 문장 약 30토큰으로 잡고 반복
     return base + sent * max(1, n_tokens // 30)
@@ -141,7 +142,9 @@ def check_rerank(backend: str | None, candidates: int, doc_tokens: int) -> dict[
         "doc_tokens_qwen3": counter.count(docs[0]),
         "seconds_per_query": [round(t, 2) for t in timings],
         "truncated_in_timing_runs": r.n_truncated - trunc_before,
-        "torch_max_allocated_mib": round(torch.cuda.max_memory_allocated() / 2**20) if cuda else None,
+        "torch_max_allocated_mib": round(torch.cuda.max_memory_allocated() / 2**20)
+        if cuda
+        else None,
         "vram_used_mib": _nvidia_smi_used(),
     }
 

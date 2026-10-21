@@ -62,7 +62,10 @@ class VramMonitor:
         try:
             out = subprocess.run(
                 ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=5, check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=True,
             ).stdout
             return int(out.strip().splitlines()[0])
         except Exception:
@@ -115,8 +118,11 @@ def _reset_torch_peak() -> None:
 
 async def _fake_stream(prompt: str, n_context: int) -> AsyncIterator[str]:
     """가짜 응답 — 컨텍스트가 있으면 인용 두 개, 없으면 거절 문구"""
-    toks = (("가짜 응답입니다 [출처 1].", " 두 번째 문장입니다 [출처 2].") if n_context
-            else ("자료에서 해당 내용을 찾을 수 없습니다.",))
+    toks = (
+        ("가짜 응답입니다 [출처 1].", " 두 번째 문장입니다 [출처 2].")
+        if n_context
+        else ("자료에서 해당 내용을 찾을 수 없습니다.",)
+    )
     for tok in toks:
         await asyncio.sleep(0)
         yield tok
@@ -135,7 +141,9 @@ async def _measure_generation(question: str, context: list[str]) -> dict[str, An
     else:
         from src.llm.router import LLMRouter
 
-        stream = LLMRouter().generate_stream(question, context, secure_mode=True, on_complete=usage.update)
+        stream = LLMRouter().generate_stream(
+            question, context, secure_mode=True, on_complete=usage.update
+        )
     async for tok in stream:
         if first is None:
             first = time.perf_counter()
@@ -156,14 +164,25 @@ async def _measure_generation(question: str, context: list[str]) -> dict[str, An
 
 def _model_rows(loaded: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """`ollama ps` 행에서 메모리 관련 값만 (상주 크기·VRAM 상주·컨텍스트 길이)"""
-    return [{"name": m.get("name"), "size": m.get("size"), "size_vram": m.get("size_vram"),
-             "context_length": m.get("context_length")} for m in loaded]
+    return [
+        {
+            "name": m.get("name"),
+            "size": m.get("size"),
+            "size_vram": m.get("size_vram"),
+            "context_length": m.get("context_length"),
+        }
+        for m in loaded
+    ]
 
 
 def _memory_snapshot(mon: VramMonitor) -> dict[str, Any]:
     """현재까지의 nvidia-smi 최대·현재 사용량, torch 최대 할당, ollama ps"""
-    return {"vram_max_mib": mon.max_mib, "vram_now_mib": None if settings.ast_fake_models else mon.sample(),
-            "torch_peak_mib": torch_peak_mib(), "loaded_models": _model_rows(ollama.loaded_models())}
+    return {
+        "vram_max_mib": mon.max_mib,
+        "vram_now_mib": None if settings.ast_fake_models else mon.sample(),
+        "torch_peak_mib": torch_peak_mib(),
+        "loaded_models": _model_rows(ollama.loaded_models()),
+    }
 
 
 def _context(idx: case_index.CaseIndex, hits: list[Any]) -> tuple[list[str], list[str]]:
@@ -178,17 +197,27 @@ def _context(idx: case_index.CaseIndex, hits: list[Any]) -> tuple[list[str], lis
     return uids, texts
 
 
-def answer_record(qid: str, run: str, answer: str, unit_ids: list[str], model: str) -> dict[str, Any]:
+def answer_record(
+    qid: str, run: str, answer: str, unit_ids: list[str], model: str
+) -> dict[str, Any]:
     """답변 기록 한 줄 (v4.4 §4.1) — 인용 번호는 서비스 정규식, 인용 → 단위 ID 매핑"""
     from src.rag.engine import extract_citations, is_refusal, validate_citations
 
     cites = extract_citations(answer)
     count, invalid, uncited = validate_citations(answer, len(unit_ids))
     return {
-        "qid": qid, "run": run, "model": model, "answer": answer, "context_unit_ids": unit_ids,
+        "qid": qid,
+        "run": run,
+        "model": model,
+        "answer": answer,
+        "context_unit_ids": unit_ids,
         "citations": cites,
-        "citation_map": {str(n): unit_ids[n - 1] for n in sorted(set(cites)) if 1 <= n <= len(unit_ids)},
-        "citation_count": count, "invalid_citations": invalid, "uncited_response": uncited,
+        "citation_map": {
+            str(n): unit_ids[n - 1] for n in sorted(set(cites)) if 1 <= n <= len(unit_ids)
+        },
+        "citation_count": count,
+        "invalid_citations": invalid,
+        "uncited_response": uncited,
         "refusal": is_refusal(answer),
     }
 
@@ -200,7 +229,9 @@ def _q(values: list[float]) -> dict[str, float]:
     return {"p50": percentile(values, 50), "p95": percentile(values, 95), "n": len(values)}
 
 
-def measure(cfg: ExperimentConfig, queries: list[Query], log: Callable[[str], None] = print) -> dict[str, Any]:
+def measure(
+    cfg: ExperimentConfig, queries: list[Query], log: Callable[[str], None] = print
+) -> dict[str, Any]:
     """T7 측정 → runs/latency.jsonl, runs/generation.jsonl, results/latency.json, results/T7_latency.md"""
     idx = case_index.load(cfg.case_id)
     runs = list(cfg.latency_runs)
@@ -233,9 +264,18 @@ def measure(cfg: ExperimentConfig, queries: list[Query], log: Callable[[str], No
                 rng.shuffle(order)
                 for r in order:
                     res = retrieve(cfg.case_id, q.text, rcs[r], None, index=idx)
-                    rows.append({"run": r, "qid": q.qid, "rep": rep, "timings_ms": res.timings_ms,
-                                 "n_rerank_truncated": res.n_rerank_truncated,
-                                 "n_reranked": min(rcs[r].rerank_candidates, len(res.hits)) if rcs[r].rerank else 0})
+                    rows.append(
+                        {
+                            "run": r,
+                            "qid": q.qid,
+                            "rep": rep,
+                            "timings_ms": res.timings_ms,
+                            "n_rerank_truncated": res.n_rerank_truncated,
+                            "n_reranked": min(rcs[r].rerank_candidates, len(res.hits))
+                            if rcs[r].rerank
+                            else 0,
+                        }
+                    )
         log(f"[latency] 검색 {len(rows)}회 측정")
         # 5) 생성 (질의당 1회, 이 답변이 G1 판정 입력)
         model = "fake" if settings.ast_fake_models else settings.ollama_llm_model
@@ -247,8 +287,16 @@ def measure(cfg: ExperimentConfig, queries: list[Query], log: Callable[[str], No
             g = asyncio.run(_measure_generation(q.text, ctx))
             answer = g.pop("answer")
             retrieval_ms = float(res.timings_ms.get("total", 0.0))
-            gens.append({"qid": q.qid, "run": gen_run, "n_context": len(ctx), "retrieval_ms": retrieval_ms,
-                         "query_total_ms": retrieval_ms + g["total_ms"], **g})
+            gens.append(
+                {
+                    "qid": q.qid,
+                    "run": gen_run,
+                    "n_context": len(ctx),
+                    "retrieval_ms": retrieval_ms,
+                    "query_total_ms": retrieval_ms + g["total_ms"],
+                    **g,
+                }
+            )
             answers.append(answer_record(q.qid, gen_run, answer, uids, model))
         log(f"[latency] 생성 {len(gens)}회 측정 · 답변 기록 {len(answers)}건")
     vram_max = mon.max_mib
@@ -268,11 +316,17 @@ def measure(cfg: ExperimentConfig, queries: list[Query], log: Callable[[str], No
     summary = {
         "runs": {r: {s: _q(by_run[r][s]) for s in STAGES if by_run[r].get(s)} for r in runs},
         "rerank_truncation": {r: (t[0] / t[1] if t[1] else None) for r, t in trunc.items()},
-        "generation": {k: _q([g[k] for g in gens]) for k in ("ttft_ms", "total_ms", "tokens_per_s", "query_total_ms")},
+        "generation": {
+            k: _q([g[k] for g in gens])
+            for k in ("ttft_ms", "total_ms", "tokens_per_s", "query_total_ms")
+        },
         "generation_run": gen_run,
-        "answers": {"n": len(answers), "with_citation": sum(1 for a in answers if a["citation_count"]),
-                    "refusal": sum(1 for a in answers if a["refusal"]),
-                    "invalid_citation": sum(1 for a in answers if a["invalid_citations"])},
+        "answers": {
+            "n": len(answers),
+            "with_citation": sum(1 for a in answers if a["citation_count"]),
+            "refusal": sum(1 for a in answers if a["refusal"]),
+            "invalid_citation": sum(1 for a in answers if a["invalid_citations"]),
+        },
         "vram_max_mib": vram_max,
         "torch_peak_mib": torch_peak,
         "loaded_models": _model_rows(loaded),
@@ -282,11 +336,15 @@ def measure(cfg: ExperimentConfig, queries: list[Query], log: Callable[[str], No
         "rerank_max_length": settings.rerank_max_length,
         "reranker": {r: rcs[r].reranker for r in runs if rcs[r].rerank},
         "labels": {r: cfg.label(r) for r in {*runs, gen_run}},
-        "n_queries": len(queries), "warmup": cfg.latency_warmup, "repeats": cfg.latency_repeats,
+        "n_queries": len(queries),
+        "warmup": cfg.latency_warmup,
+        "repeats": cfg.latency_repeats,
         "fake_models": settings.ast_fake_models,
     }
     cfg.results_dir.mkdir(parents=True, exist_ok=True)
-    (cfg.results_dir / "latency.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    (cfg.results_dir / "latency.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     (cfg.results_dir / "T7_latency.md").write_text(render_t7(summary), encoding="utf-8")
     log(f"[latency] → {cfg.results_dir / 'T7_latency.md'}")
     return summary
@@ -316,18 +374,26 @@ def v44_values_lines(s: dict[str, Any]) -> list[str]:
     g = s["generation"]
     tr = s["rerank_truncation"].get(run)
     max_len = s.get("rerank_max_length", settings.rerank_max_length)
-    models = ", ".join(f"{m.get('name')} {_bytes_mib(m.get('size_vram'))} MiB" for m in svc.get("loaded_models") or [])
+    models = ", ".join(
+        f"{m.get('name')} {_bytes_mib(m.get('size_vram'))} MiB"
+        for m in svc.get("loaded_models") or []
+    )
 
     def _p(key: str, q: str) -> str:
         d = st.get(key)
         return "–" if not d else f"{d[q]:,.1f}"
 
     return [
-        f"## 응답 시간·GPU 메모리 보고 값 (v4.4 §5) — {labels.get(run, run)} (하네스 {run})", "",
+        f"## 응답 시간·GPU 메모리 보고 값 (v4.4 §5) — {labels.get(run, run)} (하네스 {run})",
+        "",
         f"- 검색 전체: p50 {_p('total', 'p50')} ms · p95 {_p('total', 'p95')} ms",
         f"- 그중 재순위: p50 {_p('rerank', 'p50')} ms",
         "- 응답 생성 포함 질의당 전체 시간: "
-        + (f"p50 {qt['p50']:,.1f} ms (질문 {qt['n']}개, 질의당 생성 1회)" if (qt := g.get("query_total_ms")) else "–"),
+        + (
+            f"p50 {qt['p50']:,.1f} ms (질문 {qt['n']}개, 질의당 생성 1회)"
+            if (qt := g.get("query_total_ms"))
+            else "–"
+        ),
         f"- GPU 최대 사용량 (세 모델 적재): nvidia-smi {_mib(svc.get('vram_max_mib'))} MiB "
         f"(측정 전체 {_mib(s['vram_max_mib'])} MiB) · 재순위 torch {_mib(s['torch_peak_mib'])} MiB · "
         f"ollama ps: {models or '–'}",
@@ -396,12 +462,23 @@ def render_t7(s: dict[str, Any]) -> str:
         "|---|---:|---:|---:|",
     ]
     for m in svc.get("loaded_models") or []:
-        lines.append(f"| {m.get('name')} | {_bytes_mib(m.get('size'))} | {_bytes_mib(m.get('size_vram'))} | "
-                     f"{m.get('context_length') or '–'} |")
-    lines += ["", "| 모델 (ollama show) | 양자화 | 매개변수 | 파일 크기 (MiB) | digest |", "|---|---|---|---:|---|"]
+        lines.append(
+            f"| {m.get('name')} | {_bytes_mib(m.get('size'))} | {_bytes_mib(m.get('size_vram'))} | "
+            f"{m.get('context_length') or '–'} |"
+        )
+    lines += [
+        "",
+        "| 모델 (ollama show) | 양자화 | 매개변수 | 파일 크기 (MiB) | digest |",
+        "|---|---|---|---:|---|",
+    ]
     for m, info in s["models"].items():
-        lines.append(f"| {m} | {info.get('quantization') or '–'} | {info.get('parameter_size') or '–'} | "
-                     f"{_bytes_mib(info.get('file_size_bytes'))} | {str(info.get('digest', ''))[:12] or '–'} |")
-    lines += ["", "- 측정 종료 시점 적재 모델(ollama ps): "
-              + (", ".join(f"{m['name']}" for m in s["loaded_models"]) or "–")]
+        lines.append(
+            f"| {m} | {info.get('quantization') or '–'} | {info.get('parameter_size') or '–'} | "
+            f"{_bytes_mib(info.get('file_size_bytes'))} | {str(info.get('digest', ''))[:12] or '–'} |"
+        )
+    lines += [
+        "",
+        "- 측정 종료 시점 적재 모델(ollama ps): "
+        + (", ".join(f"{m['name']}" for m in s["loaded_models"]) or "–"),
+    ]
     return "\n".join(lines) + "\n"

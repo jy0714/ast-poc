@@ -57,11 +57,7 @@ class TestEmailMessage:
 class TestPSTParseResult:
     def test_summary(self):
         result = PSTParseResult(
-            emails=[
-                EmailMessage(
-                    subject="s", sender="a", recipients=["b"], body="x", date=None
-                )
-            ],
+            emails=[EmailMessage(subject="s", sender="a", recipients=["b"], body="x", date=None)],
             chats=[],
             attachments=[],
             total_messages=10,

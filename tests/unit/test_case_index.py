@@ -22,8 +22,12 @@ DIM = 32
 
 def _part(uid: str, k: int, utype: str, text: str, **meta) -> UnitPart:
     return UnitPart(
-        part_id=f"{uid}#{k}", unit_id=uid, unit_type=utype,
-        header=f"[{utype}] {meta.get('subject', '')}", text=text, n_tokens=len(text.split()),
+        part_id=f"{uid}#{k}",
+        unit_id=uid,
+        unit_type=utype,
+        header=f"[{utype}] {meta.get('subject', '')}",
+        text=text,
+        n_tokens=len(text.split()),
         meta={"case_id": "c1", **meta},
     )
 
@@ -31,18 +35,55 @@ def _part(uid: str, k: int, utype: str, text: str, **meta) -> UnitPart:
 def sample_parts() -> list[UnitPart]:
     """이메일 2(하나는 파트 2개)·채팅 1·문서 1"""
     return [
-        _part("em:a", 1, "email", "3월 정산 결재 누락 payment advance", date="2024-03-05T14:22:00+09:00",
-              participants=["hong@x.com", "kim@x.com"], sender="hong@x.com", sender_name="홍길동",
-              subject="정산"),
-        _part("em:a", 2, "email", "두 번째 파트 supplier invoice", date="2024-03-05T14:22:00+09:00",
-              participants=["hong@x.com", "kim@x.com"], sender="hong@x.com", sender_name="홍길동",
-              subject="정산"),
-        _part("em:b", 1, "email", "점심 메뉴 lunch menu", date="2024-05-01T12:00:00+09:00",
-              participants=["admin@x.com"], sender="admin@x.com", subject="메뉴"),
-        _part("ch:c:1", 1, "chat", "10:00 이영희: 선급금 송금 완료", date="2024-03-01T10:00:00+09:00",
-              date_end="2024-03-10T11:00:00+09:00", participants=["이영희", "김철수"]),
-        _part("doc:d:p1", 1, "document", "안전 교육 safety training", author="박민수",
-              filename="교육.pdf"),
+        _part(
+            "em:a",
+            1,
+            "email",
+            "3월 정산 결재 누락 payment advance",
+            date="2024-03-05T14:22:00+09:00",
+            participants=["hong@x.com", "kim@x.com"],
+            sender="hong@x.com",
+            sender_name="홍길동",
+            subject="정산",
+        ),
+        _part(
+            "em:a",
+            2,
+            "email",
+            "두 번째 파트 supplier invoice",
+            date="2024-03-05T14:22:00+09:00",
+            participants=["hong@x.com", "kim@x.com"],
+            sender="hong@x.com",
+            sender_name="홍길동",
+            subject="정산",
+        ),
+        _part(
+            "em:b",
+            1,
+            "email",
+            "점심 메뉴 lunch menu",
+            date="2024-05-01T12:00:00+09:00",
+            participants=["admin@x.com"],
+            sender="admin@x.com",
+            subject="메뉴",
+        ),
+        _part(
+            "ch:c:1",
+            1,
+            "chat",
+            "10:00 이영희: 선급금 송금 완료",
+            date="2024-03-01T10:00:00+09:00",
+            date_end="2024-03-10T11:00:00+09:00",
+            participants=["이영희", "김철수"],
+        ),
+        _part(
+            "doc:d:p1",
+            1,
+            "document",
+            "안전 교육 safety training",
+            author="박민수",
+            filename="교육.pdf",
+        ),
     ]
 
 
@@ -64,8 +105,10 @@ def _tmp_index(tmp_path, monkeypatch):
 def _write(parts=None, profiles=("hdr-qwen3",)):
     parts = parts or sample_parts()
     pv = {
-        p: ProfileVectors(fake_vectors(parts, case_index.profile_spec(p).header),
-                          case_index.profile_spec(p).embed_model)
+        p: ProfileVectors(
+            fake_vectors(parts, case_index.profile_spec(p).header),
+            case_index.profile_spec(p).embed_model,
+        )
         for p in profiles
     }
     return case_index.write_index("c1", parts, pv, build_stats={"counts": {"email": 2}})
@@ -76,7 +119,9 @@ class TestWriteLoad:
         root = _write()
         assert (root / "units.jsonl").exists()
         assert (root / "bm25" / "hdr.pkl").exists() and (root / "bm25" / "nohdr.pkl").exists()
-        meta = json.loads((root / "profiles" / "hdr-qwen3" / "meta.json").read_text(encoding="utf-8"))
+        meta = json.loads(
+            (root / "profiles" / "hdr-qwen3" / "meta.json").read_text(encoding="utf-8")
+        )
         assert meta["header"] is True and meta["embed_dim"] == DIM and meta["normalized"] is True
         dense = np.load(root / "profiles" / "hdr-qwen3" / "dense.npy")
         assert dense.dtype == np.float16 and dense.shape == (5, DIM)
@@ -109,7 +154,9 @@ class TestWriteLoad:
     def test_row_count_mismatch_rejected(self):
         parts = sample_parts()
         with pytest.raises(ValueError):
-            case_index.write_index("c1", parts, {"hdr-qwen3": ProfileVectors(np.zeros((2, DIM)), "m")})
+            case_index.write_index(
+                "c1", parts, {"hdr-qwen3": ProfileVectors(np.zeros((2, DIM)), "m")}
+            )
         # 실패한 쓰기는 임시 폴더를 남기지 않는다
         assert not list(case_index.index_root().glob(".tmp_*"))
 
@@ -117,8 +164,10 @@ class TestWriteLoad:
 class TestAtomicity:
     def test_failed_write_keeps_previous(self, monkeypatch):
         _write()
+
         def boom(*a, **k):
             raise RuntimeError("disk full")
+
         monkeypatch.setattr(case_index, "_write_profile_dir", boom)
         with pytest.raises(RuntimeError):
             _write(sample_parts()[:2])
@@ -146,6 +195,7 @@ class TestVersions:
     def test_bm25_file_version_mismatch(self, monkeypatch):
         _write()
         from src.index import bm25 as bm25_mod
+
         monkeypatch.setattr(bm25_mod, "TOKENIZER_VERSION", "script-v9")
         idx = case_index.load("c1")
         with pytest.raises(IndexVersionError):
@@ -186,7 +236,13 @@ class TestFilters:
     def test_source_type_and_teams_chat_alias(self):
         _write()
         idx = case_index.load("c1")
-        assert idx.filter_mask({"source_type": "teams_chat"}).tolist() == [False, False, False, True, False]
+        assert idx.filter_mask({"source_type": "teams_chat"}).tolist() == [
+            False,
+            False,
+            False,
+            True,
+            False,
+        ]
         assert idx.filter_mask({"source_type": ["email", "document"]}).sum() == 4
         assert idx.filter_mask(None) is None
 
@@ -196,14 +252,31 @@ class TestFilters:
         m = idx.filter_mask({"_date_gte": "2024-03-01", "_date_lte": "2024-03-31"})
         assert m.tolist() == [True, True, False, True, False]  # 날짜 없는 문서는 제외
         # 채팅 세션 구간 [03-01, 03-10]이 03-08을 포함
-        assert idx.filter_mask({"_date_eq": "2024-03-08"}).tolist() == [False, False, False, True, False]
+        assert idx.filter_mask({"_date_eq": "2024-03-08"}).tolist() == [
+            False,
+            False,
+            False,
+            True,
+            False,
+        ]
 
     def test_participants_partial_name_or_address(self):
         _write()
         idx = case_index.load("c1")
-        assert idx.filter_mask({"participants": ["홍길동"]}).tolist() == [True, True, False, False, False]
+        assert idx.filter_mask({"participants": ["홍길동"]}).tolist() == [
+            True,
+            True,
+            False,
+            False,
+            False,
+        ]
         assert idx.filter_mask({"participants": ["KIM@x.com", "이영희"]}).tolist() == [
-            True, True, False, True, False]
+            True,
+            True,
+            False,
+            True,
+            False,
+        ]
 
     def test_author_and_generic(self):
         _write()
@@ -217,7 +290,9 @@ class TestProfilesAndReuse:
         _write()
         parts = case_index.load("c1").parts
         case_index.write_profile(
-            "c1", "nohdr-qwen3", ProfileVectors(fake_vectors(parts, False), "qwen3-embedding:4b-q8_0")
+            "c1",
+            "nohdr-qwen3",
+            ProfileVectors(fake_vectors(parts, False), "qwen3-embedding:4b-q8_0"),
         )
         idx = case_index.load("c1")
         assert idx.profiles() == ["hdr-qwen3", "nohdr-qwen3"]

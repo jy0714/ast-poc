@@ -108,8 +108,11 @@ def row_blocks(
     반복하지 않는다(블록마다 머리글만으로 꽉 차는 것을 막기 위해). 한 행이 상한을 넘으면
     그 행만 강제로 잘라 여러 블록으로 만든다.
     """
-    pairs = [(r, n) for r, n in zip(rows, row_numbers or range(1, len(rows) + 1), strict=False)
-             if r.strip()]
+    pairs = [
+        (r, n)
+        for r, n in zip(rows, row_numbers or range(1, len(rows) + 1), strict=False)
+        if r.strip()
+    ]
     if not pairs:
         return []
     header_text, header_row = pairs[0]

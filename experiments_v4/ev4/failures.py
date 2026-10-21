@@ -22,8 +22,16 @@ from ev4.io import ExperimentConfig, read_qrels, read_queries, read_run
 from ev4.stats import percentile
 from src.index import case_index
 
-CATEGORIES = ("토큰화(정확 일치 실패)", "교차 언어", "표현 불일치", "긴 단위 희석", "재순위 강등",
-              "헤더 영향", "판정 이견", "기타")
+CATEGORIES = (
+    "토큰화(정확 일치 실패)",
+    "교차 언어",
+    "표현 불일치",
+    "긴 단위 희석",
+    "재순위 강등",
+    "헤더 영향",
+    "판정 이견",
+    "기타",
+)
 # 순위 기록으로 자동 판단하는 힌트 (논문 [표 19] 중 원문이 필요 없는 것)
 HINTS = ("재순위 강등", "헤더 영향", "교차 언어", "긴 단위 희석", "판정 이견")
 DEFAULT_RANK_RUNS = ["R2", "R4", "R6", "R7", "R8"]
@@ -35,7 +43,10 @@ def _read_existing(path: Path) -> dict[tuple[str, str], tuple[str, str]]:
     if not path.exists():
         return {}
     with open(path, encoding="utf-8-sig", newline="") as f:
-        return {(r["qid"], r["unit_id"]): (r.get("category", ""), r.get("note", "")) for r in csv.DictReader(f)}
+        return {
+            (r["qid"], r["unit_id"]): (r.get("category", ""), r.get("note", ""))
+            for r in csv.DictReader(f)
+        }
 
 
 def unit_tokens_p95(cfg: ExperimentConfig, idx: Any) -> float:
@@ -82,7 +93,11 @@ def category_hints(
         out.append("재순위 강등")
     if r8 is False and _within(ranks.get("R7", "")):
         out.append("헤더 영향")
-    if unit_lang not in _NO_LANG and query_lang != unit_lang and _within(ranks.get("R4", "")) is False:
+    if (
+        unit_lang not in _NO_LANG
+        and query_lang != unit_lang
+        and _within(ranks.get("R4", "")) is False
+    ):
         out.append("교차 언어")
     if n_parts >= 2 or n_tokens > p95:
         out.append("긴 단위 희석")
@@ -101,20 +116,28 @@ def summary_markdown(base: str, rows: list[dict[str, Any]], n_failed_q: int) -> 
         return f"{n / d:.1%}" if d else "–"
 
     md = [
-        f"# F1 실패 분석 요약 — 기준 {base}, 상위 {CUTOFF} 밖 등급 2 단위", "",
-        f"- 놓친 등급 2 단위 {total}건 (질의 {n_failed_q}건) · 분류 완료 {done}건 · 미분류 {total - done}건", "",
-        "| 분류 | 단위 수 | 비율(분류 완료 기준) |", "|---|---:|---:|",
+        f"# F1 실패 분석 요약 — 기준 {base}, 상위 {CUTOFF} 밖 등급 2 단위",
+        "",
+        f"- 놓친 등급 2 단위 {total}건 (질의 {n_failed_q}건) · 분류 완료 {done}건 · 미분류 {total - done}건",
+        "",
+        "| 분류 | 단위 수 | 비율(분류 완료 기준) |",
+        "|---|---:|---:|",
         *[f"| {c} | {cats.get(c, 0)} | {_ratio(cats.get(c, 0), done)} |" for c in CATEGORIES],
     ]
     unknown = {c: n for c, n in cats.items() if c not in CATEGORIES}
     md += [f"| {c} (목록 외) | {n} | {_ratio(n, done)} |" for c, n in sorted(unknown.items())]
     md += [f"| 계 | {done} | {_ratio(done, done)} |"]
     hints = Counter(h for r in rows for h in filter(None, r["category_hint"].split(",")))
-    md += ["", "### 자동 분류 힌트 (참고, 한 단위에 여러 개 가능)", "",
-           "| 힌트 | 단위 수 | 비율(놓친 단위 기준) |", "|---|---:|---:|",
-           *[f"| {h} | {hints.get(h, 0)} | {_ratio(hints.get(h, 0), total)} |" for h in HINTS],
-           f"| 힌트 없음 | {sum(1 for r in rows if not r['category_hint'])} | "
-           f"{_ratio(sum(1 for r in rows if not r['category_hint']), total)} |"]
+    md += [
+        "",
+        "### 자동 분류 힌트 (참고, 한 단위에 여러 개 가능)",
+        "",
+        "| 힌트 | 단위 수 | 비율(놓친 단위 기준) |",
+        "|---|---:|---:|",
+        *[f"| {h} | {hints.get(h, 0)} | {_ratio(hints.get(h, 0), total)} |" for h in HINTS],
+        f"| 힌트 없음 | {sum(1 for r in rows if not r['category_hint'])} | "
+        f"{_ratio(sum(1 for r in rows if not r['category_hint']), total)} |",
+    ]
     md += ["", f"분류 선택지: {' / '.join(CATEGORIES)} — `F1_failures.csv` 의 category 칸에 입력"]
     return "\n".join(md) + "\n"
 
@@ -132,10 +155,15 @@ def build_failures(cfg: ExperimentConfig, log: Callable[[str], None] = print) ->
     if base not in rank_runs:
         rank_runs.append(base)
     cfg.check_subset_lock()
-    queries = {q.qid: q for q in read_queries(cfg.queries_path, split="test")
-               if q.support_group == cfg.primary_subset}
+    queries = {
+        q.qid: q
+        for q in read_queries(cfg.queries_path, split="test")
+        if q.support_group == cfg.primary_subset
+    }
     qrels = read_qrels(cfg.qrels_path)
-    runs = {r: read_run(cfg.run_path(r, "test")) for r in rank_runs if cfg.run_path(r, "test").exists()}
+    runs = {
+        r: read_run(cfg.run_path(r, "test")) for r in rank_runs if cfg.run_path(r, "test").exists()
+    }
     if base not in runs:
         raise FileNotFoundError(f"기준 실행 {base} 파일이 없습니다: {cfg.run_path(base, 'test')}")
     idx = case_index.load(cfg.case_id)
@@ -160,9 +188,14 @@ def build_failures(cfg: ExperimentConfig, log: Callable[[str], None] = print) ->
             meta = parts[0].meta if parts else {}
             n_tok = sum(p.n_tokens for p in parts)
             row: dict[str, Any] = {
-                "qid": qid, "type": q.type, "query": q.text, "unit_id": uid,
-                "unit_type": parts[0].unit_type if parts else "", "lang": meta.get("lang", ""),
-                "n_parts": len(parts), "n_tokens": n_tok,
+                "qid": qid,
+                "type": q.type,
+                "query": q.text,
+                "unit_id": uid,
+                "unit_type": parts[0].unit_type if parts else "",
+                "lang": meta.get("lang", ""),
+                "n_parts": len(parts),
+                "n_tokens": n_tok,
             }
             ranks: dict[str, int | str] = {}
             for r in rank_runs:
@@ -172,24 +205,53 @@ def build_failures(cfg: ExperimentConfig, log: Callable[[str], None] = print) ->
                 ranked = runs[r].get(qid, [])
                 ranks[r] = ranked.index(uid) + 1 if uid in ranked[: cfg.depth] else f">{cfg.depth}"
                 row[f"rank_{r}"] = ranks[r]
-            row["category_hint"] = ",".join(category_hints(
-                ranks, q.query_lang, str(meta.get("lang", "")), len(parts), n_tok, p95, (qid, uid) in disputed))
+            row["category_hint"] = ",".join(
+                category_hints(
+                    ranks,
+                    q.query_lang,
+                    str(meta.get("lang", "")),
+                    len(parts),
+                    n_tok,
+                    p95,
+                    (qid, uid) in disputed,
+                )
+            )
             cat, note = prev.get((qid, uid), ("", ""))
             row["category"], row["note"] = cat, note
             rows.append(row)
 
-    cols = ["qid", "type", "query", "unit_id", "unit_type", "lang", "n_parts", "n_tokens",
-            *[f"rank_{r}" for r in rank_runs], "category_hint", "category", "note"]
+    cols = [
+        "qid",
+        "type",
+        "query",
+        "unit_id",
+        "unit_type",
+        "lang",
+        "n_parts",
+        "n_tokens",
+        *[f"rank_{r}" for r in rank_runs],
+        "category_hint",
+        "category",
+        "note",
+    ]
     cfg.results_dir.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols, restval="")
         w.writeheader()
         w.writerows(rows)
     base_label = f"{cfg.label(base)} (하네스 {base})" if cfg.label(base) != base else base
-    (cfg.results_dir / "F1_summary.md").write_text(summary_markdown(base_label, rows, len(failed_q)),
-                                                   encoding="utf-8")
+    (cfg.results_dir / "F1_summary.md").write_text(
+        summary_markdown(base_label, rows, len(failed_q)), encoding="utf-8"
+    )
     cats = Counter(r["category"] for r in rows if r["category"])
     hints = Counter(h for r in rows for h in filter(None, r["category_hint"].split(",")))
-    log(f"[failures] 놓친 등급 2 단위 {len(rows)}건 (질의 {len(failed_q)}) · 힌트 {dict(hints)} → {out}")
-    return {"n_queries_failed": len(failed_q), "n_rows": len(rows), "categories": dict(cats),
-            "hints": dict(hints), "p95_tokens": p95}
+    log(
+        f"[failures] 놓친 등급 2 단위 {len(rows)}건 (질의 {len(failed_q)}) · 힌트 {dict(hints)} → {out}"
+    )
+    return {
+        "n_queries_failed": len(failed_q),
+        "n_rows": len(rows),
+        "categories": dict(cats),
+        "hints": dict(hints),
+        "p95_tokens": p95,
+    }

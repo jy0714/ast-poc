@@ -59,7 +59,9 @@ def _write_progress(path: Path | None, **counts: object) -> None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({**counts, "updated": time.strftime("%Y-%m-%d %H:%M:%S")}), encoding="utf-8")
+    tmp.write_text(
+        json.dumps({**counts, "updated": time.strftime("%Y-%m-%d %H:%M:%S")}), encoding="utf-8"
+    )
     os.replace(tmp, path)
 
 
@@ -104,8 +106,15 @@ def build_profile(
     todo = [i for i, r in enumerate(rows) if r is None]
     t0 = time.monotonic()
     failed: list[int] = []
-    _write_progress(progress_path, profile=profile, n_parts=idx.n_parts, todo=len(todo), done=0, failed=0,
-                    seconds=0.0)
+    _write_progress(
+        progress_path,
+        profile=profile,
+        n_parts=idx.n_parts,
+        todo=len(todo),
+        done=0,
+        failed=0,
+        seconds=0.0,
+    )
     try:
         for s in range(0, len(todo), batch):
             chunk = todo[s : s + batch]
@@ -123,8 +132,15 @@ def build_profile(
             ckpt.add(new_keys, new_vecs)
             done = min(s + batch, len(todo))
             elapsed = time.monotonic() - t0
-            _write_progress(progress_path, profile=profile, n_parts=idx.n_parts, todo=len(todo), done=done,
-                            failed=len(failed), seconds=round(elapsed, 1))
+            _write_progress(
+                progress_path,
+                profile=profile,
+                n_parts=idx.n_parts,
+                todo=len(todo),
+                done=done,
+                failed=len(failed),
+                seconds=round(elapsed, 1),
+            )
             if done == len(todo) or (s // batch) % 20 == 0:
                 logger.info(f"[{profile}] 임베딩 {done:,}/{len(todo):,} ({elapsed:.0f}s)")
     finally:
@@ -154,13 +170,23 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("case_id")
     ap.add_argument("--profiles", nargs="+", required=True, choices=PROFILE_NAMES)
-    ap.add_argument("--batch", type=int, default=settings.embed_batch_size * max(1, settings.embed_max_concurrent))
-    ap.add_argument("--progress", type=Path, default=None, help="진행 건수 JSON 경로 (프로필 이름이 붙는다)")
+    ap.add_argument(
+        "--batch",
+        type=int,
+        default=settings.embed_batch_size * max(1, settings.embed_max_concurrent),
+    )
+    ap.add_argument(
+        "--progress", type=Path, default=None, help="진행 건수 JSON 경로 (프로필 이름이 붙는다)"
+    )
     args = ap.parse_args(argv)
 
     code = 0
     for profile in args.profiles:
-        progress = args.progress.with_name(f"{args.progress.stem}_{profile}.json") if args.progress else None
+        progress = (
+            args.progress.with_name(f"{args.progress.stem}_{profile}.json")
+            if args.progress
+            else None
+        )
         try:
             info = build_profile(args.case_id, profile, args.batch, progress_path=progress)
             logger.info(f"프로필 완료: {info}")

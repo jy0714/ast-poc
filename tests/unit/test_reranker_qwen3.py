@@ -96,7 +96,11 @@ class TestEncode:
     def test_truncation_cuts_document_tail_and_counts(self):
         """상한을 넘으면 문서 끝만 자르고 n_truncated를 올린다"""
         b = _backend()
-        fixed = len(b.prefix_ids) + len(b.suffix_ids) + len(b.tok.encode(format_rerank_pair("Q", "", "INST")))
+        fixed = (
+            len(b.prefix_ids)
+            + len(b.suffix_ids)
+            + len(b.tok.encode(format_rerank_pair("Q", "", "INST")))
+        )
         b.max_length = fixed + 5
         ids = b.encode("Q", "ABCDEFGHIJ")
         assert len(ids) == b.max_length

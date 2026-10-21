@@ -31,6 +31,7 @@ def setup(tmpdir, monkeypatch):
     db_url = f"sqlite:///{db_path}"
 
     from src.db.database import reset_globals
+
     reset_globals()
 
     store = CaseStore(db_url=db_url)
@@ -137,19 +138,25 @@ class TestStopAPI:
 class TestIncrementAPI:
     def test_increment_not_found(self, client):
         """POST /increment/{case_id} — 404"""
-        resp = client.post("/api/admin/indexing/increment/fake", json={
-            "pst_paths": [],
-            "doc_paths": ["/some/path"],
-        })
+        resp = client.post(
+            "/api/admin/indexing/increment/fake",
+            json={
+                "pst_paths": [],
+                "doc_paths": ["/some/path"],
+            },
+        )
         assert resp.status_code == 404
 
     def test_increment_no_sources(self, client, store):
         """POST /increment/{case_id} — 소스 없으면 400"""
         meta = store.create("증분 테스트")
-        resp = client.post(f"/api/admin/indexing/increment/{meta.case_id}", json={
-            "pst_paths": [],
-            "doc_paths": [],
-        })
+        resp = client.post(
+            f"/api/admin/indexing/increment/{meta.case_id}",
+            json={
+                "pst_paths": [],
+                "doc_paths": [],
+            },
+        )
         assert resp.status_code == 400
 
     def test_increment_with_docs(self, client, store, tmpdir):
@@ -159,9 +166,12 @@ class TestIncrementAPI:
         (doc_dir / "inc.txt").write_text("증분 데이터입니다. " * 10, encoding="utf-8")
 
         meta = store.create("증분 실행")
-        resp = client.post(f"/api/admin/indexing/increment/{meta.case_id}", json={
-            "doc_paths": [str(doc_dir)],
-        })
+        resp = client.post(
+            f"/api/admin/indexing/increment/{meta.case_id}",
+            json={
+                "doc_paths": [str(doc_dir)],
+            },
+        )
         assert resp.status_code == 200
         assert resp.json()["case_id"] == meta.case_id
 

@@ -26,7 +26,9 @@ class TokenCounter:
         chars_per_token: 근사 모드에서 문자 수 / 토큰 비율 (한국어 기준 보수적으로 2.0)
     """
 
-    def __init__(self, hf_name: str | None = "Qwen/Qwen3-Embedding-4B", chars_per_token: float = 2.0):
+    def __init__(
+        self, hf_name: str | None = "Qwen/Qwen3-Embedding-4B", chars_per_token: float = 2.0
+    ):
         self.tok: Any = None
         self.cpt = max(0.5, float(chars_per_token))
         self.kind = f"approx:{self.cpt}chars/token"

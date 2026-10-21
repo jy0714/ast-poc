@@ -137,7 +137,16 @@ class DocumentParser:
     """
 
     SUPPORTED_TYPES = {
-        ".pdf", ".docx", ".pptx", ".xlsx", ".xls", ".txt", ".html", ".htm", ".eml", ".msg",
+        ".pdf",
+        ".docx",
+        ".pptx",
+        ".xlsx",
+        ".xls",
+        ".txt",
+        ".html",
+        ".htm",
+        ".eml",
+        ".msg",
     }
 
     def __init__(self, ocr_languages: str | None = None, detect_language: bool = True) -> None:
@@ -241,7 +250,9 @@ class DocumentParser:
             # 확장자 없는 첨부 등 — 매직 바이트로 판별
             detected = detect_format(content)
             if detected is None:
-                raise UnsupportedFormatError(f"지원하지 않는 파일 형식: {suffix or '(확장자 없음)'}")
+                raise UnsupportedFormatError(
+                    f"지원하지 않는 파일 형식: {suffix or '(확장자 없음)'}"
+                )
             logger.info(f"형식 판별: {filename} → {detected}")
             suffix = detected
 
@@ -307,7 +318,9 @@ class DocumentParser:
         추출이 실패해도 나머지 페이지는 계속 추출.
         """
         # 암호화 PDF 감지 — get_text가 빈 결과를 줘서 무성 실패하는 것을 방지
-        is_encrypted = bool(getattr(doc, "needs_pass", False) or getattr(doc, "is_encrypted", False))
+        is_encrypted = bool(
+            getattr(doc, "needs_pass", False) or getattr(doc, "is_encrypted", False)
+        )
         if is_encrypted:
             logger.warning(f"PDF가 암호화되어 텍스트를 추출할 수 없음: {filename}")
             metadata: dict[str, Any] = {
@@ -369,7 +382,11 @@ class DocumentParser:
         ocr_text_map: dict[int, str] = {}
         if sparse_page_nums and ocr_available:
             ocr_text_map = self._ocr_sparse_pages(
-                doc, sparse_page_nums, ocr_engine, filename, _settings,
+                doc,
+                sparse_page_nums,
+                ocr_engine,
+                filename,
+                _settings,
             )
             ocr_used = any(t for t in ocr_text_map.values())
 
@@ -390,16 +407,11 @@ class DocumentParser:
 
         # 스캔 PDF 판정: 절반 이상이 sparse 였는데 OCR도 실패/미가용
         sparse_pages = len(sparse_page_nums)
-        is_scan_pdf = (
-            len(doc) > 0
-            and sparse_pages * 2 >= len(doc)
-            and not ocr_used
-        )
+        is_scan_pdf = len(doc) > 0 and sparse_pages * 2 >= len(doc) and not ocr_used
         if is_scan_pdf:
             logger.info(
                 f"스캔 PDF로 판정: {filename} — {sparse_pages}/{len(doc)} 페이지가 텍스트 부족"
-                + (f" (OCR engine={ocr_engine.name} 미가용/실패)"
-                   if sparse_pages else "")
+                + (f" (OCR engine={ocr_engine.name} 미가용/실패)" if sparse_pages else "")
             )
         elif ocr_used:
             ocr_filled = sum(1 for t in ocr_text_map.values() if t)
@@ -478,17 +490,19 @@ class DocumentParser:
                         if font_size > max_font_size:
                             max_font_size = font_size
                         font_name = span.get("font", "").lower()
-                        if "bold" in font_name or (span.get("flags", 0) & 2 ** 4):
+                        if "bold" in font_name or (span.get("flags", 0) & 2**4):
                             is_bold = True
 
                 line_text = line_text.strip()
                 if line_text:
-                    blocks.append({
-                        "text": line_text,
-                        "font_size": max_font_size,
-                        "is_bold": is_bold,
-                        "page": page_num,
-                    })
+                    blocks.append(
+                        {
+                            "text": line_text,
+                            "font_size": max_font_size,
+                            "is_bold": is_bold,
+                            "page": page_num,
+                        }
+                    )
 
         return blocks
 
@@ -524,12 +538,14 @@ class DocumentParser:
             )
 
             if is_heading:
-                sections.append({
-                    "title": text,
-                    "page": block["page"],
-                    "font_size": round(block["font_size"], 1),
-                    "offset": char_offset,
-                })
+                sections.append(
+                    {
+                        "title": text,
+                        "page": block["page"],
+                        "font_size": round(block["font_size"], 1),
+                        "offset": char_offset,
+                    }
+                )
 
             char_offset += len(text) + 1  # +1 for newline
 
@@ -579,9 +595,7 @@ class DocumentParser:
                 logger.debug(f"PDF 페이지 렌더 실패 ({filename} p{page_num}): {e}")
                 return page_num, ""
 
-            img_bytes = (
-                ocr_preprocess.preprocess_image(raw_png) if do_preprocess else raw_png
-            )
+            img_bytes = ocr_preprocess.preprocess_image(raw_png) if do_preprocess else raw_png
 
             # 캐시 lookup
             h = ocr_cache.hash_image(img_bytes)
@@ -769,11 +783,13 @@ class DocumentParser:
                 slide_header = f"[슬라이드 {slide_num}]"
                 slide_content = f"{slide_header}\n" + "\n".join(texts)
 
-                sections.append({
-                    "title": slide_title,
-                    "slide_num": slide_num,
-                    "offset": char_offset,
-                })
+                sections.append(
+                    {
+                        "title": slide_title,
+                        "slide_num": slide_num,
+                        "offset": char_offset,
+                    }
+                )
 
                 slides_text.append(slide_content)
                 char_offset += len(slide_content) + 2  # +2 for \n\n separator
@@ -1306,9 +1322,7 @@ class DocumentParser:
                 return ""
 
     @staticmethod
-    def _merge_participants(
-        sender: str, recipients: list[str], cc: list[str]
-    ) -> list[str]:
+    def _merge_participants(sender: str, recipients: list[str], cc: list[str]) -> list[str]:
         """sender + recipients + cc를 중복 제거하여 통합 참여자 리스트 생성
 
         검색/UI에서 단일 필드로 노출하기 위함. 이메일 주소만 추출 (이름 부분 제외).
@@ -1342,6 +1356,7 @@ class DocumentParser:
         text = re.sub(r"<[^>]+>", "", text)
         # HTML 엔티티 디코딩
         import html as html_mod
+
         text = html_mod.unescape(text)
         # 연속 공백/줄바꿈 정리
         text = re.sub(r"\n{3,}", "\n\n", text)
@@ -1409,9 +1424,7 @@ class DocumentParser:
         try:
             raw_date = msg.date
             if raw_date:
-                date_str = (
-                    raw_date.isoformat() if hasattr(raw_date, "isoformat") else str(raw_date)
-                )
+                date_str = raw_date.isoformat() if hasattr(raw_date, "isoformat") else str(raw_date)
         except (ValueError, AttributeError, Exception) as e:
             logger.debug(f"MSG date 읽기 실패: {filename} ({e})")
 
@@ -1520,29 +1533,33 @@ class DocumentParser:
         """파일 기반 공통 메타데이터 부착"""
         stat = path.stat()
 
-        doc.metadata.update({
-            "filename": path.name,
-            "file_path": str(path),
-            "file_size": stat.st_size,
-            "file_type": doc.file_type,
-            "file_hash": self._compute_file_hash(path),
-            "char_count": len(doc.content),
-            "language": self._detect_language(doc.content) if self.detect_language else "",
-        })
+        doc.metadata.update(
+            {
+                "filename": path.name,
+                "file_path": str(path),
+                "file_size": stat.st_size,
+                "file_type": doc.file_type,
+                "file_hash": self._compute_file_hash(path),
+                "char_count": len(doc.content),
+                "language": self._detect_language(doc.content) if self.detect_language else "",
+            }
+        )
 
     def _attach_common_metadata_bytes(
         self, doc: ParsedDocument, filename: str, file_size: int, file_hash: str
     ) -> None:
         """바이트 기반 공통 메타데이터 부착"""
-        doc.metadata.update({
-            "filename": filename,
-            "file_path": "",
-            "file_size": file_size,
-            "file_type": doc.file_type,
-            "file_hash": file_hash,
-            "char_count": len(doc.content),
-            "language": self._detect_language(doc.content) if self.detect_language else "",
-        })
+        doc.metadata.update(
+            {
+                "filename": filename,
+                "file_path": "",
+                "file_size": file_size,
+                "file_type": doc.file_type,
+                "file_hash": file_hash,
+                "char_count": len(doc.content),
+                "language": self._detect_language(doc.content) if self.detect_language else "",
+            }
+        )
 
     @staticmethod
     def _compute_file_hash(path: Path) -> str:

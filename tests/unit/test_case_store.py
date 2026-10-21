@@ -21,6 +21,7 @@ def store():
         db_url = f"sqlite:///{db_path}"
 
         from src.db.database import reset_globals
+
         reset_globals()
 
         yield CaseStore(db_url=db_url)

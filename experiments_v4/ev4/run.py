@@ -33,8 +33,10 @@ def run_all(
     from src.rag.reranker import release_rerankers
 
     if not settings.ast_fake_models and ollama.is_loaded(settings.ollama_llm_model):
-        log(f"[경고] LLM {settings.ollama_llm_model} 이 적재돼 있습니다. 검색 실험은 LLM 을 내린 상태에서 "
-            f"합니다(V11): ollama stop {settings.ollama_llm_model}")
+        log(
+            f"[경고] LLM {settings.ollama_llm_model} 이 적재돼 있습니다. 검색 실험은 LLM 을 내린 상태에서 "
+            f"합니다(V11): ollama stop {settings.ollama_llm_model}"
+        )
     idx = case_index.load(cfg.case_id)
     elapsed: dict[str, float] = {}
     last_reranker = None
@@ -50,17 +52,21 @@ def run_all(
         for q in queries:
             res = retrieve(cfg.case_id, q.text, rc, None, index=idx)
             run[q.qid] = [h.unit_id for h in res.hits]
-            timing.append({
-                "qid": q.qid,
-                "n_hits": len(res.hits),
-                "timings_ms": {k: round(v, 2) for k, v in res.timings_ms.items()},
-                "n_rerank_truncated": res.n_rerank_truncated,
-                "n_reranked": min(rc.rerank_candidates, len(res.hits)) if rc.rerank else 0,
-            })
+            timing.append(
+                {
+                    "qid": q.qid,
+                    "n_hits": len(res.hits),
+                    "timings_ms": {k: round(v, 2) for k, v in res.timings_ms.items()},
+                    "n_rerank_truncated": res.n_rerank_truncated,
+                    "n_reranked": min(rc.rerank_candidates, len(res.hits)) if rc.rerank else 0,
+                }
+            )
         write_run(cfg.run_path(name, split), name, run, cfg.depth)
         write_jsonl(cfg.timing_path(name, split), timing)
         elapsed[name] = time.perf_counter() - t0
         empty = sum(1 for v in run.values() if not v)
-        log(f"[run] {name} ({split}) 질의 {len(queries)}건 · {elapsed[name]:.1f}s"
-            + (f" · 결과 없는 질의 {empty}건" if empty else ""))
+        log(
+            f"[run] {name} ({split}) 질의 {len(queries)}건 · {elapsed[name]:.1f}s"
+            + (f" · 결과 없는 질의 {empty}건" if empty else "")
+        )
     return elapsed

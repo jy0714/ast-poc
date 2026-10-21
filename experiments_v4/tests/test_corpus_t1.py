@@ -32,8 +32,15 @@ class _ExactCounter(TokenCounter):
 
 def _part(uid: str, k: int, utype: str, n_tokens: int, text: str = "본문", **meta) -> UnitPart:
     meta.setdefault("lang", "ko")
-    return UnitPart(part_id=f"{uid}#{k}", unit_id=uid, unit_type=utype, header=f"[{utype}] h",
-                    text=text, n_tokens=n_tokens, meta=meta)
+    return UnitPart(
+        part_id=f"{uid}#{k}",
+        unit_id=uid,
+        unit_type=utype,
+        header=f"[{utype}] h",
+        text=text,
+        n_tokens=n_tokens,
+        meta=meta,
+    )
 
 
 def _corpus() -> list[UnitPart]:
@@ -45,14 +52,26 @@ def _corpus() -> list[UnitPart]:
         _part("ch:1", 1, "chat", 50, "ok", lang="und"),
         _part("doc:a", 1, "document", 30, file_type="pdf", author="A"),
         _part("doc:b", 1, "document", 40, file_type="docx", author="A", last_modified_by="B"),
-        _part("att:c", 1, "attachment", 60, file_type="xlsx", author="", last_modified_by="C",
-              lang="cs"),
+        _part(
+            "att:c",
+            1,
+            "attachment",
+            60,
+            file_type="xlsx",
+            author="",
+            last_modified_by="C",
+            lang="cs",
+        ),
     ]
 
 
 BUILD_STATS = {
-    "counts": {"forwarded_emails": 1, "orphan_attachments": 2, "attachments_total": 5,
-               "attachments_parsed": 3},
+    "counts": {
+        "forwarded_emails": 1,
+        "orphan_attachments": 2,
+        "attachments_total": 5,
+        "attachments_parsed": 3,
+    },
     "excluded_types": {".png": 3, ".hwp": 1, ".dwg": 1, "(none)": 2, ".zip": 1},
     "clean_chars": {"ko": [1000, 600]},
     "forwarded_tokens": [300],
@@ -62,8 +81,14 @@ BUILD_STATS = {
 
 def test_helpers():
     assert format_row("email", "") == "이메일" and format_row("chat", "") == "채팅"
-    assert format_row("attachment", "xls") == "XLSX·XLS" and format_row("document", "html") == "DOCX·TXT·HTML"
-    assert format_row("attachment", "eml") == "첨부 메일(EML·MSG)" and format_row("document", "csv") == "기타"
+    assert (
+        format_row("attachment", "xls") == "XLSX·XLS"
+        and format_row("document", "html") == "DOCX·TXT·HTML"
+    )
+    assert (
+        format_row("attachment", "eml") == "첨부 메일(EML·MSG)"
+        and format_row("document", "csv") == "기타"
+    )
     assert excluded_group(".jpg") == "이미지" and excluded_group(".hwpx") == "HWP"
     assert excluded_group("(none)") == "판별 불가" and excluded_group(".zip") == "기타 형식"
     c = code_like_counts("INV-2024-0312 금액 1,200,000원 a@x.com")
@@ -89,11 +114,26 @@ def test_stats_tables():
     # S3: 코드형 문자열은 em:1에만
     assert s["s3"]["with_any"] == 1 and s["s3"]["n_email"] == 3
     # S4
-    assert s["excluded_grouped"] == {"이미지": 3, "HWP": 1, "DWG": 1, "판별 불가": 2, "기타 형식": 1}
+    assert s["excluded_grouped"] == {
+        "이미지": 3,
+        "HWP": 1,
+        "DWG": 1,
+        "판별 불가": 2,
+        "기타 형식": 1,
+    }
     assert s["forwarded"]["count"] == 1 and s["duplicates_removed"] == {"email": 4}
     md = render_t1(s)
-    for needle in ("[표 6]", "[표 7]", "현지 언어(합산)", "판정 불가(und)", "ads_removed", "S2", "S3", "S4",
-                   "작성자·최종 수정자"):
+    for needle in (
+        "[표 6]",
+        "[표 7]",
+        "현지 언어(합산)",
+        "판정 불가(und)",
+        "ads_removed",
+        "S2",
+        "S3",
+        "S4",
+        "작성자·최종 수정자",
+    ):
         assert needle in md
 
 
@@ -102,6 +142,8 @@ def test_stops_on_approx_counter():
     with pytest.raises(CorpusStopError):
         stats_from_parts(_corpus(), BUILD_STATS, approx)
     with pytest.raises(CorpusStopError):  # 색인 때 근사였던 경우도 멈춘다
-        stats_from_parts(_corpus(), BUILD_STATS, _ExactCounter(), build_counter_kind="approx:2.0chars/token")
+        stats_from_parts(
+            _corpus(), BUILD_STATS, _ExactCounter(), build_counter_kind="approx:2.0chars/token"
+        )
     s = stats_from_parts(_corpus(), BUILD_STATS, approx, require_exact=False)
     assert not s["token_counter_exact"] and "근사" in render_t1(s)

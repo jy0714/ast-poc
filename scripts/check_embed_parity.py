@@ -54,7 +54,9 @@ SAMPLE_QUERIES = [
 
 def _load_units(path: Path, n: int) -> list[UnitPart]:
     """units.jsonl에서 파트 n개를 무작위 표본 추출 (seed 고정, 유형·길이 섞임)"""
-    parts = [UnitPart.from_dict(json.loads(line)) for line in path.open(encoding="utf-8") if line.strip()]
+    parts = [
+        UnitPart.from_dict(json.loads(line)) for line in path.open(encoding="utf-8") if line.strip()
+    ]
     rng = random.Random(SEED)
     return rng.sample(parts, min(n, len(parts)))
 
@@ -93,7 +95,9 @@ def _ollama_unload(model: str) -> None:
         )
 
 
-def _hf_embed(model_name: str, dtype: str, inputs: list[str], max_length: int) -> tuple[list[list[float]], int]:
+def _hf_embed(
+    model_name: str, dtype: str, inputs: list[str], max_length: int
+) -> tuple[list[list[float]], int]:
     """transformers 원본 임베딩 — last-token 풀링(왼쪽 패딩) + L2 정규화 (모델 카드 방식)
 
     Returns:
@@ -106,14 +110,20 @@ def _hf_embed(model_name: str, dtype: str, inputs: list[str], max_length: int) -
     torch_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[dtype]
     device = "cuda" if torch.cuda.is_available() else "cpu"
     tok = AutoTokenizer.from_pretrained(model_name, padding_side="left")
-    model = AutoModel.from_pretrained(model_name, dtype=torch_dtype, attn_implementation="sdpa").to(device).eval()
+    model = (
+        AutoModel.from_pretrained(model_name, dtype=torch_dtype, attn_implementation="sdpa")
+        .to(device)
+        .eval()
+    )
     vecs: list[list[float]] = []
     n_trunc = 0
     for text in inputs:  # 1개씩 — 패딩 영향 배제
         ids = tok(text, add_special_tokens=True)["input_ids"]
         if len(ids) > max_length:
             n_trunc += 1
-        batch = tok([text], padding=True, truncation=True, max_length=max_length, return_tensors="pt").to(device)
+        batch = tok(
+            [text], padding=True, truncation=True, max_length=max_length, return_tensors="pt"
+        ).to(device)
         with torch.no_grad():
             out = model(**batch).last_hidden_state[:, -1]
         vecs.append(normalize(out.float(), p=2, dim=1)[0].cpu().tolist())
@@ -179,7 +189,9 @@ def main(argv: list[str] | None = None) -> int:
     _ollama_unload(args.ollama_model)
 
     t0 = time.time()
-    hf_all, n_trunc = _hf_embed(args.hf_model, args.dtype, doc_inputs + query_inputs, settings.embed_num_ctx)
+    hf_all, n_trunc = _hf_embed(
+        args.hf_model, args.dtype, doc_inputs + query_inputs, settings.embed_num_ctx
+    )
     t_hf = time.time() - t0
     hf_docs, hf_queries = hf_all[: len(doc_inputs)], hf_all[len(doc_inputs) :]
 
@@ -204,7 +216,11 @@ def main(argv: list[str] | None = None) -> int:
         "dim": len(oll_docs[0]),
         "n_units": len(parts),
         "n_queries": len(queries),
-        "units_source": str(units_path.relative_to(PROJECT_ROOT) if units_path.is_relative_to(PROJECT_ROOT) else units_path),
+        "units_source": str(
+            units_path.relative_to(PROJECT_ROOT)
+            if units_path.is_relative_to(PROJECT_ROOT)
+            else units_path
+        ),
         "unit_tokens": _summary([float(p.n_tokens) for p in parts]),
         "unit_langs": sorted({p.meta.get("lang", "und") for p in parts}),
         "cos_docs": _summary(doc_cos),

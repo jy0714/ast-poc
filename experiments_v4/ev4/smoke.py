@@ -19,7 +19,9 @@ from src.rag.retrieval import retrieve
 DEFAULT_SMOKE_RUNS = ["R2", "R4", "R6", "R7", "R8"]
 
 
-def smoke(cfg: ExperimentConfig, queries: list[Query], log: Callable[[str], None] = print) -> dict[str, Any]:
+def smoke(
+    cfg: ExperimentConfig, queries: list[Query], log: Callable[[str], None] = print
+) -> dict[str, Any]:
     """점검 질의 × 점검 실행 검색 → 오류 수·응답 시간·GPU 메모리
 
     Returns:
@@ -52,8 +54,11 @@ def smoke(cfg: ExperimentConfig, queries: list[Query], log: Callable[[str], None
                     continue
                 times.append((time.perf_counter() - t0) * 1000)
             out["runs"][name] = {
-                "n": len(cfg.smoke_qids), "errors": len(errors), "error_types": sorted(set(errors)),
-                "mean_ms": sum(times) / len(times) if times else None, "max_ms": max(times, default=None),
+                "n": len(cfg.smoke_qids),
+                "errors": len(errors),
+                "error_types": sorted(set(errors)),
+                "mean_ms": sum(times) / len(times) if times else None,
+                "max_ms": max(times, default=None),
             }
             log(f"[smoke] {name}: 질의 {len(cfg.smoke_qids)}건 · 오류 {len(errors)}건")
     out["vram_max_mib"] = mon.max_mib
@@ -69,13 +74,20 @@ def _ms(v: float | None) -> str:
 
 def render_smoke(s: dict[str, Any]) -> str:
     """점검 표 (오류·응답 시간·GPU 메모리만 — 순위·점수 없음)"""
-    lines = ["# 실데이터 동작 점검 (v4.3 §2)", "",
-             f"- 점검 질의: {', '.join(s['qids'])} · 첫 질의는 모델 적재 시간을 포함한다",
-             "- 이 결과로 설정을 바꾸지 않는다", "",
-             "| 실행 | 질의 | 오류 | 오류 유형 | 응답 시간 평균(ms) | 최대(ms) |", "|---|---:|---:|---|---:|---:|"]
+    lines = [
+        "# 실데이터 동작 점검 (v4.3 §2)",
+        "",
+        f"- 점검 질의: {', '.join(s['qids'])} · 첫 질의는 모델 적재 시간을 포함한다",
+        "- 이 결과로 설정을 바꾸지 않는다",
+        "",
+        "| 실행 | 질의 | 오류 | 오류 유형 | 응답 시간 평균(ms) | 최대(ms) |",
+        "|---|---:|---:|---|---:|---:|",
+    ]
     for r, v in s["runs"].items():
-        lines.append(f"| {r} | {v['n']} | {v['errors']} | {', '.join(v['error_types']) or '–'} | "
-                     f"{_ms(v['mean_ms'])} | {_ms(v['max_ms'])} |")
+        lines.append(
+            f"| {r} | {v['n']} | {v['errors']} | {', '.join(v['error_types']) or '–'} | "
+            f"{_ms(v['mean_ms'])} | {_ms(v['max_ms'])} |"
+        )
     vram = s.get("vram_max_mib")
     lines += ["", f"GPU 메모리 최대(nvidia-smi): {f'{vram:,} MiB' if vram else '–'}"]
     return "\n".join(lines) + "\n"

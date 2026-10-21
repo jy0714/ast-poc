@@ -36,7 +36,9 @@ def _ready(store: CaseStore, name: str, model: str | None, dim: int = 4) -> str:
     store.update_status(cid, CaseStatus.READY)
     if model is not None:
         part = UnitPart("doc:a:p1#1", "doc:a:p1", "document", "[문서]", "본문", 1, {})
-        case_index.write_index(cid, [part], {"hdr-qwen3": ProfileVectors(np.zeros((1, dim)), model)})
+        case_index.write_index(
+            cid, [part], {"hdr-qwen3": ProfileVectors(np.zeros((1, dim)), model)}
+        )
     return cid
 
 

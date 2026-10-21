@@ -141,16 +141,12 @@ class Qwen3RerankBackend:
                 )
                 self.model = model.to(self.device).eval()
             except Exception as e:
-                raise RerankerLoadError(
-                    f"Qwen3 Reranker 로드 실패 ({self.model_name}): {e}"
-                ) from e
+                raise RerankerLoadError(f"Qwen3 Reranker 로드 실패 ({self.model_name}): {e}") from e
             self.yes_id = self.tok.convert_tokens_to_ids("yes")
             self.no_id = self.tok.convert_tokens_to_ids("no")
             self.prefix_ids = self.tok.encode(RERANK_PREFIX, add_special_tokens=False)
             self.suffix_ids = self.tok.encode(RERANK_SUFFIX, add_special_tokens=False)
-            logger.info(
-                f"Qwen3 Reranker 로딩 완료: {time.time() - t0:.1f}s (device={self.device})"
-            )
+            logger.info(f"Qwen3 Reranker 로딩 완료: {time.time() - t0:.1f}s (device={self.device})")
 
     def encode(self, query: str, doc: str) -> list[int]:
         """한 쌍의 입력 토큰 ID. 상한을 넘으면 문서 끝을 자르고 n_truncated를 올린다."""
@@ -225,9 +221,7 @@ class BgeRerankBackend:
                     self.model_name, use_fp16=True, max_length=self.max_length
                 )
             except Exception as e:
-                raise RerankerLoadError(
-                    f"Reranker 모델 로드 실패 ({self.model_name}): {e}"
-                ) from e
+                raise RerankerLoadError(f"Reranker 모델 로드 실패 ({self.model_name}): {e}") from e
             logger.info(f"bge Reranker 로딩 완료: {time.time() - t0:.1f}s")
 
     def _count_truncated(self, query: str, docs: Sequence[str]) -> int:
@@ -345,9 +339,7 @@ class Reranker:
             return []
         t0 = time.time()
         scores = self.backend.score(query, docs)
-        logger.info(
-            f"Reranker({self.backend_name}) {len(docs)}건: {time.time() - t0:.2f}s"
-        )
+        logger.info(f"Reranker({self.backend_name}) {len(docs)}건: {time.time() - t0:.2f}s")
         return scores
 
     def rerank(

@@ -49,6 +49,7 @@ class PaddleEngine(BaseOcrEngine):
         try:
             # paddleocr import는 paddlepaddle도 함께 로드해서 무거우므로 첫 호출에 시간 소요
             from paddleocr import PaddleOCR  # noqa: F401
+
             PaddleEngine._available = True
             logger.info("PaddleOCR 가용 — 첫 호출 시 모델 로드 (~수 초)")
             return True
@@ -58,9 +59,7 @@ class PaddleEngine(BaseOcrEngine):
                 f"paddleocr/paddlepaddle 미설치: {e}. "
                 "pip install paddleocr paddlepaddle (또는 paddlepaddle-gpu)"
             )
-            logger.warning(
-                f"PaddleOCR 비활성화 — {PaddleEngine._unavailable_reason}"
-            )
+            logger.warning(f"PaddleOCR 비활성화 — {PaddleEngine._unavailable_reason}")
             return False
 
     def _resolve_lang(self) -> str:
@@ -83,7 +82,9 @@ class PaddleEngine(BaseOcrEngine):
                 # use_angle_cls=True: 글자 회전 자동 보정 (스캔 PDF 회전 페이지 대응)
                 # show_log=False: paddle 자체 로깅 억제
                 PaddleEngine._model = PaddleOCR(
-                    use_angle_cls=True, lang=lang, show_log=False,
+                    use_angle_cls=True,
+                    lang=lang,
+                    show_log=False,
                 )
                 logger.info(f"PaddleOCR 모델 로드 완료 (lang={lang})")
         return PaddleEngine._model

@@ -70,7 +70,9 @@ def _guard_external_context(context: list[str], is_secure: bool) -> list[str]:
     if is_secure:
         return context
     if context:
-        logger.warning(f"보안 모드 OFF: 케이스 컨텍스트 {len(context)}건을 외부 API 로 보내지 않고 버림")
+        logger.warning(
+            f"보안 모드 OFF: 케이스 컨텍스트 {len(context)}건을 외부 API 로 보내지 않고 버림"
+        )
     return []
 
 
@@ -126,8 +128,7 @@ class LLMRouter:
         if self._openai_llm is None:
             if not settings.openai_api_key:
                 raise ValueError(
-                    "OpenAI API 키가 설정되지 않았습니다. "
-                    ".env 파일에 OPENAI_API_KEY를 설정하세요."
+                    "OpenAI API 키가 설정되지 않았습니다. .env 파일에 OPENAI_API_KEY를 설정하세요."
                 )
 
             from langchain_openai import ChatOpenAI
@@ -177,9 +178,7 @@ class LLMRouter:
         """
         if not secure:
             return [("system", _EXTERNAL_SYSTEM_PROMPT), ("human", question)]
-        context_text = "\n\n---\n\n".join(
-            f"[출처 {i + 1}]\n{c}" for i, c in enumerate(context)
-        )
+        context_text = "\n\n---\n\n".join(f"[출처 {i + 1}]\n{c}" for i, c in enumerate(context))
         if not context_text:
             context_text = "(검색 결과 없음)"
 

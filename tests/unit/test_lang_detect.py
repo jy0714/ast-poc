@@ -7,7 +7,9 @@ from src.units.lang_detect import MIXED_THRESHOLD, UNDETERMINED, detect
 
 def test_korean_email_not_misdetected():
     # 0단계: langdetect 는 이런 짧은 한국어 메일을 vi·et 로 오판정했다
-    r = detect("안녕하세요\n생산기술팀 백종산 입니다.\n\nRemind 메일 드립니다.\n\n감사합니다.\n백종산 드림")
+    r = detect(
+        "안녕하세요\n생산기술팀 백종산 입니다.\n\nRemind 메일 드립니다.\n\n감사합니다.\n백종산 드림"
+    )
     assert r.lang == "ko"
     assert not r.mixed
 

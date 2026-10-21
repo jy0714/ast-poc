@@ -34,7 +34,9 @@ class BM25Index:
         n_docs: 문서(파트) 수
     """
 
-    def __init__(self, corpus_tokens: list[list[str]], tokenizer_version: str = TOKENIZER_VERSION) -> None:
+    def __init__(
+        self, corpus_tokens: list[list[str]], tokenizer_version: str = TOKENIZER_VERSION
+    ) -> None:
         """토큰화된 코퍼스로 색인 생성
 
         Args:
@@ -68,7 +70,11 @@ class BM25Index:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("wb") as f:
             pickle.dump(
-                {"tokenizer_version": self.tokenizer_version, "n_docs": self.n_docs, "bm25": self._bm25},
+                {
+                    "tokenizer_version": self.tokenizer_version,
+                    "n_docs": self.n_docs,
+                    "bm25": self._bm25,
+                },
                 f,
                 protocol=pickle.HIGHEST_PROTOCOL,
             )

@@ -307,9 +307,7 @@ class PSTParser:
                         result.total_messages += 1
 
                         eml_str = archive.format_message(pff_msg)
-                        parsed = email.message_from_string(
-                            eml_str, policy=email.policy.default
-                        )
+                        parsed = email.message_from_string(eml_str, policy=email.policy.default)
 
                         if is_teams:
                             chat = _eml_to_chat(parsed, folder_name)
@@ -445,9 +443,7 @@ def _extract_pypff_attachments(message: Any) -> list[Attachment]:
                 filename = _safe_str(att.name) or f"attachment_{i}"
                 size = att.get_size()
                 content = att.read_buffer(size) if size > 0 else b""
-                attachments.append(
-                    Attachment(filename=filename, content=content, size=size)
-                )
+                attachments.append(Attachment(filename=filename, content=content, size=size))
             except Exception as e:
                 logger.warning(f"첨부파일 추출 오류 [{i}]: {e}")
     except Exception:
@@ -483,6 +479,7 @@ def _eml_to_email(msg: email.message.Message, folder: str) -> EmailMessage | Non
         if date_str := msg.get("date", ""):
             try:
                 from email.utils import parsedate_to_datetime
+
                 date = parsedate_to_datetime(date_str)
             except Exception:
                 pass
@@ -492,10 +489,17 @@ def _eml_to_email(msg: email.message.Message, folder: str) -> EmailMessage | Non
         references = str(msg.get("references", "") or "").split()
 
         return EmailMessage(
-            subject=subject, sender=sender, recipients=recipients,
-            body=body, html_body=html_body, date=date,
-            attachments=attachments, message_id=message_id, folder_path=folder,
-            cc=cc, in_reply_to=str(msg.get("in-reply-to", "") or "").strip(),
+            subject=subject,
+            sender=sender,
+            recipients=recipients,
+            body=body,
+            html_body=html_body,
+            date=date,
+            attachments=attachments,
+            message_id=message_id,
+            folder_path=folder,
+            cc=cc,
+            in_reply_to=str(msg.get("in-reply-to", "") or "").strip(),
             references=references,
         )
     except Exception as e:
@@ -523,6 +527,7 @@ def _eml_to_chat(msg: email.message.Message, folder: str) -> ChatMessage | None:
         if date_str := msg.get("date", ""):
             try:
                 from email.utils import parsedate_to_datetime
+
                 date = parsedate_to_datetime(date_str)
             except Exception:
                 pass
@@ -533,10 +538,15 @@ def _eml_to_chat(msg: email.message.Message, folder: str) -> ChatMessage | None:
         attachments = _extract_eml_attachments(msg)
 
         return ChatMessage(
-            sender=sender, body=body, timestamp=date,
-            conversation_id=chat_room_key(folder, topic), chat_type=chat_type,
-            participants=participants, attachments=attachments,
-            conversation_topic=topic, folder_path=folder,
+            sender=sender,
+            body=body,
+            timestamp=date,
+            conversation_id=chat_room_key(folder, topic),
+            chat_type=chat_type,
+            participants=participants,
+            attachments=attachments,
+            conversation_topic=topic,
+            folder_path=folder,
         )
     except Exception as e:
         logger.warning(f"eml 채팅 변환 오류: {e}")

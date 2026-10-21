@@ -22,14 +22,31 @@ from ev4 import PROJECT_ROOT, ollama
 from ev4.io import ExperimentConfig
 from src.utils.config import settings
 
-LIBRARIES = ("torch", "transformers", "FlagEmbedding", "sentence-transformers", "numpy", "ranx", "rank-bm25",
-             "kiwipiepy", "lingua-language-detector", "langchain-ollama", "httpx", "PyMuPDF", "pytesseract",
-             "paddleocr", "paddlepaddle", "fastapi")
+LIBRARIES = (
+    "torch",
+    "transformers",
+    "FlagEmbedding",
+    "sentence-transformers",
+    "numpy",
+    "ranx",
+    "rank-bm25",
+    "kiwipiepy",
+    "lingua-language-detector",
+    "langchain-ollama",
+    "httpx",
+    "PyMuPDF",
+    "pytesseract",
+    "paddleocr",
+    "paddlepaddle",
+    "fastapi",
+)
 
 
 def _run(cmd: list[str]) -> str:
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+        return subprocess.run(
+            cmd, capture_output=True, text=True, timeout=10, check=True
+        ).stdout.strip()
     except Exception:
         return ""
 
@@ -43,8 +60,9 @@ def cpu_name() -> str:
         try:
             import winreg
 
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as k:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"
+            ) as k:
                 return str(winreg.QueryValueEx(k, "ProcessorNameString")[0]).strip()
         except OSError:
             pass
@@ -81,14 +99,20 @@ def hardware_info() -> dict[str, Any]:
     except Exception:
         pass
     ram = ram_gib()
-    return {"cpu": cpu_name(), "cores_physical": physical, "cores_logical": os.cpu_count(),
-            "ram_gib": round(ram, 1) if ram else None}
+    return {
+        "cpu": cpu_name(),
+        "cores_physical": physical,
+        "cores_logical": os.cpu_count(),
+        "ram_gib": round(ram, 1) if ram else None,
+    }
 
 
 def gpu_info() -> dict[str, Any]:
     """nvidia-smi 와 torch 로 본 GPU·드라이버·CUDA"""
     out: dict[str, Any] = {}
-    smi = _run(["nvidia-smi", "--query-gpu=name,driver_version,memory.total", "--format=csv,noheader"])
+    smi = _run(
+        ["nvidia-smi", "--query-gpu=name,driver_version,memory.total", "--format=csv,noheader"]
+    )
     if smi:
         name, driver, mem = (x.strip() for x in smi.splitlines()[0].split(","))
         out.update({"name": name, "driver": driver, "memory_total": mem})
@@ -124,8 +148,13 @@ def lib_versions() -> dict[str, str]:
 
 def ocr_info() -> dict[str, Any]:
     """설정 OCR 엔진, 실제 선택된 엔진, Tesseract 바이너리 버전·설치 언어 데이터"""
-    out: dict[str, Any] = {"configured": settings.ocr_engine, "languages": settings.ocr_languages,
-                           "selected": "", "tesseract_version": "", "tesseract_langs": []}
+    out: dict[str, Any] = {
+        "configured": settings.ocr_engine,
+        "languages": settings.ocr_languages,
+        "selected": "",
+        "tesseract_version": "",
+        "tesseract_langs": [],
+    }
     try:
         from src.parsers.ocr import get_ocr_engine
 
@@ -202,7 +231,11 @@ def collect_env(cfg: ExperimentConfig | None = None) -> dict[str, Any]:
     from src.units.schema import UNIT_RULES_VERSION
     from src.units.tokens import get_token_counter
 
-    hf_models = [settings.rerank_model, settings.rerank_bge_model, settings.unit_token_hf_name or ""]
+    hf_models = [
+        settings.rerank_model,
+        settings.rerank_bge_model,
+        settings.unit_token_hf_name or "",
+    ]
     rc = RetrievalConfig()
     token_kind = get_token_counter().kind
     return {
@@ -215,30 +248,46 @@ def collect_env(cfg: ExperimentConfig | None = None) -> dict[str, Any]:
         "bm25": bm25_params(),
         "ollama": {
             "version": ollama.version(),
-            "models": ollama_models([settings.ollama_embed_model, BGE_M3_MODEL, settings.ollama_llm_model]),
+            "models": ollama_models(
+                [settings.ollama_embed_model, BGE_M3_MODEL, settings.ollama_llm_model]
+            ),
         },
         "hf_revisions": {m: hf_revision(m) for m in hf_models if m},
-        "tokenizers": {"bm25": TOKENIZER_VERSION, "unit_rules": UNIT_RULES_VERSION,
-                       "token_counter": token_kind, "token_counter_is_real": token_kind.startswith("hf:")},
+        "tokenizers": {
+            "bm25": TOKENIZER_VERSION,
+            "unit_rules": UNIT_RULES_VERSION,
+            "token_counter": token_kind,
+            "token_counter_is_real": token_kind.startswith("hf:"),
+        },
         "prompts": {
             "EMBED_QUERY_TASK": settings.embed_query_task,
             "embed_query_format": format_embed_query("{query}"),
             "RERANK_INSTRUCTION": settings.rerank_instruction,
-            "rerank_input_format": RERANK_PREFIX + format_rerank_pair("{query}", "{document}") + RERANK_SUFFIX,
+            "rerank_input_format": RERANK_PREFIX
+            + format_rerank_pair("{query}", "{document}")
+            + RERANK_SUFFIX,
         },
         "git_commit": _run(["git", "-C", str(PROJECT_ROOT), "rev-parse", "--short", "HEAD"]),
-        "git_dirty": bool(_run(["git", "-C", str(PROJECT_ROOT), "status", "--porcelain", "--", "src"])),
+        "git_dirty": bool(
+            _run(["git", "-C", str(PROJECT_ROOT), "status", "--porcelain", "--", "src"])
+        ),
         "settings": {
-            "embed_model": settings.ollama_embed_model, "llm_model": settings.ollama_llm_model,
-            "rerank_model": settings.rerank_model, "rerank_bge_model": settings.rerank_bge_model,
-            "rerank_dtype": settings.rerank_dtype, "rerank_batch_size": settings.rerank_batch_size,
+            "embed_model": settings.ollama_embed_model,
+            "llm_model": settings.ollama_llm_model,
+            "rerank_model": settings.rerank_model,
+            "rerank_bge_model": settings.rerank_bge_model,
+            "rerank_dtype": settings.rerank_dtype,
+            "rerank_batch_size": settings.rerank_batch_size,
             "unit_max_part_tokens": settings.unit_max_part_tokens,
             "rerank_max_length": settings.rerank_max_length,
-            "rrf_k": rc.rrf_k, "k_bm25": rc.k_bm25, "k_dense": rc.k_dense,
+            "rrf_k": rc.rrf_k,
+            "k_bm25": rc.k_bm25,
+            "k_dense": rc.k_dense,
             "rerank_candidates": rc.rerank_candidates,
             "depth": cfg.depth if cfg else rc.depth,
             "chat_session_gap_minutes": settings.chat_session_gap_minutes,
-            "embed_num_ctx": settings.embed_num_ctx, "llm_num_ctx": settings.llm_num_ctx,
+            "embed_num_ctx": settings.embed_num_ctx,
+            "llm_num_ctx": settings.llm_num_ctx,
             "seed": cfg.seed if cfg else None,
             "primary_subset": cfg.primary_subset if cfg else None,
         },
@@ -257,7 +306,9 @@ def render_e1(e: dict[str, Any]) -> str:
     cores = f"{h.get('cores_physical') or '–'}코어 / {h.get('cores_logical') or '–'}스레드"
     lines = [
         "# E1 실험 환경",
-        "" if not e["fake_models"] else "\n> **가짜 모델 모드** (AST_FAKE_MODELS=1) — 모델 정보는 실측이 아니다\n",
+        ""
+        if not e["fake_models"]
+        else "\n> **가짜 모델 모드** (AST_FAKE_MODELS=1) — 모델 정보는 실측이 아니다\n",
         "## 하드웨어·OS",
         "",
         "| 항목 | 값 |",
@@ -287,8 +338,10 @@ def render_e1(e: dict[str, Any]) -> str:
         "|---|---|---|---|---|",
     ]
     for m, info in e["ollama"]["models"].items():
-        lines.append(f"| {m} (Ollama) | {info.get('quantization') or '–'} | {info.get('parameter_size') or '–'} | "
-                     f"{_gib(info.get('file_size_bytes'))} | {str(info.get('digest', ''))[:12] or '–'} |")
+        lines.append(
+            f"| {m} (Ollama) | {info.get('quantization') or '–'} | {info.get('parameter_size') or '–'} | "
+            f"{_gib(info.get('file_size_bytes'))} | {str(info.get('digest', ''))[:12] or '–'} |"
+        )
     for m, rev in e["hf_revisions"].items():
         lines.append(f"| {m} (HF) | – | – | – | {rev[:12] or '–'} |")
     lines += [
@@ -348,7 +401,9 @@ def write_env(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> dict
     """환경 기록 저장"""
     e = collect_env(cfg)
     cfg.results_dir.mkdir(parents=True, exist_ok=True)
-    (cfg.results_dir / "env.json").write_text(json.dumps(e, ensure_ascii=False, indent=2), encoding="utf-8")
+    (cfg.results_dir / "env.json").write_text(
+        json.dumps(e, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     (cfg.results_dir / "E1_env.md").write_text(render_e1(e), encoding="utf-8")
     log(f"[env] → {cfg.results_dir / 'E1_env.md'}")
     return e

@@ -49,14 +49,18 @@ def show(model: str) -> dict[str, Any]:
         tags = {m["name"]: m for m in _get("/api/tags").get("models", [])}
         tag = tags.get(model) or tags.get(f"{model}:latest") or {}
         out["digest"] = tag.get("digest", "")
-        resp = httpx.post(f"{settings.ollama_base_url}/api/show", json={"model": model}, timeout=_TIMEOUT)
+        resp = httpx.post(
+            f"{settings.ollama_base_url}/api/show", json={"model": model}, timeout=_TIMEOUT
+        )
         resp.raise_for_status()
         details = resp.json().get("details", {})
-        out.update({
-            "quantization": details.get("quantization_level", ""),
-            "parameter_size": details.get("parameter_size", ""),
-            "family": details.get("family", ""),
-        })
+        out.update(
+            {
+                "quantization": details.get("quantization_level", ""),
+                "parameter_size": details.get("parameter_size", ""),
+                "family": details.get("family", ""),
+            }
+        )
     except Exception as e:
         out["error"] = str(e)[:200]
     return out
@@ -64,5 +68,7 @@ def show(model: str) -> dict[str, Any]:
 
 def is_loaded(model: str) -> bool:
     """모델이 적재돼 있는지 (태그 ':latest' 생략 허용)"""
-    names = {m.get("name", "") for m in loaded_models()} | {m.get("model", "") for m in loaded_models()}
+    names = {m.get("name", "") for m in loaded_models()} | {
+        m.get("model", "") for m in loaded_models()
+    }
     return model in names or f"{model}:latest" in names

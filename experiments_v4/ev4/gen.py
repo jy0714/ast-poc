@@ -32,8 +32,17 @@ from ev4.stats import cohen_kappa, quadratic_weighted_kappa
 from ev4.translate import NO_TRANSLATE_LANGS, Translator
 
 CIT_COLUMNS = ["order", "qid", "sentence_no", "citation_no", "supported", "annotator", "note"]
-ANS_COLUMNS = ["order", "qid", "n_citations", "no_answer_auto", "no_answer", "unsupported_claims", "usefulness",
-               "annotator", "note"]
+ANS_COLUMNS = [
+    "order",
+    "qid",
+    "n_citations",
+    "no_answer_auto",
+    "no_answer",
+    "unsupported_claims",
+    "usefulness",
+    "annotator",
+    "note",
+]
 ITEMS = ("citation", "unsupported_claims", "usefulness", "no_answer")
 USEFULNESS = (0, 1, 2)
 TRUNC_NOTE = "…(이하 생략)"
@@ -95,8 +104,12 @@ def _load_answers(cfg: ExperimentConfig) -> dict[str, dict[str, Any]]:
     return {r["qid"]: r for r in read_jsonl(path)}
 
 
-def build_gen_sheets(cfg: ExperimentConfig, translate: bool = True, force: bool = False,
-                     log: Callable[[str], None] = print) -> dict[str, Any]:
+def build_gen_sheets(
+    cfg: ExperimentConfig,
+    translate: bool = True,
+    force: bool = False,
+    log: Callable[[str], None] = print,
+) -> dict[str, Any]:
     """답변 판정 시트 (S17, 판정자마다 md + 인용 CSV + 답변 CSV)
 
     이미 있는 시트는 판정 내용을 지우지 않도록 건너뛴다 (force=True 면 다시 만든다).
@@ -112,7 +125,9 @@ def build_gen_sheets(cfg: ExperimentConfig, translate: bool = True, force: bool 
     qids = [q for q in subset_qids(list(queries.values()), cfg.primary_subset) if q in answers]
     missing = sorted(set(subset_qids(list(queries.values()), cfg.primary_subset)) - set(answers))
     if missing:
-        raise G1Error(f"{cfg.primary_subset} 질의 {len(missing)}건의 답변 기록이 없습니다 (예: {missing[:3]})")
+        raise G1Error(
+            f"{cfg.primary_subset} 질의 {len(missing)}건의 답변 기록이 없습니다 (예: {missing[:3]})"
+        )
     idx = case_index.load(cfg.case_id)
     translator = Translator(cfg.cache_dir / "translations.jsonl") if translate else None
 
@@ -124,7 +139,14 @@ def build_gen_sheets(cfg: ExperimentConfig, translate: bool = True, force: bool 
         if len(text) > cfg.text_max_chars:
             text = text[: cfg.text_max_chars] + TRUNC_NOTE
         lang = str(parts[0].meta.get("lang", ""))
-        out = [f"### [출처 {n}] {uid} · {parts[0].unit_type} · 언어 {lang or '-'}", "", parts[0].header, "", text, ""]
+        out = [
+            f"### [출처 {n}] {uid} · {parts[0].unit_type} · 언어 {lang or '-'}",
+            "",
+            parts[0].header,
+            "",
+            text,
+            "",
+        ]
         if translator and lang not in NO_TRANSLATE_LANGS:
             out += ["> 번역(참고용):", "", translator.translate(text), ""]
         return out
@@ -140,28 +162,60 @@ def build_gen_sheets(cfg: ExperimentConfig, translate: bool = True, force: bool 
             continue
         order = qids[:]
         random.Random(f"{cfg.seed}:gen:{ann}").shuffle(order)
-        md = [f"# 답변 판정 시트 — 판정자 {ann}", "",
-              "- 질문마다: 답변 문장(S 번호)의 인용 [출처 n] 이 그 컨텍스트 단위로 뒷받침되는지 "
-              f"`gen_{ann}_citations.csv` 의 supported 에 1/0, 답변별 근거 없는 주장 수·무근거 응답(1/0, 자동값 확인)·"
-              f"유용성(2 바로 활용 / 1 참고 / 0 무용)을 `gen_{ann}_answers.csv` 에 적는다.",
-              "- 판정은 원문 기준. 번역은 참고용이다. 단위 등급은 보여 주지 않는다.", ""]
+        md = [
+            f"# 답변 판정 시트 — 판정자 {ann}",
+            "",
+            "- 질문마다: 답변 문장(S 번호)의 인용 [출처 n] 이 그 컨텍스트 단위로 뒷받침되는지 "
+            f"`gen_{ann}_citations.csv` 의 supported 에 1/0, 답변별 근거 없는 주장 수·무근거 응답(1/0, 자동값 확인)·"
+            f"유용성(2 바로 활용 / 1 참고 / 0 무용)을 `gen_{ann}_answers.csv` 에 적는다.",
+            "- 판정은 원문 기준. 번역은 참고용이다. 단위 등급은 보여 주지 않는다.",
+            "",
+        ]
         cit_rows: list[dict[str, Any]] = []
         ans_rows: list[dict[str, Any]] = []
         for k, qid in enumerate(order, 1):
             a = answers[qid]
             rows = citation_rows(a["answer"])
             auto = int(bool(a.get("refusal")) or is_refusal(a["answer"]))
-            md += [f"## {k}. {qid}", "", f"**질문**: {queries[qid].text}", "", "**답변**", "", _numbered(a["answer"]),
-                   "", f"**컨텍스트 단위 {len(a['context_unit_ids'])}개**", ""]
+            md += [
+                f"## {k}. {qid}",
+                "",
+                f"**질문**: {queries[qid].text}",
+                "",
+                "**답변**",
+                "",
+                _numbered(a["answer"]),
+                "",
+                f"**컨텍스트 단위 {len(a['context_unit_ids'])}개**",
+                "",
+            ]
             for n, uid in enumerate(a["context_unit_ids"], 1):
                 md += _unit_block(n, uid)
-            cit_rows += [{"order": k, "qid": qid, "sentence_no": s, "citation_no": c, "supported": "",
-                          "annotator": ann,
-                          "note": "" if 1 <= c <= len(a["context_unit_ids"]) else "없는 출처 번호"}
-                         for s, c in rows]
-            ans_rows.append({"order": k, "qid": qid, "n_citations": len(rows), "no_answer_auto": auto,
-                             "no_answer": auto, "unsupported_claims": "", "usefulness": "", "annotator": ann,
-                             "note": "" if rows else "인용 없음"})
+            cit_rows += [
+                {
+                    "order": k,
+                    "qid": qid,
+                    "sentence_no": s,
+                    "citation_no": c,
+                    "supported": "",
+                    "annotator": ann,
+                    "note": "" if 1 <= c <= len(a["context_unit_ids"]) else "없는 출처 번호",
+                }
+                for s, c in rows
+            ]
+            ans_rows.append(
+                {
+                    "order": k,
+                    "qid": qid,
+                    "n_citations": len(rows),
+                    "no_answer_auto": auto,
+                    "no_answer": auto,
+                    "unsupported_claims": "",
+                    "usefulness": "",
+                    "annotator": ann,
+                    "note": "" if rows else "인용 없음",
+                }
+            )
         md_path.parent.mkdir(parents=True, exist_ok=True)
         md_path.write_text("\n".join(md) + "\n", encoding="utf-8")
         _write_csv(cit_path, CIT_COLUMNS, cit_rows)
@@ -170,10 +224,17 @@ def build_gen_sheets(cfg: ExperimentConfig, translate: bool = True, force: bool 
     if translator:
         translator.save()
     n_no = sum(1 for q in qids if not citation_rows(answers[q]["answer"]))
-    log(f"[judge gen] 질문 {len(qids)}개 · 인용 {n_cit}개 · 인용 없는 답변 {n_no}개 · "
-        f"판정자 {', '.join(written) or '없음(모두 있음)'} → {cfg.judgments_dir}")
-    return {"n_questions": len(qids), "n_citations": n_cit, "n_no_citation": n_no,
-            "annotators": gen_annotators(cfg), "written": written}
+    log(
+        f"[judge gen] 질문 {len(qids)}개 · 인용 {n_cit}개 · 인용 없는 답변 {n_no}개 · "
+        f"판정자 {', '.join(written) or '없음(모두 있음)'} → {cfg.judgments_dir}"
+    )
+    return {
+        "n_questions": len(qids),
+        "n_citations": n_cit,
+        "n_no_citation": n_no,
+        "annotators": gen_annotators(cfg),
+        "written": written,
+    }
 
 
 # ─────────────────────────── G1 ───────────────────────────
@@ -193,7 +254,10 @@ def _read_annotator(cfg: ExperimentConfig, ann: str) -> dict[tuple[str, str, str
     """판정자 한 명의 판정 → {(항목, qid, 문장, 인용): 값}. 빈 칸이 있으면 G1Error"""
     out: dict[tuple[str, str, str, str], int] = {}
     blanks = 0
-    for kind, cols in (("citations", ("supported",)), ("answers", ("unsupported_claims", "usefulness", "no_answer"))):
+    for kind, cols in (
+        ("citations", ("supported",)),
+        ("answers", ("unsupported_claims", "usefulness", "no_answer")),
+    ):
         path = cfg.judgments_dir / f"gen_{ann}_{kind}.csv"
         with open(path, encoding="utf-8-sig", newline="") as f:
             for ln, r in enumerate(csv.DictReader(f), 2):
@@ -204,7 +268,9 @@ def _read_annotator(cfg: ExperimentConfig, ann: str) -> dict[tuple[str, str, str
                         continue
                     where = f"{path.name}:{ln} {col}"
                     if col == "supported":
-                        out[("citation", r["qid"], r["sentence_no"], r["citation_no"])] = _int(v, (0, 1), where)
+                        out[("citation", r["qid"], r["sentence_no"], r["citation_no"])] = _int(
+                            v, (0, 1), where
+                        )
                     elif col == "usefulness":
                         out[("usefulness", r["qid"], "", "")] = _int(v, USEFULNESS, where)
                     elif col == "no_answer":
@@ -228,11 +294,19 @@ def _pair_agreement(va: dict, vb: dict) -> dict[str, Any]:
     xa, xb = _vals("unsupported_claims")
     na, nb = _vals("no_answer")
     return {
-        "n_citations": len(ca), "citation_kappa": cohen_kappa(ca, cb),
-        "citation_agreement": sum(x == y for x, y in zip(ca, cb, strict=True)) / len(ca) if ca else math.nan,
-        "n_answers": len(ua), "usefulness_qwk": quadratic_weighted_kappa(ua, ub, 3),
-        "unsupported_exact": sum(x == y for x, y in zip(xa, xb, strict=True)) / len(xa) if xa else math.nan,
-        "no_answer_agreement": sum(x == y for x, y in zip(na, nb, strict=True)) / len(na) if na else math.nan,
+        "n_citations": len(ca),
+        "citation_kappa": cohen_kappa(ca, cb),
+        "citation_agreement": sum(x == y for x, y in zip(ca, cb, strict=True)) / len(ca)
+        if ca
+        else math.nan,
+        "n_answers": len(ua),
+        "usefulness_qwk": quadratic_weighted_kappa(ua, ub, 3),
+        "unsupported_exact": sum(x == y for x, y in zip(xa, xb, strict=True)) / len(xa)
+        if xa
+        else math.nan,
+        "no_answer_agreement": sum(x == y for x, y in zip(na, nb, strict=True)) / len(na)
+        if na
+        else math.nan,
     }
 
 
@@ -240,9 +314,13 @@ def _read_adjudication(path: Path) -> dict[tuple[str, str, str, str], tuple[str,
     if not path.exists():
         return {}
     with open(path, encoding="utf-8-sig", newline="") as f:
-        return {(r["item"], r["qid"], r["sentence_no"], r["citation_no"]): ((r.get("final") or "").strip(),
-                                                                         r.get("note") or "")
-                for r in csv.DictReader(f)}
+        return {
+            (r["item"], r["qid"], r["sentence_no"], r["citation_no"]): (
+                (r.get("final") or "").strip(),
+                r.get("note") or "",
+            )
+            for r in csv.DictReader(f)
+        }
 
 
 def _mean(v: list[float]) -> float:
@@ -279,17 +357,36 @@ def g1(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> dict[str, A
         dis.append(k)
         f, _note = prev.get(k, ("", ""))
         if f:
-            final[k] = _int(f, (0, 1) if k[0] in ("citation", "no_answer") else
-                            USEFULNESS if k[0] == "usefulness" else None, f"{adj_path.name} {k}")
+            final[k] = _int(
+                f,
+                (0, 1)
+                if k[0] in ("citation", "no_answer")
+                else USEFULNESS
+                if k[0] == "usefulness"
+                else None,
+                f"{adj_path.name} {k}",
+            )
         else:
             pending += 1
     with open(adj_path, "w", encoding="utf-8-sig", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["item", "qid", "sentence_no", "citation_no", *[f"value_{a}" for a in anns], "final", "note"])
+        w.writerow(
+            [
+                "item",
+                "qid",
+                "sentence_no",
+                "citation_no",
+                *[f"value_{a}" for a in anns],
+                "final",
+                "note",
+            ]
+        )
         for k in dis:
             w.writerow([*k, *[vals[a].get(k, "") for a in anns], *prev.get(k, ("", ""))])
     if pending:
-        raise G1Error(f"협의되지 않은 불일치 {pending}건 — {adj_path} 의 final 을 채운 뒤 다시 실행하세요")
+        raise G1Error(
+            f"협의되지 않은 불일치 {pending}건 — {adj_path} 의 final 을 채운 뒤 다시 실행하세요"
+        )
 
     qrels = read_qrels(cfg.qrels_path) if cfg.qrels_path.exists() else {}
     # 인용 정확도
@@ -313,30 +410,58 @@ def g1(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> dict[str, A
     # 근거 없는 주장
     claims = [final[("unsupported_claims", q, "", "")] for q in qids]
     # 무근거 응답: 컨텍스트에 등급 ≥1 단위가 없는 질문 중 "찾을 수 없다" 고 답한 비율
-    no_ground = [q for q in qids if not any(qrels.get(q, {}).get(u, 0) >= 1 for u in answers[q]["context_unit_ids"])]
+    no_ground = [
+        q
+        for q in qids
+        if not any(qrels.get(q, {}).get(u, 0) >= 1 for u in answers[q]["context_unit_ids"])
+    ]
     no_ans = [final[("no_answer", q, "", "")] for q in no_ground]
     useful = [final[("usefulness", q, "", "")] for q in qids]
     res = {
-        "subset": cfg.primary_subset, "n_questions": len(qids), "annotators": anns, "qrels": bool(qrels),
-        "citation_accuracy": {"n_citations": len(cit), "supported": sum(cit.values()),
-                              "pooled": sum(cit.values()) / len(cit) if cit else math.nan,
-                              "per_question_mean": _mean([sum(v) / len(v) for v in by_q.values()]),
-                              "n_answers_with_citations": len(by_q), "n_answers_without_citations": n_no_cite},
-        "decisive_citation": {"n_questions": len(dec_rates), "pooled": dec_num / dec_den if dec_den else math.nan,
-                              "per_question_mean": _mean(dec_rates), "grade2_in_context": dec_den,
-                              "cited": dec_num},
-        "unsupported_claims": {"n_answers_with_any": sum(1 for c in claims if c >= 1), "n_answers": len(claims),
-                               "total": sum(claims)},
-        "no_grounds": {"n_questions": len(no_ground), "n_said_not_found": sum(no_ans),
-                       "rate": sum(no_ans) / len(no_ans) if no_ans else math.nan},
-        "usefulness": {"mean": _mean([float(u) for u in useful]),
-                       "dist": {str(k): Counter(useful).get(k, 0) for k in USEFULNESS}},
-        "agreement": agreement, "n_adjudicated": len(dis),
+        "subset": cfg.primary_subset,
+        "n_questions": len(qids),
+        "annotators": anns,
+        "qrels": bool(qrels),
+        "citation_accuracy": {
+            "n_citations": len(cit),
+            "supported": sum(cit.values()),
+            "pooled": sum(cit.values()) / len(cit) if cit else math.nan,
+            "per_question_mean": _mean([sum(v) / len(v) for v in by_q.values()]),
+            "n_answers_with_citations": len(by_q),
+            "n_answers_without_citations": n_no_cite,
+        },
+        "decisive_citation": {
+            "n_questions": len(dec_rates),
+            "pooled": dec_num / dec_den if dec_den else math.nan,
+            "per_question_mean": _mean(dec_rates),
+            "grade2_in_context": dec_den,
+            "cited": dec_num,
+        },
+        "unsupported_claims": {
+            "n_answers_with_any": sum(1 for c in claims if c >= 1),
+            "n_answers": len(claims),
+            "total": sum(claims),
+        },
+        "no_grounds": {
+            "n_questions": len(no_ground),
+            "n_said_not_found": sum(no_ans),
+            "rate": sum(no_ans) / len(no_ans) if no_ans else math.nan,
+        },
+        "usefulness": {
+            "mean": _mean([float(u) for u in useful]),
+            "dist": {str(k): Counter(useful).get(k, 0) for k in USEFULNESS},
+        },
+        "agreement": agreement,
+        "n_adjudicated": len(dis),
     }
     cfg.results_dir.mkdir(parents=True, exist_ok=True)
-    (cfg.results_dir / "G1.json").write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
+    (cfg.results_dir / "G1.json").write_text(
+        json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     (cfg.results_dir / "G1_generation.md").write_text(g1_markdown(res), encoding="utf-8")
-    log(f"[g1] 질문 {len(qids)} · 인용 {len(cit)} · 협의 {len(dis)}건 → {cfg.results_dir / 'G1_generation.md'}")
+    log(
+        f"[g1] 질문 {len(qids)} · 인용 {len(cit)} · 협의 {len(dis)}건 → {cfg.results_dir / 'G1_generation.md'}"
+    )
     return res
 
 
@@ -350,10 +475,13 @@ def g1_markdown(r: dict[str, Any]) -> str:
     ng, us = r["no_grounds"], r["usefulness"]
     n = r["n_questions"]
     lines = [
-        f"# G1 응답 생성 평가 ([표 14]) — {r['subset']} 질문 {n}개", "",
+        f"# G1 응답 생성 평가 ([표 14]) — {r['subset']} 질문 {n}개",
+        "",
         f"- 판정자 {', '.join(r['annotators'])} · 불일치 협의 {r['n_adjudicated']}건 (표는 협의 후 최종값)"
-        + ("" if r["qrels"] else " · **qrels 없음: 결정적 증거 인용률·무근거 응답 계산 안 됨**"), "",
-        "| 지표 | 값 | 비고 |", "|---|---|---|",
+        + ("" if r["qrels"] else " · **qrels 없음: 결정적 증거 인용률·무근거 응답 계산 안 됨**"),
+        "",
+        "| 지표 | 값 | 비고 |",
+        "|---|---|---|",
         f"| 인용 정확도 (전체 합산) | {_f(ca['pooled'])} ({ca['supported']}/{ca['n_citations']}) | "
         f"인용 없는 답변 {ca['n_answers_without_citations']}개는 분모에서 뺌 |",
         f"| 인용 정확도 (질문별 평균) | {_f(ca['per_question_mean'])} | n = {ca['n_answers_with_citations']} |",
@@ -365,12 +493,16 @@ def g1_markdown(r: dict[str, Any]) -> str:
         f"| 무근거 응답 (찾을 수 없다고 답한 비율) | {_f(ng['rate'])} ({ng['n_said_not_found']}/{ng['n_questions']}) | "
         f"컨텍스트에 등급 ≥1 단위가 없는 질문 n = {ng['n_questions']} |",
         f"| 유용성 평균 | {_f(us['mean'], 2)} | 0/1/2 = {us['dist']['0']}/{us['dist']['1']}/{us['dist']['2']} |",
-        "", "## 판정자 일치도", "",
+        "",
+        "## 판정자 일치도",
+        "",
         "| 쌍 | 인용 kappa (n) | 인용 일치율 | 유용성 QWK (n) | 근거 없는 주장 수 완전 일치율 | 무근거 응답 일치율 |",
         "|---|---|---:|---|---:|---:|",
     ]
     for name, a in r["agreement"].items():
-        lines.append(f"| {name} | {_f(a['citation_kappa'])} ({a['n_citations']}) | {_f(a['citation_agreement'])} | "
-                     f"{_f(a['usefulness_qwk'])} ({a['n_answers']}) | {_f(a['unsupported_exact'])} | "
-                     f"{_f(a['no_answer_agreement'])} |")
+        lines.append(
+            f"| {name} | {_f(a['citation_kappa'])} ({a['n_citations']}) | {_f(a['citation_agreement'])} | "
+            f"{_f(a['usefulness_qwk'])} ({a['n_answers']}) | {_f(a['unsupported_exact'])} | "
+            f"{_f(a['no_answer_agreement'])} |"
+        )
     return "\n".join(lines) + "\n"

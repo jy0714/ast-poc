@@ -71,6 +71,7 @@ class EmbedCancelledError(Exception):
 
 # === 진단 헬퍼 ===
 
+
 def text_stats(text: str) -> dict[str, object]:
     """독성 청크 진단용 통계 (길이, 바이트, 추정 토큰, 유니코드 카테고리 분포)
 
@@ -82,8 +83,13 @@ def text_stats(text: str) -> dict[str, object]:
     chars = len(text)
     if chars == 0:
         return {
-            "char_count": 0, "byte_count": 0, "est_tokens": 0,
-            "hangul_pct": 0, "ascii_pct": 0, "cjk_pct": 0, "other_pct": 0,
+            "char_count": 0,
+            "byte_count": 0,
+            "est_tokens": 0,
+            "hangul_pct": 0,
+            "ascii_pct": 0,
+            "cjk_pct": 0,
+            "other_pct": 0,
             "preview": "",
         }
     bytes_count = len(text.encode("utf-8", errors="ignore"))
@@ -91,9 +97,9 @@ def text_stats(text: str) -> dict[str, object]:
     ascii_n = sum(1 for c in text if ord(c) < 128)
     # CJK 한자 (간체/번체/일본 한자)
     cjk = sum(
-        1 for c in text
-        if "一" <= c <= "鿿" or "㐀" <= c <= "䶿"
-        or "぀" <= c <= "ヿ"  # 히라가나/가타카나
+        1
+        for c in text
+        if "一" <= c <= "鿿" or "㐀" <= c <= "䶿" or "぀" <= c <= "ヿ"  # 히라가나/가타카나
     )
     other = chars - hangul - ascii_n - cjk
     est_tokens = int(hangul * 1.0 + ascii_n * 0.3 + cjk * 1.5 + other * 1.0)
@@ -116,6 +122,7 @@ def _format_text_stats(stats: dict[str, object]) -> str:
         f"한글={stats['hangul_pct']}% ASCII={stats['ascii_pct']}% "
         f"CJK={stats['cjk_pct']}% 기타={stats['other_pct']}%"
     )
+
 
 # 모델별 알려진 벡터 차원 (Ollama 기준). 태그가 붙은 이름은 가장 긴 키부터 부분 일치로 찾는다.
 KNOWN_DIMENSIONS: dict[str, int] = {
@@ -369,9 +376,7 @@ class EmbeddingService:
         return len(over)
 
     # 제어 문자 제거용 패턴 (탭 \x09, 줄바꿈 \x0a, 캐리지리턴 \x0d 는 유지)
-    _CONTROL_CHAR_RE = re.compile(
-        r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]"
-    )
+    _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
     # 제로폭 공백, BOM, 기타 보이지 않는 특수 문자
     _INVISIBLE_RE = re.compile(
         r"[\u200b\u200c\u200d\u2060\ufeff\u00ad\u180e"
@@ -390,18 +395,13 @@ class EmbeddingService:
         5. 연속 공백을 단일 공백으로 치환
         """
         # 서로게이트 깨진 유니코드 제거 (encode → decode with surrogateescape 우회)
-        text = text.encode("utf-8", errors="surrogatepass").decode(
-            "utf-8", errors="ignore"
-        )
+        text = text.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="ignore")
         # Cc (제어 문자) 중 유해한 것 제거
         text = self._CONTROL_CHAR_RE.sub("", text)
         # 보이지 않는 유니코드 제거
         text = self._INVISIBLE_RE.sub("", text)
         # 유니코드 카테고리 Cf(포맷 문자) 중 남은 것 제거 (soft hyphen 등)
-        text = "".join(
-            ch for ch in text
-            if unicodedata.category(ch) != "Cf"
-        )
+        text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
         # 연속 공백 → 단일 공백 (줄바꿈 보존)
         text = self._MULTI_SPACE_RE.sub(" ", text)
         return text.strip()
@@ -513,17 +513,21 @@ class EmbeddingService:
         )
 
         async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT) as client:
-            async def run_batch(
-                batch_num: int, indices: list[int], batch: list[str]
-            ) -> None:
+
+            async def run_batch(batch_num: int, indices: list[int], batch: list[str]) -> None:
                 async with semaphore:
                     if self._should_stop(cancel_event, deadline):
                         self._mark_batch_failed(
-                            indices, batch, failed_local_indices, failure_diag,
-                            error_type="cancelled" if cancel_event and cancel_event.is_set()
+                            indices,
+                            batch,
+                            failed_local_indices,
+                            failure_diag,
+                            error_type="cancelled"
+                            if cancel_event and cancel_event.is_set()
                             else "total_timeout",
                             error_message=(
-                                "cancel_event set" if cancel_event and cancel_event.is_set()
+                                "cancel_event set"
+                                if cancel_event and cancel_event.is_set()
                                 else f"전체 시간 제한 {settings.embed_total_timeout_sec}s 초과"
                             ),
                         )
@@ -543,13 +547,9 @@ class EmbeddingService:
                         cancel_event=cancel_event,
                     )
                     elapsed = time.monotonic() - batch_start
-                    logger.info(
-                        f"배치 {batch_num} 완료: {len(batch)}개 텍스트, {elapsed:.2f}초"
-                    )
+                    logger.info(f"배치 {batch_num} 완료: {len(batch)}개 텍스트, {elapsed:.2f}초")
 
-            await asyncio.gather(
-                *(run_batch(bn, idx, b) for bn, idx, b in batches)
-            )
+            await asyncio.gather(*(run_batch(bn, idx, b) for bn, idx, b in batches))
 
         total_elapsed = time.monotonic() - total_start
 
@@ -585,8 +585,7 @@ class EmbeddingService:
         self._last_failed_diagnostics = failed_orig_diag
         if failed_orig_indices:
             logger.warning(
-                f"임베딩 영구 실패 {len(failed_orig_indices)}개 "
-                f"(시간 제한/분할 깊이/cancel 도달)"
+                f"임베딩 영구 실패 {len(failed_orig_indices)}개 (시간 제한/분할 깊이/cancel 도달)"
             )
         logger.info(
             f"임베딩 완료: {success_count}/{len(cleaned)}개 텍스트 "
@@ -597,9 +596,7 @@ class EmbeddingService:
 
     # === 내부 헬퍼들 ===
 
-    def _prepare_texts(
-        self, texts: list[str]
-    ) -> tuple[list[tuple[int, str]], int, int]:
+    def _prepare_texts(self, texts: list[str]) -> tuple[list[tuple[int, str]], int, int]:
         """sanitize + 빈 문자열 제거 + 문자수/바이트수 truncate
 
         Returns:
@@ -671,9 +668,7 @@ class EmbeddingService:
         # 긴 텍스트 그룹 내 편차가 크면 길이순 정렬 → 비슷한 길이끼리 묶이도록
         if long_items and self._has_high_length_variance(long_items):
             long_items.sort(key=lambda x: len(x[1]))
-            logger.debug(
-                f"배치 길이 편차 큼 → 길이 정렬 적용 ({len(long_items)}개 텍스트)"
-            )
+            logger.debug(f"배치 길이 편차 큼 → 길이 정렬 적용 ({len(long_items)}개 텍스트)")
 
         result: list[tuple[int, list[int], list[str]]] = []
         batch_num = 0
@@ -683,11 +678,13 @@ class EmbeddingService:
                 if not slice_:
                     continue
                 batch_num += 1
-                result.append((
-                    batch_num,
-                    [idx for idx, _ in slice_],
-                    [t for _, t in slice_],
-                ))
+                result.append(
+                    (
+                        batch_num,
+                        [idx for idx, _ in slice_],
+                        [t for _, t in slice_],
+                    )
+                )
         return result
 
     @staticmethod
@@ -752,8 +749,12 @@ class EmbeddingService:
         # 진입 시 cancel/시간 제한 체크
         if self._should_stop(cancel_event, deadline):
             self._mark_batch_failed(
-                indices, batch, failed_local_indices, failure_diag,
-                error_type="cancelled" if cancel_event and cancel_event.is_set()
+                indices,
+                batch,
+                failed_local_indices,
+                failure_diag,
+                error_type="cancelled"
+                if cancel_event and cancel_event.is_set()
                 else "total_timeout",
                 error_message=(
                     "cancel_event set during subdivide"
@@ -804,9 +805,7 @@ class EmbeddingService:
                     f"단일 텍스트 임베딩 실패 (batch {batch_num}, "
                     f"{_format_text_stats(stats) if stats else 'empty'}): {e}"
                 )
-                logger.error(
-                    f"독성 청크 앞부분: {stats.get('preview', '')!r}"
-                )
+                logger.error(f"독성 청크 앞부분: {stats.get('preview', '')!r}")
                 return
 
             # 분할 후 재귀
@@ -816,14 +815,30 @@ class EmbeddingService:
                 f"→ {len(batch)}개를 {mid}+{len(batch) - mid}개로 분할 재시도"
             )
             await self._embed_with_subdivide_async(
-                client, url, indices[:mid], batch[:mid], batch_num * 10 + 1,
-                results, failed_local_indices, failure_diag,
-                depth + 1, deadline, cancel_event,
+                client,
+                url,
+                indices[:mid],
+                batch[:mid],
+                batch_num * 10 + 1,
+                results,
+                failed_local_indices,
+                failure_diag,
+                depth + 1,
+                deadline,
+                cancel_event,
             )
             await self._embed_with_subdivide_async(
-                client, url, indices[mid:], batch[mid:], batch_num * 10 + 2,
-                results, failed_local_indices, failure_diag,
-                depth + 1, deadline, cancel_event,
+                client,
+                url,
+                indices[mid:],
+                batch[mid:],
+                batch_num * 10 + 2,
+                results,
+                failed_local_indices,
+                failure_diag,
+                depth + 1,
+                deadline,
+                cancel_event,
             )
 
     async def _embed_batch_with_retry_async(
@@ -854,7 +869,9 @@ class EmbeddingService:
         payload = self._payload(batch)
 
         # === HTTP 호출을 한 번 시도하고 결과/에러 분류 ===
-        async def attempt_post() -> tuple[list[list[float]], None] | tuple[None, tuple[str, Exception]]:
+        async def attempt_post() -> (
+            tuple[list[list[float]], None] | tuple[None, tuple[str, Exception]]
+        ):
             try:
                 resp = await client.post(url, json=payload, timeout=_REQUEST_TIMEOUT)
                 resp.raise_for_status()
@@ -867,8 +884,10 @@ class EmbeddingService:
             except (httpx.TimeoutException, httpx.ReadTimeout) as te:
                 return None, ("timeout", te)
             except (
-                httpx.ConnectError, httpx.ReadError,
-                httpx.RemoteProtocolError, httpx.NetworkError,
+                httpx.ConnectError,
+                httpx.ReadError,
+                httpx.RemoteProtocolError,
+                httpx.NetworkError,
             ) as ne:
                 return None, ("connection", ne)
 
@@ -932,7 +951,7 @@ class EmbeddingService:
             # err_type == "connection"
             if connect_attempts < _CONNECT_MAX_RETRIES - 1:
                 connect_attempts += 1
-                wait = _CONNECT_RETRY_BACKOFF_BASE ** connect_attempts
+                wait = _CONNECT_RETRY_BACKOFF_BASE**connect_attempts
                 logger.warning(
                     f"임베딩 connection 재시도 {connect_attempts}/{_CONNECT_MAX_RETRIES - 1} "
                     f"(batch {batch_num}, {wait:.0f}s 후): {err_obj}"
@@ -941,11 +960,10 @@ class EmbeddingService:
                 slept = 0.0
                 while slept < wait:
                     if self._should_stop(cancel_event, deadline):
-                        err = ConnectionError(
-                            f"임베딩 중단 (batch {batch_num}, backoff 중)"
-                        )
+                        err = ConnectionError(f"임베딩 중단 (batch {batch_num}, backoff 중)")
                         err._embed_error_type = (
-                            "cancelled" if cancel_event and cancel_event.is_set()
+                            "cancelled"
+                            if cancel_event and cancel_event.is_set()
                             else "total_timeout"
                         )
                         raise err

@@ -1,20 +1,20 @@
 """CLI — `cd experiments_v4 && python -m ev4 <명령>` (지시서 §6.5)
 
-    corpus                                   단위 통계 → results/T1_corpus.md
-    queries                                  질의 구성 T0 + 입력 검증 경고 → results/T0_queries.md
-    smoke                                    표준 질문 3개 동작 점검(오류·응답 시간·GPU 메모리) → results/smoke.md
-    run --runs R2 R4 | all                   retrieve() 실행 → runs/ (첫 실행이 primary_subset 을 기록)
-    pool [--no-translate]                    판정 시트 → data/judgments/pool_{A,B}.csv
-    judgments import <csv...>                판정 가져오기
-    judgments agreement                      일치도 + 중재 시트
-    judgments finalize                       최종 qrels → data/qrels.txt, T0b
-    evaluate                                 T2·사전 비교 4개·T8·언어별 보조 값 → results/tables.md
-    latency                                  응답 시간(v4.4 §5)·답변 생성 → results/T7_latency.md, runs/gen/answers.jsonl
-    judge gen [--no-translate] [--force]     답변 판정 시트(S17) → data/judgments/gen_{A,B,C}*
-    judge g1                                 답변 판정 일치도·협의·G1 → results/G1_generation.md
-    failures                                 F1 → results/F1_failures.csv
-    env                                      E1 → results/E1_env.md
-    selftest [--keep DIR]                    가짜 모델 전체 흐름 점검 (GPU·실데이터 없음)
+corpus                                   단위 통계 → results/T1_corpus.md
+queries                                  질의 구성 T0 + 입력 검증 경고 → results/T0_queries.md
+smoke                                    표준 질문 3개 동작 점검(오류·응답 시간·GPU 메모리) → results/smoke.md
+run --runs R2 R4 | all                   retrieve() 실행 → runs/ (첫 실행이 primary_subset 을 기록)
+pool [--no-translate]                    판정 시트 → data/judgments/pool_{A,B}.csv
+judgments import <csv...>                판정 가져오기
+judgments agreement                      일치도 + 중재 시트
+judgments finalize                       최종 qrels → data/qrels.txt, T0b
+evaluate                                 T2·사전 비교 4개·T8·언어별 보조 값 → results/tables.md
+latency                                  응답 시간(v4.4 §5)·답변 생성 → results/T7_latency.md, runs/gen/answers.jsonl
+judge gen [--no-translate] [--force]     답변 판정 시트(S17) → data/judgments/gen_{A,B,C}*
+judge g1                                 답변 판정 일치도·협의·G1 → results/G1_generation.md
+failures                                 F1 → results/F1_failures.csv
+env                                      E1 → results/E1_env.md
+selftest [--keep DIR]                    가짜 모델 전체 흐름 점검 (GPU·실데이터 없음)
 """
 
 from __future__ import annotations
@@ -28,7 +28,9 @@ from pathlib import Path
 def _parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="ev4", description="AuditRAG v4 실험 하네스")
     ap.add_argument("--root", type=Path, default=None, help="실험 루트 (기본 experiments_v4/)")
-    ap.add_argument("--config", type=Path, default=None, help="config.yaml 경로 (기본 {root}/config.yaml)")
+    ap.add_argument(
+        "--config", type=Path, default=None, help="config.yaml 경로 (기본 {root}/config.yaml)"
+    )
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("corpus")
     sub.add_parser("queries")
@@ -49,7 +51,9 @@ def _parser() -> argparse.ArgumentParser:
     jg = p.add_subparsers(dest="gcmd", required=True)
     pg = jg.add_parser("gen")
     pg.add_argument("--no-translate", action="store_true", help="현지어 단위 번역 생략")
-    pg.add_argument("--force", action="store_true", help="이미 있는 판정 시트를 다시 만든다 (판정 내용 삭제)")
+    pg.add_argument(
+        "--force", action="store_true", help="이미 있는 판정 시트를 다시 만든다 (판정 내용 삭제)"
+    )
     jg.add_parser("g1")
     sub.add_parser("failures")
     sub.add_parser("env")
@@ -75,7 +79,9 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = load_config(args.config, args.root)
     if args.cmd in ("run", "pool", "smoke"):
-        for w in query_warnings(read_queries(cfg.queries_path)):  # 질의 수는 경고만 (필드 오류는 read_queries 가 막음)
+        for w in query_warnings(
+            read_queries(cfg.queries_path)
+        ):  # 질의 수는 경고만 (필드 오류는 read_queries 가 막음)
             print(f"[경고] {w}")
     if args.cmd == "corpus":
         from ev4.corpus import build_corpus
@@ -101,7 +107,12 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "pool":
         from ev4.pool import build_pool
 
-        build_pool(cfg, read_queries(cfg.queries_path, split="test"), "test", translate=not args.no_translate)
+        build_pool(
+            cfg,
+            read_queries(cfg.queries_path, split="test"),
+            "test",
+            translate=not args.no_translate,
+        )
     elif args.cmd == "judgments":
         from ev4 import judgments
 

@@ -25,12 +25,17 @@ sys.path.insert(0, str(PROJECT_ROOT))
 V3_POS_TAGS = frozenset({"NNG", "NNP", "NNB", "VV", "VA", "MAG", "SL", "SH", "SN"})
 
 CASES: list[dict[str, str]] = [
-    {"id": "1", "name": "마침표가 붙은 라틴 단어 분리 ('payment.' → 'pa', 'yment.')",
-     "text": "Please approve the invoice before payment."},
-    {"id": "2", "name": "띄어쓰기 없는 중국어 구절이 한 토큰",
-     "text": "请确认付款金额并回复"},
-    {"id": "3", "name": "품사 필터 적용 시 'INV-2024-0312' → 'inv'만 남음",
-     "text": "INV-2024-0312 송장 확인 바랍니다"},
+    {
+        "id": "1",
+        "name": "마침표가 붙은 라틴 단어 분리 ('payment.' → 'pa', 'yment.')",
+        "text": "Please approve the invoice before payment.",
+    },
+    {"id": "2", "name": "띄어쓰기 없는 중국어 구절이 한 토큰", "text": "请确认付款金额并回复"},
+    {
+        "id": "3",
+        "name": "품사 필터 적용 시 'INV-2024-0312' → 'inv'만 남음",
+        "text": "INV-2024-0312 송장 확인 바랍니다",
+    },
 ]
 
 
@@ -72,13 +77,15 @@ def run() -> tuple[str, list[dict[str, Any]]]:
     for case in CASES:
         raw = [(t.form, t.tag) for t in kiwi.tokenize(case["text"])]
         v3 = v3_tokenize(kiwi, case["text"])
-        rows.append({
-            **case,
-            "raw": raw,
-            "v3": v3,
-            "v4": tokenize(case["text"]),
-            "reproduced": reproduced(case["id"], raw, v3, case["text"]),
-        })
+        rows.append(
+            {
+                **case,
+                "raw": raw,
+                "v3": v3,
+                "v4": tokenize(case["text"]),
+                "reproduced": reproduced(case["id"], raw, v3, case["text"]),
+            }
+        )
     return kiwipiepy.__version__, rows
 
 
@@ -96,7 +103,10 @@ def render(version: str, rows: list[dict[str, Any]]) -> str:
             f"| {r['id']} | {r['name']} | {'예' if r['reproduced'] else '아니오'} | `{raw}` | "
             f"`{', '.join(r['v3'])}` | `{', '.join(r['v4'])}` |"
         )
-    lines += ["", "입력은 합성 문자열이다: " + " / ".join(f"({r['id']}) `{r['text']}`" for r in rows)]
+    lines += [
+        "",
+        "입력은 합성 문자열이다: " + " / ".join(f"({r['id']}) `{r['text']}`" for r in rows),
+    ]
     return "\n".join(lines) + "\n"
 
 

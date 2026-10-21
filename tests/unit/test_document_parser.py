@@ -165,10 +165,12 @@ class TestPdfParser:
 
         path = TEST_DIR / "test_meta.pdf"
         doc = fitz.open()
-        doc.set_metadata({
-            "author": "Test Author",
-            "title": "Test Title",
-        })
+        doc.set_metadata(
+            {
+                "author": "Test Author",
+                "title": "Test Title",
+            }
+        )
         page = doc.new_page()
         page.insert_text((72, 72), "Content", fontsize=12)
         doc.save(str(path))
@@ -187,11 +189,13 @@ class TestPdfParser:
 
         path = TEST_DIR / "test_creator.pdf"
         doc = fitz.open()
-        doc.set_metadata({
-            "author": "Original Author",
-            "creator": "Microsoft Word",
-            "producer": "Adobe PDF Library 21.0",
-        })
+        doc.set_metadata(
+            {
+                "author": "Original Author",
+                "creator": "Microsoft Word",
+                "producer": "Adobe PDF Library 21.0",
+            }
+        )
         page = doc.new_page()
         page.insert_text((72, 72), "Content", fontsize=12)
         doc.save(str(path))
@@ -269,8 +273,7 @@ class TestPdfParser:
         assert r1 is False and r2 is False and r3 is False
         # WARNING은 첫 호출 1번만
         warnings = [
-            r for r in caplog.records
-            if r.levelname == "WARNING" and "Tesseract OCR" in r.message
+            r for r in caplog.records if r.levelname == "WARNING" and "Tesseract OCR" in r.message
         ]
         assert len(warnings) == 1
 
@@ -732,7 +735,8 @@ class TestCommonMetadata:
     def test_language_detection_korean(self, parser: DocumentParser):
         """한국어 텍스트 언어 감지"""
         path = _write_temp(
-            ".txt", "이것은 한국어로 작성된 긴 문서입니다. 언어 감지가 정상적으로 동작하는지 테스트합니다."
+            ".txt",
+            "이것은 한국어로 작성된 긴 문서입니다. 언어 감지가 정상적으로 동작하는지 테스트합니다.",
         )
         result = parser.parse(path)
         assert result.metadata["language"] == "ko"
@@ -851,7 +855,9 @@ class TestEmlParser:
 
     def test_parse_eml_html_fallback(self, parser: DocumentParser):
         """EML text/plain이 없을 때 HTML 폴백"""
-        eml_bytes = _make_eml(body="", html_body="<html><body><p>HTML 본문입니다.</p></body></html>")
+        eml_bytes = _make_eml(
+            body="", html_body="<html><body><p>HTML 본문입니다.</p></body></html>"
+        )
         result = parser.parse_bytes(eml_bytes, "html_test.eml")
 
         assert "HTML 본문입니다" in result.content
@@ -888,7 +894,9 @@ class TestEmlParser:
 
     def test_parse_eml_common_metadata(self, parser: DocumentParser):
         """EML 공통 메타데이터 (language, char_count 등)"""
-        eml_bytes = _make_eml(body="이것은 한국어로 작성된 이메일입니다. 충분히 긴 텍스트를 포함해야 합니다.")
+        eml_bytes = _make_eml(
+            body="이것은 한국어로 작성된 이메일입니다. 충분히 긴 텍스트를 포함해야 합니다."
+        )
         path = _write_temp(".eml", eml_bytes)
         result = parser.parse(path)
 

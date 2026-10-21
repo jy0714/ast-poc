@@ -103,8 +103,17 @@ def test_chinese_quote_fixtures(case: dict):
 
 @pytest.mark.parametrize(
     "subject",
-    ["FW: 견적", "Fwd: invoice", "전달: 정산", "转发: 发票", "RV: factura", "PŘ: faktura",
-     "WG: Rechnung", "fw：전각 콜론", "  FWD: 앞 공백"],
+    [
+        "FW: 견적",
+        "Fwd: invoice",
+        "전달: 정산",
+        "转发: 发票",
+        "RV: factura",
+        "PŘ: faktura",
+        "WG: Rechnung",
+        "fw：전각 콜론",
+        "  FWD: 앞 공백",
+    ],
 )
 def test_forward_prefixes(subject: str):
     assert is_forwarded(subject)

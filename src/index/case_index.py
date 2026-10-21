@@ -48,8 +48,13 @@ PROFILE_NAMES = ("hdr-qwen3", "nohdr-qwen3", "hdr-bgem3")
 BGE_M3_MODEL = "bge-m3"
 
 # 프론트엔드·질의 파서가 쓰는 source_type 이름 → 단위 유형
-_SOURCE_TYPE_TO_UNIT = {"teams_chat": "chat", "chat": "chat", "email": "email",
-                        "document": "document", "attachment": "attachment"}
+_SOURCE_TYPE_TO_UNIT = {
+    "teams_chat": "chat",
+    "chat": "chat",
+    "email": "email",
+    "document": "document",
+    "attachment": "attachment",
+}
 _DENSE_BLOCK_ROWS = 8192
 _CACHE_SIZE = 2
 
@@ -123,7 +128,9 @@ class CaseIndex:
         unit_ids: 행별 unit_id
     """
 
-    def __init__(self, case_id: str, root: Path, manifest: dict[str, Any], parts: list[UnitPart]) -> None:
+    def __init__(
+        self, case_id: str, root: Path, manifest: dict[str, Any], parts: list[UnitPart]
+    ) -> None:
         """색인 객체 구성 (CaseIndex.load로 만든다)"""
         self.case_id = case_id
         self.root = root
@@ -163,7 +170,9 @@ class CaseIndex:
         if not pdir.is_dir():
             return []
         return sorted(
-            d.name for d in pdir.iterdir() if (d / "meta.json").exists() and (d / "dense.npy").exists()
+            d.name
+            for d in pdir.iterdir()
+            if (d / "meta.json").exists() and (d / "dense.npy").exists()
         )
 
     def profile_meta(self, profile: str) -> dict[str, Any]:
@@ -238,7 +247,9 @@ class CaseIndex:
             if profile not in self._dense:
                 path = self.root / "profiles" / profile / "dense.npy"
                 if not path.exists():
-                    raise IndexNotFoundError(f"케이스 {self.case_id}에 프로필 {profile} 색인이 없습니다")
+                    raise IndexNotFoundError(
+                        f"케이스 {self.case_id}에 프로필 {profile} 색인이 없습니다"
+                    )
                 mat = np.load(path)
                 if mat.shape[0] != self.n_parts:
                     raise IndexVersionError(
@@ -269,8 +280,18 @@ class CaseIndex:
     def _people_text(self) -> list[str]:
         """행별 참여자 검색 문자열 (소문자, 이름·주소 합침)"""
         if self._people is None:
-            keys = ("participants", "sender", "sender_name", "recipients", "recipient_names",
-                    "cc", "cc_names", "author", "last_modified_by", "parent_sender")
+            keys = (
+                "participants",
+                "sender",
+                "sender_name",
+                "recipients",
+                "recipient_names",
+                "cc",
+                "cc_names",
+                "author",
+                "last_modified_by",
+                "parent_sender",
+            )
             rows = []
             for p in self.parts:
                 vals: list[str] = []
@@ -317,9 +338,15 @@ class CaseIndex:
                 v = str(value)[:10]
                 mask &= self._has_date & (self._date_start <= v) & (self._date_end >= v)
             elif key == "participants":
-                names = [str(x).lower() for x in (value if isinstance(value, list) else [value]) if str(x).strip()]
+                names = [
+                    str(x).lower()
+                    for x in (value if isinstance(value, list) else [value])
+                    if str(x).strip()
+                ]
                 people = self._people_text()
-                mask &= np.fromiter((any(nm in people[i] for nm in names) for i in range(n)), bool, n)
+                mask &= np.fromiter(
+                    (any(nm in people[i] for nm in names) for i in range(n)), bool, n
+                )
             elif key in ("author", "last_modified_by"):
                 names = [str(x).lower() for x in (value if isinstance(value, list) else [value])]
                 col = [str(p.meta.get(key) or "").lower() for p in self.parts]
@@ -409,7 +436,9 @@ def load(case_id: str) -> CaseIndex:
         if line.strip()
     ]
     idx = CaseIndex(case_id, root, manifest, parts)
-    logger.info(f"케이스 색인 로드: {case_id} ({idx.n_units}단위/{idx.n_parts}파트, {time.monotonic() - t0:.1f}s)")
+    logger.info(
+        f"케이스 색인 로드: {case_id} ({idx.n_units}단위/{idx.n_parts}파트, {time.monotonic() - t0:.1f}s)"
+    )
     with _cache_lock:
         _cache[case_id] = (stamp, idx)
         _cache.move_to_end(case_id)
@@ -474,8 +503,7 @@ def reusable_vectors(case_id: str, profile: str) -> dict[tuple[str, str], np.nda
         return {}
     header = bool(meta.get("header"))
     return {
-        (p.part_id, input_hash(embed_input(p, header))): mat[i]
-        for i, p in enumerate(idx.parts)
+        (p.part_id, input_hash(embed_input(p, header))): mat[i] for i, p in enumerate(idx.parts)
     }
 
 
@@ -493,7 +521,9 @@ def _write_profile_dir(pdir: Path, profile: str, pv: ProfileVectors) -> None:
         "normalized": True,
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
-    (pdir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    (pdir / "meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def _swap_dir(tmp: Path, final: Path) -> None:
@@ -545,12 +575,16 @@ def write_index(
                     f.write(json.dumps(p.to_dict(), ensure_ascii=False) + "\n")
 
             for header, name in ((True, "hdr.pkl"), (False, "nohdr.pkl")):
-                BM25Index.from_texts([embed_input(p, header) for p in parts]).save(tmp / "bm25" / name)
+                BM25Index.from_texts([embed_input(p, header) for p in parts]).save(
+                    tmp / "bm25" / name
+                )
             t_bm25 = time.monotonic() - t0
 
             for profile, pv in profiles.items():
                 if pv.vectors.shape[0] != len(parts):
-                    raise ValueError(f"프로필 {profile} 행 수 {pv.vectors.shape[0]} ≠ 파트 수 {len(parts)}")
+                    raise ValueError(
+                        f"프로필 {profile} 행 수 {pv.vectors.shape[0]} ≠ 파트 수 {len(parts)}"
+                    )
                 _write_profile_dir(tmp / "profiles" / profile, profile, pv)
 
             if keep_profiles and final.exists():
@@ -597,11 +631,15 @@ def _carry_profile(case_id: str, profile: str, parts: list[UnitPart]) -> Profile
     for p in parts:
         v = reuse.get((p.part_id, input_hash(embed_input(p, header))))
         if v is None:
-            logger.info(f"프로필 {profile}: 새 파트가 있어 유지하지 않음 (build_profiles로 다시 생성)")
+            logger.info(
+                f"프로필 {profile}: 새 파트가 있어 유지하지 않음 (build_profiles로 다시 생성)"
+            )
             return None
         rows.append(v)
     meta = load(case_id).profile_meta(profile)
-    return ProfileVectors(np.stack(rows) if rows else np.zeros((0, 0), np.float16), meta["embed_model"])
+    return ProfileVectors(
+        np.stack(rows) if rows else np.zeros((0, 0), np.float16), meta["embed_model"]
+    )
 
 
 def write_profile(case_id: str, profile: str, pv: ProfileVectors) -> None:
@@ -614,7 +652,9 @@ def write_profile(case_id: str, profile: str, pv: ProfileVectors) -> None:
     with _write_lock:
         idx = load(case_id)
         if pv.vectors.shape[0] != idx.n_parts:
-            raise ValueError(f"프로필 {profile} 행 수 {pv.vectors.shape[0]} ≠ 파트 수 {idx.n_parts}")
+            raise ValueError(
+                f"프로필 {profile} 행 수 {pv.vectors.shape[0]} ≠ 파트 수 {idx.n_parts}"
+            )
         pdir = idx.root / "profiles"
         tmp = pdir / f".tmp_{profile}_{int(time.time() * 1000)}"
         try:

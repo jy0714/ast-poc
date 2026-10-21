@@ -301,9 +301,7 @@ class TestEmbedAsyncControl:
         cancel.set()  # 시작 전에 set → 모든 배치가 cancel로 처리됨
 
         service = EmbeddingService()
-        result = await service.embed_texts_async(
-            ["a", "b", "c"], cancel_event=cancel
-        )
+        result = await service.embed_texts_async(["a", "b", "c"], cancel_event=cancel)
         assert all(v == [] for v in result)
         for idx in service._last_failed_indices:
             assert service._last_failed_diagnostics[idx]["error_type"] == "cancelled"
@@ -331,8 +329,12 @@ class TestRetryPolicy:
             t_start = time.monotonic()
             with pytest.raises(ConnectionError) as exc:
                 await service._embed_batch_with_retry_async(
-                    client, "http://x/api/embed", ["text"], 1,
-                    deadline=t_start + 60, cancel_event=None,
+                    client,
+                    "http://x/api/embed",
+                    ["text"],
+                    1,
+                    deadline=t_start + 60,
+                    cancel_event=None,
                 )
             elapsed = time.monotonic() - t_start
             # timeout은 재시도 0회 → 1초 미만에 실패해야 함
@@ -355,7 +357,8 @@ class TestRetryPolicy:
             call_count["n"] += 1
             req = httpx.Request("POST", "http://x")
             raise httpx.HTTPStatusError(
-                "500", request=req,
+                "500",
+                request=req,
                 response=httpx.Response(500, request=req),
             )
 
@@ -364,8 +367,12 @@ class TestRetryPolicy:
             t_start = time.monotonic()
             with pytest.raises(ConnectionError) as exc:
                 await service._embed_batch_with_retry_async(
-                    client, "http://x/api/embed", ["text"], 1,
-                    deadline=t_start + 60, cancel_event=None,
+                    client,
+                    "http://x/api/embed",
+                    ["text"],
+                    1,
+                    deadline=t_start + 60,
+                    cancel_event=None,
                 )
             elapsed = time.monotonic() - t_start
             # 5xx 1회 재시도 + 2초 대기 → 2~3초 사이
@@ -387,7 +394,8 @@ class TestRetryPolicy:
             call_count["n"] += 1
             req = httpx.Request("POST", "http://x")
             raise httpx.HTTPStatusError(
-                "400", request=req,
+                "400",
+                request=req,
                 response=httpx.Response(400, request=req),
             )
 
@@ -395,8 +403,12 @@ class TestRetryPolicy:
             monkeypatch.setattr(client, "post", fake_post)
             with pytest.raises(ConnectionError) as exc:
                 await service._embed_batch_with_retry_async(
-                    client, "http://x/api/embed", ["text"], 1,
-                    deadline=999999999, cancel_event=None,
+                    client,
+                    "http://x/api/embed",
+                    ["text"],
+                    1,
+                    deadline=999999999,
+                    cancel_event=None,
                 )
             assert call_count["n"] == 1
             assert exc.value._embed_error_type == "http_4xx"
@@ -427,7 +439,8 @@ class TestSubdivideDepthLimit:
         async with httpx.AsyncClient() as client:
             monkeypatch.setattr(client, "post", always_timeout)
             await service._embed_with_subdivide_async(
-                client, "http://x/api/embed",
+                client,
+                "http://x/api/embed",
                 indices=[0, 1, 2, 3],
                 batch=["a", "b", "c", "d"],
                 batch_num=1,
@@ -444,9 +457,7 @@ class TestSubdivideDepthLimit:
         assert sorted(failed) == [0, 1, 2, 3]
         # 진단: depth 도달 또는 timeout으로 분류
         for i in failed:
-            assert diag[i]["error_type"] in (
-                "subdivide_exhausted", "timeout"
-            )
+            assert diag[i]["error_type"] in ("subdivide_exhausted", "timeout")
 
 
 # === v4: Qwen3 질의 지시문 / 정규화 / num_ctx / 가짜 모델 (지시서 §5.3, §5.10) ===
@@ -545,7 +556,9 @@ class TestFakeEmbedding:
 
         monkeypatch.setattr(settings, "ast_fake_models", True)
         monkeypatch.setattr(settings, "embed_dim", 64)
-        service = EmbeddingService(model="qwen3-embedding:4b-q8_0", base_url="http://localhost:19876")
+        service = EmbeddingService(
+            model="qwen3-embedding:4b-q8_0", base_url="http://localhost:19876"
+        )
         v1 = service.embed_texts(["payment approval March"])[0]
         v2 = service.embed_texts(["payment approval March"])[0]
         assert v1 == v2 and len(v1) == 64

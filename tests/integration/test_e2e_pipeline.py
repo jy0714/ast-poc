@@ -44,6 +44,7 @@ def env(tmp_path, monkeypatch):
     db_url = f"sqlite:///{db_path}"
 
     from src.db.database import reset_globals
+
     reset_globals()
 
     store = CaseStore(db_url=db_url)
@@ -356,7 +357,9 @@ class TestSearchQuality:
 
     def test_keyword_search(self):
         """BM25 단독 — '비용 승인'으로 감사보고서가 1위"""
-        res = retrieve(self.case_id, "비용 승인 프로세스", RetrievalConfig(use_dense=False, rerank=False))
+        res = retrieve(
+            self.case_id, "비용 승인 프로세스", RetrievalConfig(use_dense=False, rerank=False)
+        )
         assert res.hits
         idx = case_index.load(self.case_id)
         assert "비용" in idx.unit_text(res.hits[0].unit_id)
@@ -365,8 +368,9 @@ class TestSearchQuality:
         """참여자 이름 검색 + 참여자 필터"""
         res = retrieve(self.case_id, "홍길동", RetrievalConfig(rerank=False))
         assert len(res.hits) > 0
-        filtered = retrieve(self.case_id, "감사", RetrievalConfig(rerank=False),
-                            filters={"source_type": "email"})
+        filtered = retrieve(
+            self.case_id, "감사", RetrievalConfig(rerank=False), filters={"source_type": "email"}
+        )
         assert [h.unit_id[:3] for h in filtered.hits] == ["em:"]
 
     def test_full_retrieval_ladder(self):

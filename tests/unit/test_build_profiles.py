@@ -22,10 +22,14 @@ def _env(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "index_dir", str(tmp_path / "index"))
     monkeypatch.setattr(settings, "ollama_embed_model", "qwen3-embedding:4b-q8_0")
     case_index._cache.clear()
-    parts = [UnitPart(f"em:{i}#1", f"em:{i}", "email", f"[이메일] 제목{i}", f"본문 {i} 내용", 3, {})
-             for i in range(5)]
+    parts = [
+        UnitPart(f"em:{i}#1", f"em:{i}", "email", f"[이메일] 제목{i}", f"본문 {i} 내용", 3, {})
+        for i in range(5)
+    ]
     vecs = np.array([fake_embed(embed_input(p, True), DIM) for p in parts])
-    case_index.write_index("c1", parts, {"hdr-qwen3": ProfileVectors(vecs, "qwen3-embedding:4b-q8_0")})
+    case_index.write_index(
+        "c1", parts, {"hdr-qwen3": ProfileVectors(vecs, "qwen3-embedding:4b-q8_0")}
+    )
     yield
     case_index._cache.clear()
 
@@ -56,7 +60,9 @@ def test_failure_does_not_write_profile():
             return out
 
     with pytest.raises(ProfileBuildError):
-        build_profile("c1", "nohdr-qwen3", batch=10, embedder=Failing(model="qwen3-embedding:4b-q8_0"))
+        build_profile(
+            "c1", "nohdr-qwen3", batch=10, embedder=Failing(model="qwen3-embedding:4b-q8_0")
+        )
     assert case_index.load("c1").profiles() == ["hdr-qwen3"]
 
 
@@ -71,7 +77,9 @@ def test_failure_keeps_checkpoint_and_retry_reuses_it(tmp_path):
             return out
 
     with pytest.raises(ProfileBuildError):
-        build_profile("c1", "nohdr-qwen3", batch=10, embedder=Failing(model="qwen3-embedding:4b-q8_0"))
+        build_profile(
+            "c1", "nohdr-qwen3", batch=10, embedder=Failing(model="qwen3-embedding:4b-q8_0")
+        )
     assert list(cache_dir("c1", "nohdr-qwen3").glob("shard_*.npz"))
 
     progress = tmp_path / "p.json"
@@ -83,10 +91,14 @@ def test_failure_keeps_checkpoint_and_retry_reuses_it(tmp_path):
 
 def test_empty_body_gets_zero_vector():
     """본문 없는 메일(헤더만) → nohdr 입력이 빈 문자열 → 실패가 아니라 영벡터 행"""
-    parts = [UnitPart("em:a#1", "em:a", "email", "[이메일] 제목a", "", 0, {}),
-             UnitPart("em:b#1", "em:b", "email", "[이메일] 제목b", "본문 b", 2, {})]
+    parts = [
+        UnitPart("em:a#1", "em:a", "email", "[이메일] 제목a", "", 0, {}),
+        UnitPart("em:b#1", "em:b", "email", "[이메일] 제목b", "본문 b", 2, {}),
+    ]
     vecs = np.array([fake_embed(embed_input(p, True), DIM) for p in parts])
-    case_index.write_index("c2", parts, {"hdr-qwen3": ProfileVectors(vecs, "qwen3-embedding:4b-q8_0")})
+    case_index.write_index(
+        "c2", parts, {"hdr-qwen3": ProfileVectors(vecs, "qwen3-embedding:4b-q8_0")}
+    )
     info = build_profile("c2", "nohdr-qwen3", batch=4)
     assert info["empty_input"] == 1 and info["embedded"] == 1
     mat = case_index.load("c2").dense("nohdr-qwen3").astype(np.float32)

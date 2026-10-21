@@ -36,8 +36,14 @@ class _NoOcr:
 def builder(monkeypatch: pytest.MonkeyPatch) -> UnitBuilder:
     parser = DocumentParser(ocr_languages="eng")
     monkeypatch.setattr(parser, "_get_ocr_engine", lambda: _NoOcr())
-    return UnitBuilder("case1", counter=COUNTER, max_part_tokens=500, doc_parser=parser,
-                       clean_enabled=True, gap_minutes=30)
+    return UnitBuilder(
+        "case1",
+        counter=COUNTER,
+        max_part_tokens=500,
+        doc_parser=parser,
+        clean_enabled=True,
+        gap_minutes=30,
+    )
 
 
 def _docx_bytes(author: str, modifier: str) -> bytes:
@@ -78,8 +84,10 @@ def _pdf_bytes(author: str) -> bytes:
     return data
 
 
-def _eml_bytes(attachments: list[tuple[str, bytes, tuple[str, str]]] | None = None,
-               message_id: str = "<H1@x.com>") -> bytes:
+def _eml_bytes(
+    attachments: list[tuple[str, bytes, tuple[str, str]]] | None = None,
+    message_id: str = "<H1@x.com>",
+) -> bytes:
     m = PyEmail()
     m["From"] = "홍길동 <gd@x.com>"
     m["To"] = "김철수 <cs@x.com>"
@@ -103,24 +111,43 @@ def _write(root: Path, rel: str, data: bytes) -> Path:
 
 
 def test_document_header_full_and_omits_empty():
-    meta = {"filename": "정산기준_v3.docx", "page_kind": "page", "page": 3, "page_count": 12,
-            "author": "홍길동", "last_modified_by": "박민수", "last_modified": "2024-02-28T10:00:00"}
+    meta = {
+        "filename": "정산기준_v3.docx",
+        "page_kind": "page",
+        "page": 3,
+        "page_count": 12,
+        "author": "홍길동",
+        "last_modified_by": "박민수",
+        "last_modified": "2024-02-28T10:00:00",
+    }
     assert document_header(meta) == (
         "[문서] 정산기준_v3.docx | 3/12쪽 | 작성자: 홍길동 | 최종 수정자: 박민수 | 수정일: 2024-02-28"
     )
     # 최종 수정자 없음(PDF) → 필드 생략, 구분자도 남지 않는다
     meta.pop("last_modified_by")
-    assert document_header(meta) == "[문서] 정산기준_v3.docx | 3/12쪽 | 작성자: 홍길동 | 수정일: 2024-02-28"
+    assert (
+        document_header(meta)
+        == "[문서] 정산기준_v3.docx | 3/12쪽 | 작성자: 홍길동 | 수정일: 2024-02-28"
+    )
     assert document_header({"filename": "a.txt"}) == "[문서] a.txt"
 
 
 def test_attachment_header_order_with_parent():
-    meta = {"filename": "견적서.xlsx", "page_kind": "page", "page": 2, "page_count": 3,
-            "author": "김철수", "last_modified_by": "김철수", "parent_unit_id": "em:0",
-            "parent_date": "2024-03-05T05:22:00+00:00", "parent_sender": "홍길동",
-            "parent_recipients": ["김철수", "이영희"], "parent_subject": "RE: 3월 정산 건"}
+    meta = {
+        "filename": "견적서.xlsx",
+        "page_kind": "page",
+        "page": 2,
+        "page_count": 3,
+        "author": "김철수",
+        "last_modified_by": "김철수",
+        "parent_unit_id": "em:0",
+        "parent_date": "2024-03-05T05:22:00+00:00",
+        "parent_sender": "홍길동",
+        "parent_recipients": ["김철수", "이영희"],
+        "parent_subject": "RE: 3월 정산 건",
+    }
     assert attachment_header(meta) == (
-        '[첨부] 견적서.xlsx | 2/3쪽 | 작성자: 김철수 | 최종 수정자: 김철수 | '
+        "[첨부] 견적서.xlsx | 2/3쪽 | 작성자: 김철수 | 최종 수정자: 김철수 | "
         '부모 메일: 2024-03-05 홍길동→김철수 외 1명 "RE: 3월 정산 건"'
     )
     # 부모 없는 첨부·빈 작성자 → 해당 필드 모두 생략
@@ -129,14 +156,29 @@ def test_attachment_header_order_with_parent():
 
 def test_email_and_chat_limits():
     names = [f"사람{i}" for i in range(7)]
-    h = email_header({"date": "2024-03-05T05:22:00+00:00", "sender_name": "홍길동",
-                      "recipient_names": names, "cc": [], "subject": "",
-                      "attachment_filenames": [f"f{i}.pdf" for i in range(6)]})
-    assert h == ("[이메일] 2024-03-05 14:22 | 보낸이: 홍길동 | "
-                 "받는이: 사람0, 사람1, 사람2, 사람3, 사람4 외 2명 | "
-                 "첨부: f0.pdf, f1.pdf, f2.pdf, f3.pdf, f4.pdf 외 1건")
-    c = chat_header({"date": "2024-03-05T05:00:00+00:00", "date_end": "2024-03-05T05:47:00+00:00",
-                     "participants": names[:6], "room": ""})
+    h = email_header(
+        {
+            "date": "2024-03-05T05:22:00+00:00",
+            "sender_name": "홍길동",
+            "recipient_names": names,
+            "cc": [],
+            "subject": "",
+            "attachment_filenames": [f"f{i}.pdf" for i in range(6)],
+        }
+    )
+    assert h == (
+        "[이메일] 2024-03-05 14:22 | 보낸이: 홍길동 | "
+        "받는이: 사람0, 사람1, 사람2, 사람3, 사람4 외 2명 | "
+        "첨부: f0.pdf, f1.pdf, f2.pdf, f3.pdf, f4.pdf 외 1건"
+    )
+    c = chat_header(
+        {
+            "date": "2024-03-05T05:00:00+00:00",
+            "date_end": "2024-03-05T05:47:00+00:00",
+            "participants": names[:6],
+            "room": "",
+        }
+    )
     assert c == "[채팅] 2024-03-05 14:00~14:47 | 참여자: 사람0, 사람1, 사람2, 사람3, 사람4 외 1명"
 
 
@@ -161,7 +203,9 @@ def test_xlsx_attachment_header(builder: UnitBuilder, tmp_path: Path):
     eml = _eml_bytes([("견적서.xlsx", _xlsx_bytes("김철수", "이영희"), XLSX_MIME)])
     units = builder.build_file(_write(tmp_path, "m.eml", eml), "m.eml")
     att = [u for u in units if u.unit_type == "attachment"][0]
-    assert att.header.startswith("[첨부] 견적서.xlsx | 시트 견적 2~2행 | 작성자: 김철수 | 최종 수정자: 이영희 | 부모 메일: ")
+    assert att.header.startswith(
+        "[첨부] 견적서.xlsx | 시트 견적 2~2행 | 작성자: 김철수 | 최종 수정자: 이영희 | 부모 메일: "
+    )
 
 
 # ─────────────── T3: 재색인 결정성 + qrels 적용 ───────────────
@@ -194,9 +238,16 @@ def fake_env(monkeypatch: pytest.MonkeyPatch):
 
 def _corpus(root: Path) -> Path:
     src = root / "src"
-    _write(src, "kim/Inbox/a.eml", _eml_bytes(
-        [("견적서.xlsx", _xlsx_bytes("김철수", "이영희"), XLSX_MIME),
-         ("규정.pdf", _pdf_bytes("작성자P"), ("application", "pdf"))]))
+    _write(
+        src,
+        "kim/Inbox/a.eml",
+        _eml_bytes(
+            [
+                ("견적서.xlsx", _xlsx_bytes("김철수", "이영희"), XLSX_MIME),
+                ("규정.pdf", _pdf_bytes("작성자P"), ("application", "pdf")),
+            ]
+        ),
+    )
     _write(src, "kim/Inbox/b.eml", _eml_bytes(message_id="<H2@x.com>"))
     _write(src, "docs/r.docx", _docx_bytes("작성자A", "수정자B"))
     _write(src, "docs/n.txt", "메모 본문 내용 ".encode() * 30)

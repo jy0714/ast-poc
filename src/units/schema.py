@@ -16,7 +16,9 @@ from typing import Any
 UNIT_TYPES = ("email", "chat", "document", "attachment")
 
 # 단위 생성 규칙 버전 — 규칙(정제·분할·헤더·ID)이 바뀌면 올린다. 처리 캐시 키에 쓰인다.
-UNIT_RULES_VERSION = "units-v3"  # v3: 광고 메일 제외 / v2: 문서·첨부 헤더에 작성자·최종 수정자 (v4.2 U1)
+UNIT_RULES_VERSION = (
+    "units-v3"  # v3: 광고 메일 제외 / v2: 문서·첨부 헤더에 작성자·최종 수정자 (v4.2 U1)
+)
 
 
 @dataclass

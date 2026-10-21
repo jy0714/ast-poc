@@ -48,20 +48,51 @@ _WROTE_LINES = [
 # ── 줄 맨 앞 헤더 레이블 (콜론은 전각 포함) ──
 _HEADER_LABELS = [
     # en
-    "From", "Sent", "To", "Cc", "Subject", "Date",
+    "From",
+    "Sent",
+    "To",
+    "Cc",
+    "Subject",
+    "Date",
     # ko
-    "보낸 사람", "받는 사람", "보낸 날짜", "참조", "제목",
+    "보낸 사람",
+    "받는 사람",
+    "보낸 날짜",
+    "참조",
+    "제목",
     # cs
-    "Od", "Odesláno", "Komu", "Kopie", "Předmět",
+    "Od",
+    "Odesláno",
+    "Komu",
+    "Kopie",
+    "Předmět",
     # es
-    "De", "Enviado", "Enviado el", "Para", "CC", "Asunto",
+    "De",
+    "Enviado",
+    "Enviado el",
+    "Para",
+    "CC",
+    "Asunto",
     # de
-    "Von", "Gesendet", "An", "Betreff",
+    "Von",
+    "Gesendet",
+    "An",
+    "Betreff",
     # fr
-    "Envoyé", "À", "Objet",
+    "Envoyé",
+    "À",
+    "Objet",
     # zh-CN / zh-TW
-    "发件人", "发送时间", "收件人", "抄送", "主题",
-    "寄件者", "寄件日期", "收件者", "副本", "主旨",
+    "发件人",
+    "发送时间",
+    "收件人",
+    "抄送",
+    "主题",
+    "寄件者",
+    "寄件日期",
+    "收件者",
+    "副本",
+    "主旨",
 ]
 
 # ── 4) 서명·면책 문구 (feat/search-quality clean_email_body에서 이관) ──
@@ -83,9 +114,7 @@ _DISCLAIMER_PATTERNS = [
 ]
 
 # ── 2) 전달 접두어 (대소문자·전각 콜론 무시) ──
-_FORWARD_SUBJECT_RE = re.compile(
-    r"^\s*(?:fw|fwd|전달|转发|轉寄|rv|př|wg)\s*[:：]", re.IGNORECASE
-)
+_FORWARD_SUBJECT_RE = re.compile(r"^\s*(?:fw|fwd|전달|转发|轉寄|rv|př|wg)\s*[:：]", re.IGNORECASE)
 
 _SEP_RE = re.compile("|".join(_SEPARATORS), re.IGNORECASE | re.MULTILINE)
 _WROTE_RE = re.compile("|".join(_WROTE_LINES), re.IGNORECASE | re.MULTILINE)

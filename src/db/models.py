@@ -36,7 +36,9 @@ class CaseModel(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(20), default="created")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.now, onupdate=datetime.now
+    )
     pst_paths: Mapped[str] = mapped_column(Text, default="[]")  # JSON 직렬화
     doc_paths: Mapped[str] = mapped_column(Text, default="[]")  # JSON 직렬화
     total_documents: Mapped[int] = mapped_column(Integer, default=0)
@@ -45,8 +47,12 @@ class CaseModel(Base):
     error_message: Mapped[str] = mapped_column(Text, default="")
 
     # Relationships
-    indexing_logs: Mapped[list[IndexingLogModel]] = relationship(back_populates="case", cascade="all, delete-orphan")
-    chat_histories: Mapped[list[ChatHistoryModel]] = relationship(back_populates="case", cascade="all, delete-orphan")
+    indexing_logs: Mapped[list[IndexingLogModel]] = relationship(
+        back_populates="case", cascade="all, delete-orphan"
+    )
+    chat_histories: Mapped[list[ChatHistoryModel]] = relationship(
+        back_populates="case", cascade="all, delete-orphan"
+    )
 
 
 class IndexingLogModel(Base):
@@ -55,10 +61,14 @@ class IndexingLogModel(Base):
     __tablename__ = "indexing_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    case_id: Mapped[str] = mapped_column(String(12), ForeignKey("cases.case_id", ondelete="CASCADE"))
+    case_id: Mapped[str] = mapped_column(
+        String(12), ForeignKey("cases.case_id", ondelete="CASCADE")
+    )
     started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    status: Mapped[str] = mapped_column(String(20), default="running")  # running, completed, error, cancelled
+    status: Mapped[str] = mapped_column(
+        String(20), default="running"
+    )  # running, completed, error, cancelled
     total_files: Mapped[int] = mapped_column(Integer, default=0)
     processed_files: Mapped[int] = mapped_column(Integer, default=0)
     total_chunks: Mapped[int] = mapped_column(Integer, default=0)
@@ -75,7 +85,9 @@ class ChatHistoryModel(Base):
     __tablename__ = "chat_history"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    case_id: Mapped[str] = mapped_column(String(12), ForeignKey("cases.case_id", ondelete="CASCADE"))
+    case_id: Mapped[str] = mapped_column(
+        String(12), ForeignKey("cases.case_id", ondelete="CASCADE")
+    )
     question: Mapped[str] = mapped_column(Text, nullable=False)
     answer: Mapped[str] = mapped_column(Text, default="")
     security_mode: Mapped[int] = mapped_column(Integer, default=1)  # 1=on, 0=off
@@ -86,7 +98,9 @@ class ChatHistoryModel(Base):
 
     # Relationships
     case: Mapped[CaseModel] = relationship(back_populates="chat_histories")
-    sources: Mapped[list[ChatSourceModel]] = relationship(back_populates="chat", cascade="all, delete-orphan")
+    sources: Mapped[list[ChatSourceModel]] = relationship(
+        back_populates="chat", cascade="all, delete-orphan"
+    )
 
 
 class ChatSourceModel(Base):
