@@ -11,13 +11,19 @@
 같은 파트·같은 입력의 기존 벡터가 그 프로필에 있으면 재사용한다. 임베딩에 영구 실패한 파트가
 하나라도 있으면 프로필을 쓰지 않고 실패한다(행렬은 모든 파트를 덮어야 한다).
 
+새로 만든 벡터는 인덱싱과 같은 임베딩 체크포인트(data/embed_cache/{case_id}/{profile}/)에 바로
+쌓는다. 중단·실패 후 다시 실행하면 체크포인트를 재사용해 남은 파트만 임베딩하고, 프로필을 쓴 뒤 지운다.
+--progress 를 주면 진행 건수(본문 없음)를 JSON으로 갱신한다.
+
 사용:
-    python -m scripts.build_profiles <case_id> --profiles nohdr-qwen3 hdr-bgem3 [--batch 64]
+    python -m scripts.build_profiles <case_id> --profiles nohdr-qwen3 hdr-bgem3 [--batch 64] [--progress p.json]
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -36,6 +42,7 @@ from src.index.case_index import (  # noqa: E402
     input_hash,
     profile_spec,
 )
+from src.index.embed_cache import EmbedCheckpoint  # noqa: E402
 from src.utils.config import settings  # noqa: E402
 from src.utils.logger import get_logger  # noqa: E402
 
@@ -46,7 +53,23 @@ class ProfileBuildError(Exception):
     """프로필 행렬을 다 채우지 못함"""
 
 
-def build_profile(case_id: str, profile: str, batch: int, embedder: EmbeddingService | None = None) -> dict:
+def _write_progress(path: Path | None, **counts: object) -> None:
+    """진행 건수 JSON을 원자적으로 갱신 (본문·식별자 없음)"""
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({**counts, "updated": time.strftime("%Y-%m-%d %H:%M:%S")}), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def build_profile(
+    case_id: str,
+    profile: str,
+    batch: int,
+    embedder: EmbeddingService | None = None,
+    progress_path: Path | None = None,
+) -> dict:
     """프로필 하나를 만들어 색인에 쓴다
 
     Args:
@@ -54,17 +77,20 @@ def build_profile(case_id: str, profile: str, batch: int, embedder: EmbeddingSer
         profile: 프로필 이름
         batch: embed_texts 1회 호출당 텍스트 수
         embedder: 임베딩 서비스 (테스트 주입용, 기본은 프로필 모델)
+        progress_path: 진행 건수 JSON 경로 (None이면 쓰지 않음)
 
     Returns:
         {profile, n_parts, embedded, reused, empty_input, seconds}
 
     Raises:
-        ProfileBuildError: 영구 실패 파트가 있을 때
+        ProfileBuildError: 영구 실패 파트가 있을 때 (체크포인트는 남겨 재실행 시 재사용)
     """
     spec = profile_spec(profile)
     idx = case_index.load(case_id)
     embedder = embedder or EmbeddingService(model=spec.embed_model)
     reuse = case_index.reusable_vectors(case_id, profile)
+    ckpt = EmbedCheckpoint(case_id, profile, spec.embed_model)
+    reuse.update(ckpt.load())
     texts = [embed_input(p, spec.header) for p in idx.parts]
     rows: list[np.ndarray | None] = [
         reuse.get((p.part_id, input_hash(t))) for p, t in zip(idx.parts, texts, strict=True)
@@ -78,18 +104,32 @@ def build_profile(case_id: str, profile: str, batch: int, embedder: EmbeddingSer
     todo = [i for i, r in enumerate(rows) if r is None]
     t0 = time.monotonic()
     failed: list[int] = []
-    for s in range(0, len(todo), batch):
-        chunk = todo[s : s + batch]
-        vecs = embedder.embed_texts([texts[i] for i in chunk])
-        bad = set(embedder._last_failed_indices)
-        for j, i in enumerate(chunk):
-            if j in bad or not vecs[j]:
-                failed.append(i)
-            else:
-                rows[i] = np.asarray(vecs[j], dtype=np.float16)
-        done = min(s + batch, len(todo))
-        if done == len(todo) or (s // batch) % 20 == 0:
-            logger.info(f"[{profile}] 임베딩 {done:,}/{len(todo):,} ({time.monotonic() - t0:.0f}s)")
+    _write_progress(progress_path, profile=profile, n_parts=idx.n_parts, todo=len(todo), done=0, failed=0,
+                    seconds=0.0)
+    try:
+        for s in range(0, len(todo), batch):
+            chunk = todo[s : s + batch]
+            vecs = embedder.embed_texts([texts[i] for i in chunk])
+            bad = set(embedder._last_failed_indices)
+            new_keys: list[tuple[str, str]] = []
+            new_vecs: list[np.ndarray] = []
+            for j, i in enumerate(chunk):
+                if j in bad or not vecs[j]:
+                    failed.append(i)
+                else:
+                    rows[i] = np.asarray(vecs[j], dtype=np.float16)
+                    new_keys.append((idx.parts[i].part_id, input_hash(texts[i])))
+                    new_vecs.append(rows[i])
+            ckpt.add(new_keys, new_vecs)
+            done = min(s + batch, len(todo))
+            elapsed = time.monotonic() - t0
+            _write_progress(progress_path, profile=profile, n_parts=idx.n_parts, todo=len(todo), done=done,
+                            failed=len(failed), seconds=round(elapsed, 1))
+            if done == len(todo) or (s // batch) % 20 == 0:
+                logger.info(f"[{profile}] 임베딩 {done:,}/{len(todo):,} ({elapsed:.0f}s)")
+    finally:
+        # 중단·실패해도 그때까지의 벡터는 남긴다 (재실행 시 재사용)
+        ckpt.flush()
     if failed:
         raise ProfileBuildError(
             f"프로필 {profile}: {len(failed)}개 파트 임베딩 실패 (예: {idx.parts[failed[0]].part_id}). "
@@ -98,6 +138,7 @@ def build_profile(case_id: str, profile: str, batch: int, embedder: EmbeddingSer
     dim = embedder.get_dimension()
     mat = np.stack(rows) if rows else np.zeros((0, dim), dtype=np.float16)  # type: ignore[arg-type]
     case_index.write_profile(case_id, profile, ProfileVectors(mat, spec.embed_model))
+    ckpt.clear()  # 프로필에 다 들어갔으므로 다음 실행은 프로필에서 재사용한다
     return {
         "profile": profile,
         "n_parts": idx.n_parts,
@@ -114,15 +155,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("case_id")
     ap.add_argument("--profiles", nargs="+", required=True, choices=PROFILE_NAMES)
     ap.add_argument("--batch", type=int, default=settings.embed_batch_size * max(1, settings.embed_max_concurrent))
+    ap.add_argument("--progress", type=Path, default=None, help="진행 건수 JSON 경로 (프로필 이름이 붙는다)")
     args = ap.parse_args(argv)
 
     code = 0
     for profile in args.profiles:
+        progress = args.progress.with_name(f"{args.progress.stem}_{profile}.json") if args.progress else None
         try:
-            info = build_profile(args.case_id, profile, args.batch)
+            info = build_profile(args.case_id, profile, args.batch, progress_path=progress)
             logger.info(f"프로필 완료: {info}")
+            _write_progress(progress, status="completed", **info)
         except Exception as e:
             logger.error(f"프로필 {profile} 실패: {e}")
+            _write_progress(progress, status="failed", profile=profile, error_type=type(e).__name__)
             code = 1
     return code
 

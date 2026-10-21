@@ -79,9 +79,9 @@ def test_stats_tables():
     assert t6["이메일"]["tokens"]["max"] == 2548
     # U1: 문서·첨부 3개 중 작성자 2, 최종 수정자 2
     assert s["meta_fill"]["계"] == {"n": 3, "author": 2, "modifier": 2}
-    # U2·S5: und 별도 행, 기타 = cs
+    # v4.4 §8: 한국어·영어·현지 언어(합산)·계, und 는 집계 메모
     t7 = s["table7"]
-    assert t7["und"]["units"] == 1 and t7["기타"]["units"] == 1 and t7["중국어"] == {"units": 1, "mixed": 1}
+    assert t7["und"]["units"] == 1 and t7["현지 언어(합산)"] == {"units": 2, "mixed": 1}
     assert t7["계"]["units"] == 7
     # S2: 본문 2048 이하 이메일 2개(em:1, em:2), 헤더 포함은 em:1만
     assert s["s2"]["body_le_2048"] == 2 and s["s2"]["with_header_le_2048"] == 1
@@ -92,7 +92,8 @@ def test_stats_tables():
     assert s["excluded_grouped"] == {"이미지": 3, "HWP": 1, "DWG": 1, "판별 불가": 2, "기타 형식": 1}
     assert s["forwarded"]["count"] == 1 and s["duplicates_removed"] == {"email": 4}
     md = render_t1(s)
-    for needle in ("[표 6]", "[표 7]", "판정 불가(und)", "S2", "S3", "S4", "작성자·최종 수정자"):
+    for needle in ("[표 6]", "[표 7]", "현지 언어(합산)", "판정 불가(und)", "ads_removed", "S2", "S3", "S4",
+                   "작성자·최종 수정자"):
         assert needle in md
 
 

@@ -33,7 +33,8 @@ QUERY_TYPE_DEFS = {
 TYPE_NONE = "none"  # search 집합이 아닌 질의의 type (v4.3 §1)
 # 부록 A 지원 분류 → 분석 집합 (v4.3 §1, §3)
 SUPPORT_GROUPS = ("search", "meta", "nonsearch")
-SUPPORT_CLASS_GROUP = {"A": "search", "A′": "search", "C": "meta", "D": "nonsearch", "B": "nonsearch",
+# v4.4 §3: A → A1, A′ → A2
+SUPPORT_CLASS_GROUP = {"A1": "search", "A2": "search", "C": "meta", "D": "nonsearch", "B": "nonsearch",
                        "E": "nonsearch"}
 SUPPORT_CLASSES = tuple(SUPPORT_CLASS_GROUP)
 AREAS = tuple(str(i) for i in range(1, 8))
@@ -66,11 +67,27 @@ class ExperimentConfig:
     latency_runs: list[str]
     primary_subset: str = "search"
     b_queries: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_B_QUERIES))
+    c_queries: dict[str, int] = field(default_factory=dict)  # 판정자 C 질의 수 (v4.4 §9, 비면 C 없음)
     smoke_qids: list[str] = field(default_factory=lambda: list(DEFAULT_SMOKE_QIDS))
     text_max_chars: int = 6000
     latency_warmup: int = 3
     latency_repeats: int = 5
+    labels: dict[str, str] = field(default_factory=dict)  # 하네스 실행 이름 → 논문 번호 (v4.4 §2)
     extra: dict[str, Any] = field(default_factory=dict)
+
+    def label(self, run: str) -> str:
+        """표·보고서에 쓰는 실행 이름 (labels 에 없으면 하네스 이름 그대로)"""
+        return self.labels.get(run, run)
+
+    def runs_by_label(self, runs: list[str] | None = None) -> list[str]:
+        """하네스 실행 이름을 논문 번호 순으로 정렬"""
+        names = list(self.runs) if runs is None else list(runs)
+
+        def _key(r: str) -> tuple[int, str]:
+            digits = "".join(c for c in self.label(r) if c.isdigit())
+            return (int(digits) if digits else 0, self.label(r))
+
+        return sorted(names, key=_key)
 
     @property
     def data_dir(self) -> Path:
@@ -184,20 +201,28 @@ def load_config(path: Path | None = None, root: Path | None = None) -> Experimen
         latency_runs=[str(r) for r in raw.get("latency_runs", [])],
         primary_subset=str(raw.get("primary_subset", "search")),
         b_queries={str(k): int(v) for k, v in (raw.get("b_queries") or DEFAULT_B_QUERIES).items()},
+        c_queries={str(k): int(v) for k, v in (raw.get("c_queries") or {}).items()},
         smoke_qids=[str(q) for q in raw.get("smoke_qids", DEFAULT_SMOKE_QIDS)],
         text_max_chars=int(raw.get("text_max_chars", 6000)),
         latency_warmup=int(raw.get("latency_warmup", 3)),
         latency_repeats=int(raw.get("latency_repeats", 5)),
+        labels={str(k): str(v) for k, v in (raw.get("labels") or {}).items()},
         extra={k: v for k, v in raw.items() if k not in {
             "case_id", "depth", "pool_depth", "seed", "runs", "pool_runs", "comparisons",
-            "latency_runs", "primary_subset", "b_queries", "smoke_qids", "text_max_chars", "latency_warmup",
-            "latency_repeats"}},
+            "latency_runs", "primary_subset", "b_queries", "c_queries", "smoke_qids", "text_max_chars", "latency_warmup",
+            "latency_repeats", "labels"}},
     )
+    bad_labels = set(cfg.labels) - set(runs)
+    if bad_labels:
+        raise ConfigError(f"{path}: labels 에 정의되지 않은 실행 {sorted(bad_labels)}")
+    if len(set(cfg.labels.values())) != len(cfg.labels):
+        raise ConfigError(f"{path}: labels 의 논문 번호가 겹칩니다")
     if cfg.primary_subset not in SUPPORT_GROUPS:
         raise ConfigError(f"{path}: primary_subset 은 {SUPPORT_GROUPS} 중 하나 (입력 {cfg.primary_subset!r})")
-    bad_b = set(cfg.b_queries) - set(SUPPORT_GROUPS)
-    if bad_b:
-        raise ConfigError(f"{path}: b_queries 의 집합 {sorted(bad_b)} 는 {SUPPORT_GROUPS} 가 아닙니다")
+    for key, quota in (("b_queries", cfg.b_queries), ("c_queries", cfg.c_queries)):
+        bad_q = set(quota) - set(SUPPORT_GROUPS)
+        if bad_q:
+            raise ConfigError(f"{path}: {key} 의 집합 {sorted(bad_q)} 는 {SUPPORT_GROUPS} 가 아닙니다")
     used = set(cfg.pool_runs) | set(cfg.latency_runs) | {r for _f, a, b in cfg.comparison_pairs() for r in (a, b)}
     unknown = used - set(runs)
     if unknown:
@@ -238,7 +263,7 @@ class Query:
     target_evidence_lang: str = ""  # v4.3: 빈칸 (증거 언어는 판정 후 등급 2 단위로 정한다)
     source_question: str = ""       # 부록 A 감사인 질문 번호, 예 "1.3"
     area: str = ""                  # 부록 A 영역 1~7
-    support_class: str = ""         # 부록 A 분류 A·A′·C·D·B·E
+    support_class: str = ""         # 부록 A 분류 A1·A2·C·D·B·E
     support_group: str = ""         # 분석 집합 search·meta·nonsearch
 
 

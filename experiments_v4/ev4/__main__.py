@@ -8,8 +8,10 @@
     judgments import <csv...>                판정 가져오기
     judgments agreement                      일치도 + 중재 시트
     judgments finalize                       최종 qrels → data/qrels.txt, T0b
-    evaluate                                 T2~T6·T8 → results/tables.md
-    latency                                  T7 → results/T7_latency.md
+    evaluate                                 T2·사전 비교 4개·T8·언어별 보조 값 → results/tables.md
+    latency                                  응답 시간(v4.4 §5)·답변 생성 → results/T7_latency.md, runs/gen/answers.jsonl
+    judge gen [--no-translate] [--force]     답변 판정 시트(S17) → data/judgments/gen_{A,B,C}*
+    judge g1                                 답변 판정 일치도·협의·G1 → results/G1_generation.md
     failures                                 F1 → results/F1_failures.csv
     env                                      E1 → results/E1_env.md
     selftest [--keep DIR]                    가짜 모델 전체 흐름 점검 (GPU·실데이터 없음)
@@ -43,6 +45,12 @@ def _parser() -> argparse.ArgumentParser:
     js.add_parser("finalize")
     sub.add_parser("evaluate")
     sub.add_parser("latency")
+    p = sub.add_parser("judge")
+    jg = p.add_subparsers(dest="gcmd", required=True)
+    pg = jg.add_parser("gen")
+    pg.add_argument("--no-translate", action="store_true", help="현지어 단위 번역 생략")
+    pg.add_argument("--force", action="store_true", help="이미 있는 판정 시트를 다시 만든다 (판정 내용 삭제)")
+    jg.add_parser("g1")
     sub.add_parser("failures")
     sub.add_parser("env")
     p = sub.add_parser("selftest")
@@ -111,6 +119,13 @@ def main(argv: list[str] | None = None) -> int:
         from ev4.latency import measure
 
         measure(cfg, read_queries(cfg.queries_path, split="test"))
+    elif args.cmd == "judge":
+        from ev4 import gen
+
+        if args.gcmd == "gen":
+            gen.build_gen_sheets(cfg, translate=not args.no_translate, force=args.force)
+        else:
+            gen.g1(cfg)
     elif args.cmd == "failures":
         from ev4.failures import build_failures
 

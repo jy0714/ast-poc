@@ -1,13 +1,16 @@
-"""응답 시간·VRAM·생성 시간 → results/T7_latency.md (지시서 §6.7, §6.8 T7)
+"""응답 시간·VRAM·응답 생성 → results/T7_latency.md, runs/gen/answers.jsonl (지시서 §6.7, v4.4 §4·§5)
 
 - 서비스 조건: 측정 전 세 모델(임베딩·재순위·LLM)을 모두 적재한다.
-- 검색: latency_runs × 평가 질의 전체. 사전 실행 latency_warmup 개 후, 질의마다 실행 순서를
-  무작위로 바꿔 latency_repeats 회 반복. 단계별(timings_ms) p50/p95, 재순위 절단 비율.
-- 생성: 생성 기준 실행(기본 R8) 상위 5개 단위를 컨텍스트로 LLM 응답(1회). 첫 토큰까지·전체 시간·초당 토큰.
+- 검색: latency_runs(v4.4 §5: 논문 R5 = 하네스 R8 하나) × 질문 45개. 사전 실행 latency_warmup 개 후,
+  질의마다 latency_repeats 회 반복(실행이 여럿이면 순서 무작위). 단계별(timings_ms) p50/p95, 재순위 절단 비율.
+- 생성: 생성 기준 실행(기본 R8) 상위 5개 단위를 컨텍스트로 LLM 응답(질의당 1회). 컨텍스트는 서비스와 같은
+  함수(`src.rag.engine.format_part_context` = 대표 파트 → `_format_source_context`)로 만든다(v4.4 §4.1).
+  답변·컨텍스트 단위 ID·인용 번호(서비스 인용 정규식)·인용 → 단위 매핑·모델 태그를
+  runs/gen/answers.jsonl 에 남긴다(P0 — 답변 본문은 원문에 해당). 이 답변이 G1 판정의 입력이다.
+- v4.4 §5 보고 값: 검색 전체 p50/p95, 재순위 p50, 응답 생성 포함 질의당 전체 시간 p50, GPU 최대 사용량
+  (nvidia-smi·torch·ollama ps), 재순위 입력 절단 비율(settings.rerank_max_length 초과).
 - VRAM: 측정 동안 nvidia-smi memory.used 최대치(0.5초 간격), 재순위 프로세스 torch 최대 할당량.
-  서비스 세 모델(생성 기준 실행의 임베딩·재순위 + LLM)만 올린 시점의 값을 따로 기록한다(v4.2 L3):
-  측정 루프에는 비교 실행(R9 bge-m3·bge 재순위기)도 함께 올라오기 때문이다.
-- 단계 이름은 논문 [표 13] 그대로 고정한다(v4.2 L1). 재순위 입력 절단 상한은 settings.rerank_max_length(v4.2 L4).
+  서비스 세 모델만 올린 시점의 값을 따로 기록한다(v4.2 L3).
 - AST_FAKE_MODELS=1 이면 LLM 은 가짜 스트림, GPU 기록은 빈 값.
 """
 
@@ -32,7 +35,6 @@ from src.rag.retrieval import retrieve
 from src.utils.config import settings
 
 GEN_TOP_K = 5
-GEN_UNIT_MAX_CHARS = 4000
 STAGES = ("bm25", "embed_query", "dense", "rrf", "rerank", "total")
 # 논문 [표 13] 단계 이름 (표시 순서 고정, v4.2 L1)
 STAGE_LABELS = (
@@ -111,29 +113,34 @@ def _reset_torch_peak() -> None:
 # ─────────────────────────── 생성 ───────────────────────────
 
 
-async def _fake_stream(prompt: str) -> AsyncIterator[str]:
-    for tok in ("가짜", " 응답", "입니다", "."):
+async def _fake_stream(prompt: str, n_context: int) -> AsyncIterator[str]:
+    """가짜 응답 — 컨텍스트가 있으면 인용 두 개, 없으면 거절 문구"""
+    toks = (("가짜 응답입니다 [출처 1].", " 두 번째 문장입니다 [출처 2].") if n_context
+            else ("자료에서 해당 내용을 찾을 수 없습니다.",))
+    for tok in toks:
         await asyncio.sleep(0)
         yield tok
     del prompt
 
 
 async def _measure_generation(question: str, context: list[str]) -> dict[str, Any]:
-    """첫 토큰까지·전체 시간·출력 토큰 수"""
+    """첫 토큰까지·전체 시간·출력 토큰 수·답변 전문"""
     usage: dict[str, Any] = {}
     t0 = time.perf_counter()
     first: float | None = None
     n_chunks = 0
+    chunks: list[str] = []
     if settings.ast_fake_models:
-        stream = _fake_stream(question)
+        stream = _fake_stream(question, len(context))
     else:
         from src.llm.router import LLMRouter
 
         stream = LLMRouter().generate_stream(question, context, secure_mode=True, on_complete=usage.update)
-    async for _tok in stream:
+    async for tok in stream:
         if first is None:
             first = time.perf_counter()
         n_chunks += 1
+        chunks.append(tok)
     total = time.perf_counter() - t0
     out_tokens = int(usage.get("output_tokens") or n_chunks)
     gen_time = total - ((first or t0) - t0)
@@ -143,6 +150,7 @@ async def _measure_generation(question: str, context: list[str]) -> dict[str, An
         "output_tokens": out_tokens,
         "tokens_per_s": out_tokens / gen_time if gen_time > 0 else float("nan"),
         "token_count_source": "usage" if usage.get("output_tokens") else "chunks",
+        "answer": "".join(chunks),
     }
 
 
@@ -158,13 +166,31 @@ def _memory_snapshot(mon: VramMonitor) -> dict[str, Any]:
             "torch_peak_mib": torch_peak_mib(), "loaded_models": _model_rows(ollama.loaded_models())}
 
 
-def _context(idx: case_index.CaseIndex, unit_ids: list[str]) -> list[str]:
-    out = []
-    for uid in unit_ids[:GEN_TOP_K]:
-        parts = idx.unit_parts(uid)
-        if parts:
-            out.append(f"{parts[0].header}\n\n{idx.unit_text(uid)[:GEN_UNIT_MAX_CHARS]}")
-    return out
+def _context(idx: case_index.CaseIndex, hits: list[Any]) -> tuple[list[str], list[str]]:
+    """상위 GEN_TOP_K 단위 → (단위 ID, 서비스와 같은 컨텍스트 문자열) — 대표 파트(best_part_id) 기준"""
+    from src.rag.engine import format_part_context
+
+    uids: list[str] = []
+    texts: list[str] = []
+    for h in hits[:GEN_TOP_K]:
+        uids.append(h.unit_id)
+        texts.append(format_part_context(idx.part(h.best_part_id), h.score))
+    return uids, texts
+
+
+def answer_record(qid: str, run: str, answer: str, unit_ids: list[str], model: str) -> dict[str, Any]:
+    """답변 기록 한 줄 (v4.4 §4.1) — 인용 번호는 서비스 정규식, 인용 → 단위 ID 매핑"""
+    from src.rag.engine import extract_citations, is_refusal, validate_citations
+
+    cites = extract_citations(answer)
+    count, invalid, uncited = validate_citations(answer, len(unit_ids))
+    return {
+        "qid": qid, "run": run, "model": model, "answer": answer, "context_unit_ids": unit_ids,
+        "citations": cites,
+        "citation_map": {str(n): unit_ids[n - 1] for n in sorted(set(cites)) if 1 <= n <= len(unit_ids)},
+        "citation_count": count, "invalid_citations": invalid, "uncited_response": uncited,
+        "refusal": is_refusal(answer),
+    }
 
 
 # ─────────────────────────── 측정 ───────────────────────────
@@ -189,7 +215,7 @@ def measure(cfg: ExperimentConfig, queries: list[Query], log: Callable[[str], No
     with VramMonitor() as mon:
         # 1) 서비스 세 모델 적재(생성 기준 실행의 임베딩·재순위 + LLM) → 메모리 기록 (v4.2 L3)
         retrieve(cfg.case_id, queries[0].text, gen_rc, None, index=idx)
-        asyncio.run(_measure_generation(queries[0].text, _context(idx, [])))
+        asyncio.run(_measure_generation(queries[0].text, []))
         service_mem = _memory_snapshot(mon)
         # 2) 나머지 실행 적재 — 실행마다 한 번 검색
         for r in runs:
@@ -211,19 +237,26 @@ def measure(cfg: ExperimentConfig, queries: list[Query], log: Callable[[str], No
                                  "n_rerank_truncated": res.n_rerank_truncated,
                                  "n_reranked": min(rcs[r].rerank_candidates, len(res.hits)) if rcs[r].rerank else 0})
         log(f"[latency] 검색 {len(rows)}회 측정")
-        # 5) 생성
+        # 5) 생성 (질의당 1회, 이 답변이 G1 판정 입력)
+        model = "fake" if settings.ast_fake_models else settings.ollama_llm_model
         gens: list[dict[str, Any]] = []
+        answers: list[dict[str, Any]] = []
         for q in queries:
             res = retrieve(cfg.case_id, q.text, gen_rc, None, index=idx)
-            ctx = _context(idx, [h.unit_id for h in res.hits])
+            uids, ctx = _context(idx, res.hits)
             g = asyncio.run(_measure_generation(q.text, ctx))
-            gens.append({"qid": q.qid, "run": gen_run, "n_context": len(ctx), **g})
-        log(f"[latency] 생성 {len(gens)}회 측정")
+            answer = g.pop("answer")
+            retrieval_ms = float(res.timings_ms.get("total", 0.0))
+            gens.append({"qid": q.qid, "run": gen_run, "n_context": len(ctx), "retrieval_ms": retrieval_ms,
+                         "query_total_ms": retrieval_ms + g["total_ms"], **g})
+            answers.append(answer_record(q.qid, gen_run, answer, uids, model))
+        log(f"[latency] 생성 {len(gens)}회 측정 · 답변 기록 {len(answers)}건")
     vram_max = mon.max_mib
     torch_peak = torch_peak_mib()
 
     write_jsonl(cfg.runs_dir / "latency.jsonl", rows)
     write_jsonl(cfg.runs_dir / "generation.jsonl", gens)
+    write_jsonl(cfg.runs_dir / "gen" / "answers.jsonl", answers)
 
     by_run: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
     trunc: dict[str, list[int]] = defaultdict(lambda: [0, 0])
@@ -235,8 +268,11 @@ def measure(cfg: ExperimentConfig, queries: list[Query], log: Callable[[str], No
     summary = {
         "runs": {r: {s: _q(by_run[r][s]) for s in STAGES if by_run[r].get(s)} for r in runs},
         "rerank_truncation": {r: (t[0] / t[1] if t[1] else None) for r, t in trunc.items()},
-        "generation": {k: _q([g[k] for g in gens]) for k in ("ttft_ms", "total_ms", "tokens_per_s")},
+        "generation": {k: _q([g[k] for g in gens]) for k in ("ttft_ms", "total_ms", "tokens_per_s", "query_total_ms")},
         "generation_run": gen_run,
+        "answers": {"n": len(answers), "with_citation": sum(1 for a in answers if a["citation_count"]),
+                    "refusal": sum(1 for a in answers if a["refusal"]),
+                    "invalid_citation": sum(1 for a in answers if a["invalid_citations"])},
         "vram_max_mib": vram_max,
         "torch_peak_mib": torch_peak,
         "loaded_models": _model_rows(loaded),
@@ -245,6 +281,7 @@ def measure(cfg: ExperimentConfig, queries: list[Query], log: Callable[[str], No
         "llm_num_ctx": settings.llm_num_ctx,
         "rerank_max_length": settings.rerank_max_length,
         "reranker": {r: rcs[r].reranker for r in runs if rcs[r].rerank},
+        "labels": {r: cfg.label(r) for r in {*runs, gen_run}},
         "n_queries": len(queries), "warmup": cfg.latency_warmup, "repeats": cfg.latency_repeats,
         "fake_models": settings.ast_fake_models,
     }
@@ -269,19 +306,51 @@ def _bytes_mib(v: Any) -> str:
     return f"{int(v) / 2**20:,.0f}" if v else "–"
 
 
+def v44_values_lines(s: dict[str, Any]) -> list[str]:
+    """v4.4 §5 보고 값 (논문 4.3절 본문 두 문단) — 표 대신 값"""
+    labels = s.get("labels", {})
+    gen_run = s["generation_run"]
+    run = gen_run if gen_run in s["runs"] else next(iter(s["runs"]))
+    st = s["runs"][run]
+    svc = s.get("service_memory") or {}
+    g = s["generation"]
+    tr = s["rerank_truncation"].get(run)
+    max_len = s.get("rerank_max_length", settings.rerank_max_length)
+    models = ", ".join(f"{m.get('name')} {_bytes_mib(m.get('size_vram'))} MiB" for m in svc.get("loaded_models") or [])
+
+    def _p(key: str, q: str) -> str:
+        d = st.get(key)
+        return "–" if not d else f"{d[q]:,.1f}"
+
+    return [
+        f"## 응답 시간·GPU 메모리 보고 값 (v4.4 §5) — {labels.get(run, run)} (하네스 {run})", "",
+        f"- 검색 전체: p50 {_p('total', 'p50')} ms · p95 {_p('total', 'p95')} ms",
+        f"- 그중 재순위: p50 {_p('rerank', 'p50')} ms",
+        "- 응답 생성 포함 질의당 전체 시간: "
+        + (f"p50 {qt['p50']:,.1f} ms (질문 {qt['n']}개, 질의당 생성 1회)" if (qt := g.get("query_total_ms")) else "–"),
+        f"- GPU 최대 사용량 (세 모델 적재): nvidia-smi {_mib(svc.get('vram_max_mib'))} MiB "
+        f"(측정 전체 {_mib(s['vram_max_mib'])} MiB) · 재순위 torch {_mib(s['torch_peak_mib'])} MiB · "
+        f"ollama ps: {models or '–'}",
+        f"- 재순위 입력 {max_len:,}토큰 초과 절단 비율: {'–' if tr is None else f'{tr:.1%}'}",
+        "",
+    ]
+
+
 def render_t7(s: dict[str, Any]) -> str:
-    """T7 마크다운 — [표 13] 단계별 시간, [표 14] 생성, 재순위 절단, 모델별 메모리"""
+    """T7 마크다운 — v4.4 §5 보고 값, 단계별 시간(참고), 생성, 재순위 절단, 모델별 메모리"""
     runs = list(s["runs"])
+    labels = s.get("labels", {})
     lines = [
         "# T7 응답 시간·메모리·생성 시간",
         "",
-        f"- 평가 질의 {s['n_queries']}건 × 반복 {s['repeats']}회 (사전 실행 {s['warmup']}건, 질의마다 실행 순서 무작위)"
+        f"- 평가 질의 {s['n_queries']}건 × 반복 {s['repeats']}회 (사전 실행 {s['warmup']}건)"
         + (" · **가짜 모델**" if s["fake_models"] else ""),
         "- 세 모델(임베딩·재순위·LLM) 동시 적재 상태",
         "",
-        "## [표 13] 검색 단계별 시간 (ms, p50 / p95)",
+        *v44_values_lines(s),
+        "## 검색 단계별 시간 (ms, p50 / p95, 참고)",
         "",
-        "| 단계 | " + " | ".join(runs) + " |",
+        "| 단계 | " + " | ".join(labels.get(r, r) for r in runs) + " |",
         "|---|" + "---:|" * len(runs),
     ]
     for key, label in STAGE_LABELS:
@@ -296,11 +365,11 @@ def render_t7(s: dict[str, Any]) -> str:
     ]
     for r in runs:
         tr = s["rerank_truncation"].get(r)
-        lines.append(f"| {r} | {'–' if tr is None else f'{tr:.1%}'} |")
+        lines.append(f"| {labels.get(r, r)} | {'–' if tr is None else f'{tr:.1%}'} |")
     g = s["generation"]
     lines += [
         "",
-        f"## [표 14] 응답 생성 ({s['generation_run']} 상위 {GEN_TOP_K}개 단위 컨텍스트, 질의당 1회)",
+        f"## 응답 생성 ({labels.get(s['generation_run'], s['generation_run'])} 상위 {GEN_TOP_K}개 단위 컨텍스트, 질의당 1회)",
         "",
         "| 항목 | p50 | p95 |",
         "|---|---:|---:|",

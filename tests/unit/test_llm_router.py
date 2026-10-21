@@ -224,3 +224,69 @@ class TestGenerateStream:
         assert captured["case_id"] == "c2"
         assert captured["input_source"] == "estimated"
         assert captured["output_tokens"] > 0  # "안녕하세요" 추정
+
+
+# === 보안 모드 OFF 외부 API 격리 (v4.4 §6) ===
+
+CASE_TEXT = "케이스기밀문구 송금 4,500만원 박민수"
+
+
+class _CaptureLLM:
+    """외부 LLM 클라이언트 대역 — 받은 메시지를 그대로 기록"""
+
+    def __init__(self) -> None:
+        self.sent: list[list[tuple[str, str]]] = []
+
+    async def ainvoke(self, messages):
+        self.sent.append(messages)
+        return MagicMock(content="외부 답변", usage_metadata=None, response_metadata={})
+
+    async def astream(self, messages):
+        self.sent.append(messages)
+        for tok in ("외부", " 답변"):
+            yield MagicMock(content=tok, usage_metadata=None, response_metadata={})
+
+
+def _all_text(sent: list[list[tuple[str, str]]]) -> str:
+    return "\n".join(content for msgs in sent for _role, content in msgs)
+
+
+class TestExternalIsolation:
+    @pytest.mark.asyncio
+    async def test_generate_drops_case_context(self, router):
+        llm = _CaptureLLM()
+        with patch.object(router, "get_llm", return_value=llm):
+            await router.generate("공개 법령 질문", [CASE_TEXT], secure_mode=False,
+                                  extra_system_warning=f"경고 {CASE_TEXT}")
+        text = _all_text(llm.sent)
+        assert CASE_TEXT not in text and "공개 법령 질문" in text
+        assert llm.sent[0][0] == ("system", llm.sent[0][0][1]) and "케이스 자료" in llm.sent[0][0][1]
+        assert "Context" not in text and "[출처" not in llm.sent[0][1][1]
+
+    @pytest.mark.asyncio
+    async def test_generate_stream_drops_case_context(self, router):
+        llm = _CaptureLLM()
+        with patch.object(router, "get_llm", return_value=llm):
+            out = [t async for t in router.generate_stream("공개 질문", [CASE_TEXT, "둘째 " + CASE_TEXT],
+                                                            secure_mode=False)]
+        assert "".join(out) == "외부 답변"
+        assert CASE_TEXT not in _all_text(llm.sent)
+        assert [role for role, _c in llm.sent[0]] == ["system", "human"]
+
+    @pytest.mark.asyncio
+    async def test_settings_off_also_isolated(self, router, monkeypatch):
+        """secure_mode=None 이면 설정값(OFF)을 따라 격리"""
+        from src.utils.config import settings
+
+        monkeypatch.setattr(settings, "security_mode", "off")
+        llm = _CaptureLLM()
+        with patch.object(router, "get_llm", return_value=llm):
+            await router.generate("질문", [CASE_TEXT])
+        assert CASE_TEXT not in _all_text(llm.sent)
+
+    @pytest.mark.asyncio
+    async def test_secure_mode_keeps_context(self, router):
+        llm = _CaptureLLM()
+        with patch.object(router, "get_llm", return_value=llm):
+            await router.generate("질문", [CASE_TEXT], secure_mode=True)
+        assert CASE_TEXT in _all_text(llm.sent)

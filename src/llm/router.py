@@ -1,12 +1,11 @@
 """LLM 라우터 — 보안 모드에 따라 로컬/외부 LLM 분기
 
 보안 모드:
-- ON (secure):  Ollama 로컬 LLM — 데이터 외부 전송 차단
-- OFF (open):   외부 API (OpenAI 또는 Anthropic) — 검색된 청크만 외부 전송
-                settings.external_llm_provider로 provider 선택
-
-RAG 프롬프트 템플릿을 사용하여 검색 결과 컨텍스트와
-사용자 질의를 조합한 응답을 생성.
+- ON (secure):  Ollama 로컬 LLM — 데이터 외부 전송 차단. RAG 프롬프트(검색 결과 컨텍스트 + 질의)
+- OFF (open):   외부 API (OpenAI 또는 Anthropic) — **케이스 자료를 쓰지 않는 외부 조회** (v4.4 §6).
+                감사인이 인터넷 공개 정보·일반 지식을 조사할 때 쓴다. 케이스 색인·벡터·검색 결과는
+                외부 API 로 보내지 않는다: 호출자가 컨텍스트를 넘겨도 여기서 버리고, 외부용 시스템
+                프롬프트와 질의만 보낸다. settings.external_llm_provider로 provider 선택
 """
 
 from __future__ import annotations
@@ -47,6 +46,16 @@ _SYSTEM_PROMPT = """당신은 내부 감사(Audit) 지원 AI 어시스턴트입�
 - 여러 출처의 정보를 종합할 경우 해당 출처를 모두 병기하세요 (예: `[출처 1][출처 4]`).
 - Context가 비어 있거나 "(검색 결과 없음)"이면 답변을 생성하지 말고 자료 부족을 알리세요."""
 
+# 보안 모드 OFF(외부 API) 시스템 프롬프트 — 케이스 자료 없이 일반 질의에 답한다 (v4.4 §6)
+_EXTERNAL_SYSTEM_PROMPT = """당신은 감사인이 인터넷 공개 정보와 일반 지식을 조사할 때 돕는 AI 어시스턴트입니다.
+이 대화에는 감사 케이스 자료(이메일, 채팅, 문서, 검색 결과)가 제공되지 않으며, 당신은 그 자료에 접근할 수 없습니다.
+
+- 일반적으로 알려진 정보, 공개된 법령·기준·관행에 근거해 답하세요.
+- 특정 회사나 개인의 내부 사실을 추측하지 마세요. 케이스 자료 확인이 필요한 질문이면 보안 모드(로컬)에서 질의하라고 안내하세요.
+- 확실하지 않은 내용은 확인이 필요하다고 밝히세요.
+- `[출처 N]` 표기는 쓰지 마세요.
+- 한국어로 간결하게 답하세요."""
+
 _USER_PROMPT_TEMPLATE = """## Context (검색 결과)
 
 {context}
@@ -54,6 +63,15 @@ _USER_PROMPT_TEMPLATE = """## Context (검색 결과)
 ## 질문
 
 {question}"""
+
+
+def _guard_external_context(context: list[str], is_secure: bool) -> list[str]:
+    """보안 모드 OFF 면 케이스 컨텍스트를 버린다 (외부 API 로 케이스 텍스트를 보내지 않는다, v4.4 §6)"""
+    if is_secure:
+        return context
+    if context:
+        logger.warning(f"보안 모드 OFF: 케이스 컨텍스트 {len(context)}건을 외부 API 로 보내지 않고 버림")
+    return []
 
 
 class LLMRouter:
@@ -148,13 +166,17 @@ class LLMRouter:
         question: str,
         context: list[str],
         extra_system_warning: str | None = None,
+        secure: bool = True,
     ) -> list[tuple[str, str]]:
         """RAG 프롬프트 메시지 조합
 
         Args:
             extra_system_warning: 시스템 프롬프트 뒤에 덧붙일 추가 경고
                 (관련성 낮은 검색 결과 등에 대한 방어용)
+            secure: False(외부 API)면 외부용 시스템 프롬프트 + 질의만. context·경고는 쓰지 않는다
         """
+        if not secure:
+            return [("system", _EXTERNAL_SYSTEM_PROMPT), ("human", question)]
         context_text = "\n\n---\n\n".join(
             f"[출처 {i + 1}]\n{c}" for i, c in enumerate(context)
         )
@@ -197,8 +219,10 @@ class LLMRouter:
         Returns:
             LLM 응답 텍스트
         """
-        llm = self.get_llm(secure_mode)
-        messages = self._build_messages(question, context, extra_system_warning)
+        is_secure = secure_mode if secure_mode is not None else settings.is_secure_mode
+        context = _guard_external_context(context, is_secure)
+        llm = self.get_llm(is_secure)
+        messages = self._build_messages(question, context, extra_system_warning, secure=is_secure)
 
         start = time.perf_counter()
         try:
@@ -214,7 +238,7 @@ class LLMRouter:
             messages=messages,
             output_text=response.content or "",
             response=response,
-            secure_mode=secure_mode,
+            secure_mode=is_secure,
             case_id=case_id,
             latency=latency,
             on_complete=on_complete,
@@ -247,8 +271,10 @@ class LLMRouter:
         Yields:
             응답 토큰 문자열
         """
-        llm = self.get_llm(secure_mode)
-        messages = self._build_messages(question, context, extra_system_warning)
+        is_secure = secure_mode if secure_mode is not None else settings.is_secure_mode
+        context = _guard_external_context(context, is_secure)
+        llm = self.get_llm(is_secure)
+        messages = self._build_messages(question, context, extra_system_warning, secure=is_secure)
 
         start = time.perf_counter()
         collected: list[str] = []
@@ -270,7 +296,7 @@ class LLMRouter:
                 messages=messages,
                 output_text="".join(collected),
                 response=last_chunk,
-                secure_mode=secure_mode,
+                secure_mode=is_secure,
                 case_id=case_id,
                 latency=latency,
                 on_complete=on_complete,

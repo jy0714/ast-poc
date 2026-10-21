@@ -482,3 +482,46 @@ class TestRelevanceCheck:
         sources = [SourceReference(content="날씨가 맑고 화창합니다", source_type="document")]
         # extract_topics는 10자 미만 질의를 무시하므로 충분히 긴 질의 사용
         assert RAGEngine._has_keyword_overlap("비용 예산 회계 처리 내역 검토", sources) is False
+
+
+# === 보안 모드 OFF = 케이스 자료를 쓰지 않는 외부 조회 (v4.4 §6) ===
+
+
+class TestExternalLookup:
+    @pytest.mark.asyncio
+    async def test_query_off_skips_retrieval_and_context(self, engine, mock_retrieve, mock_llm_router):
+        result = await engine.query("공개 정보 질문", secure_mode=False)
+        mock_retrieve.assert_not_called()
+        _, kwargs = mock_llm_router.generate.call_args
+        assert kwargs["context"] == [] and kwargs["secure_mode"] is False
+        assert result.sources == [] and result.secure_mode is False
+
+    @pytest.mark.asyncio
+    async def test_query_stream_off_skips_retrieval_and_context(self, mock_retrieve):
+        router = MagicMock()
+        router.generate_stream = MagicMock(return_value="stream")
+        eng = RAGEngine(case_id=CASE, llm_router=router, rerank_enabled=False, retrieve_fn=mock_retrieve)
+        stream, sources = await eng.query_stream("공개 정보 질문", secure_mode=False)
+        mock_retrieve.assert_not_called()
+        assert sources == [] and stream == "stream"
+        _, kwargs = router.generate_stream.call_args
+        assert kwargs["context"] == [] and kwargs["secure_mode"] is False
+
+    @pytest.mark.asyncio
+    async def test_case_text_never_reaches_external_client(self, mock_retrieve):
+        """실제 라우터 + 외부 클라이언트 대역: 색인 본문이 메시지에 없다"""
+        from src.llm.router import LLMRouter
+
+        sent: list = []
+
+        class _Ext:
+            async def ainvoke(self, messages):
+                sent.append(messages)
+                return MagicMock(content="외부 답변", usage_metadata=None, response_metadata={})
+
+        router = LLMRouter()
+        eng = RAGEngine(case_id=CASE, llm_router=router, rerank_enabled=False, retrieve_fn=mock_retrieve)
+        with patch.object(router, "get_llm", return_value=_Ext()):
+            await eng.query("검색 결과 0 내용", secure_mode=False)
+        text = "\n".join(c for msgs in sent for _r, c in msgs)
+        assert "충분히 긴 본문" not in text and "헤더 0" not in text

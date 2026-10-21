@@ -113,8 +113,8 @@ def test_query_fields_and_warnings(tmp_path):
     """v4.3 §1 입력 검증 — 분류 6개, 집합↔분류, search 만 유형, 나머지 none, 45개 경고"""
     from ev4.io import query_warnings, read_queries, write_jsonl
 
-    rows = [_qrow("q1.1", "A", "search", "semantic", source_question="1.1"), _qrow("q1.2", "B", "nonsearch", "none"),
-            _qrow("q1.8", "C", "meta", "none"), _qrow("q2.1", "A′", "search", "relation")]
+    rows = [_qrow("q1.1", "A1", "search", "semantic", source_question="1.1"), _qrow("q1.2", "B", "nonsearch", "none"),
+            _qrow("q1.8", "C", "meta", "none"), _qrow("q2.1", "A2", "search", "relation")]
     write_jsonl(tmp_path / "q.jsonl", rows)
     qs = read_queries(tmp_path / "q.jsonl")
     assert [q.support_group for q in qs] == ["search", "nonsearch", "meta", "search"]
@@ -124,9 +124,9 @@ def test_query_fields_and_warnings(tmp_path):
     bad = [
         (_qrow("x", "F", "search", "exact"), "support_class"),
         (_qrow("x", "C", "search", "exact"), "support_group"),
-        (_qrow("x", "A", "search", "none"), "type"),
+        (_qrow("x", "A1", "search", "none"), "type"),
         (_qrow("x", "D", "nonsearch", "semantic"), "type"),
-        (_qrow("x", "A", "search", "exact", split="dev"), "split"),
+        (_qrow("x", "A1", "search", "exact", split="dev"), "split"),
     ]
     for row, frag in bad:
         write_jsonl(tmp_path / "bad.jsonl", [row])
@@ -140,9 +140,9 @@ def test_query_fields_and_warnings(tmp_path):
 def test_t0_lines_has_no_query_text():
     from ev4.querystats import t0_lines
 
-    qs = [Query("q1.1", "비밀 질의 문장", "exact", "test", area="1", support_class="A", support_group="search"),
+    qs = [Query("q1.1", "비밀 질의 문장", "exact", "test", area="1", support_class="A1", support_group="search"),
           Query("q1.2", "다른 질의", "none", "test", area="1", support_class="B", support_group="nonsearch"),
-          Query("q2.1", "세 번째", "relation", "test", area="2", support_class="A′", support_group="search")]
+          Query("q2.1", "세 번째", "relation", "test", area="2", support_class="A2", support_group="search")]
     text = "\n".join(t0_lines(qs))
     assert "비밀 질의 문장" not in text and "다른 질의" not in text
     assert "| 1 | 1 | 0 | 0 | 0 | 1 | 0 | 2 | 1 | 0 | 0 |" in text
@@ -192,6 +192,7 @@ def test_standard_queries_file_passes_validation():
     assert Counter(q.support_group for q in qs) == {"search": 17, "meta": 3, "nonsearch": 25}
     assert Counter(q.type for q in qs if q.support_group == "search") == {"exact": 2, "semantic": 9, "relation": 6}
     assert all(q.split == "test" and not q.target_evidence_lang for q in qs)
+    assert Counter(q.support_class for q in qs if q.support_group == "search") == {"A1": 9, "A2": 8}  # v4.4 §3
 
 
 def test_category_hints():
@@ -256,3 +257,64 @@ def test_run_calls_only_service_retrieve(tmp_path, monkeypatch):
     qs = [Query("q1", "질의1", "exact", "test"), Query("q2", "질의2", "semantic", "test")]
     run_mod.run_all(cfg, qs, ["R2"], "test", log=lambda _m: None)
     assert calls == [("c1", "질의1", "RetrievalConfig", None), ("c1", "질의2", "RetrievalConfig", None)]
+
+
+def test_repo_config_has_five_runs_and_four_comparisons():
+    """v4.4 §2: 실행 5개(논문 R1~R5), 사전 비교 4개, 풀 5개, hdr-bgem3 없음"""
+    cfg = load_config()
+    assert sorted(cfg.runs) == ["R2", "R4", "R6", "R7", "R8"]
+    assert [cfg.label(r) for r in cfg.runs_by_label()] == ["R1", "R2", "R3", "R4", "R5"]
+    assert [(cfg.label(a), cfg.label(b)) for _f, a, b in cfg.comparison_pairs()] == \
+        [("R1", "R3"), ("R2", "R3"), ("R3", "R5"), ("R4", "R5")]
+    assert sorted(cfg.pool_runs) == sorted(cfg.runs)
+    assert {s["profile"] for s in cfg.runs.values()} == {"hdr-qwen3", "nohdr-qwen3"}
+    assert cfg.latency_runs == ["R8"]
+
+
+def test_config_rejects_label_for_unknown_run(tmp_path):
+    (tmp_path / "config.yaml").write_text(
+        "case_id: c\nruns:\n  R2: {profile: hdr-qwen3, use_bm25: true, use_dense: false, rerank: false}\n"
+        "labels: {R9: R5}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="labels"):
+        load_config(root=tmp_path)
+
+
+def test_language_aux_counts_local_grade2_in_top10(tmp_path):
+    from ev4.evaluate import language_aux
+
+    (tmp_path / "config.yaml").write_text(
+        "case_id: c\nruns:\n"
+        "  R2: {profile: hdr-qwen3, use_bm25: true, use_dense: false, rerank: false}\n"
+        "  R4: {profile: hdr-qwen3, use_bm25: false, use_dense: true, rerank: false}\n"
+        "  R8: {profile: hdr-qwen3, use_bm25: true, use_dense: true, rerank: true}\n"
+        "labels: {R2: R1, R4: R2, R8: R5}\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(root=tmp_path)
+    lang = {"zh1": "zh", "ko1": "ko", "vi1": "vi"}.get
+    qrels = {"q1": {"zh1": 2, "ko1": 2}, "q2": {"ko1": 2}, "q3": {"vi1": 2}}
+    runs = {"R8": {"q1": ["zh1"], "q3": ["x"] * 10 + ["vi1"]}, "R2": {"q1": ["ko1"]}, "R4": {"q3": ["vi1"]}}
+    aux = language_aux(cfg, qrels, runs, ["q1", "q2", "q3"], lambda u: lang(u) or "und")
+    assert aux["n_local_queries"] == 2  # q1·q3 (q2 는 한국어만)
+    assert aux["hits"] == {"R5": 1, "R1": 0, "R2": 1}
+    assert {r["qid"]: (r["R1"], r["R2"], r["R5"]) for r in aux["per_query"]} == \
+        {"q1": (False, False, True), "q3": (False, True, False)}
+
+
+def test_gen_sentence_and_citation_rows():
+    from ev4.gen import citation_rows, split_sentences
+
+    ans = "첫 문장입니다 [출처 1][출처 2]. 둘째 [출처 2] 문장 [출처 2]!\n셋째 줄 인용 없음"
+    assert split_sentences(ans) == ["첫 문장입니다 [출처 1][출처 2].", "둘째 [출처 2] 문장 [출처 2]!", "셋째 줄 인용 없음"]
+    assert citation_rows(ans) == [(1, 1), (1, 2), (2, 2)]  # 같은 문장 안 같은 인용은 한 번
+    assert citation_rows("") == []
+
+
+def test_cohen_kappa():
+    from ev4.stats import cohen_kappa
+
+    assert cohen_kappa([1, 0, 1, 0], [1, 0, 1, 0]) == 1.0
+    assert math.isclose(cohen_kappa([1, 1, 0, 0], [1, 0, 1, 0]), 0.0)
+    assert math.isnan(cohen_kappa([1, 1], [1, 1]))  # 기대 일치 1 → 정의되지 않음

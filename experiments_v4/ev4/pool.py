@@ -4,6 +4,8 @@
 - 질의 안에서 단위 순서를 seed 고정으로 섞는다.
 - A 는 전체 질의(45개), B 는 support_group 별 층화로 config `b_queries`(search 4·meta 1·nonsearch 6)만큼
   seed 고정으로 고른 질의의 전체 단위를 판정한다 (v4.3 §5).
+- 판정자 C(v4.4 §9, config `c_queries` 가 있을 때만): B 와 겹치지 않는 질의를 같은 층화·다른 seed 로 골라
+  pool_C.csv 를 만든다. 일치도는 A–B, A–C 를 따로 낸다.
 - CSV 는 Excel 호환 UTF-8 BOM.
 - 판정 기준 문서 data/judgments/판정기준.md 를 함께 만든다 (v4.2 J2).
 - 풀 통계(질의당 대상 수, 번역 단위 수, 잘라 보인 단위 수) → results/J1_pool.md (v4.2 J1).
@@ -89,6 +91,9 @@ def pool_stats_markdown(stats: dict[str, Any]) -> str:
         "",
         "B 판정 질의 (qid): " + (", ".join(stats.get("qids_B", [])) or "없음"),
     ]
+    if stats.get("queries_C"):
+        lines += ["", f"C 판정 질의 {stats['queries_C']}건 · 행 {stats['rows_C']} (B 와 겹치지 않음, v4.4 §9): "
+                  + ", ".join(stats["qids_C"])]
     return "\n".join(lines) + "\n"
 
 
@@ -103,6 +108,11 @@ def select_b_queries(queries: list[Query], quota: dict[str, int], seed: int) -> 
         qids = sorted(by_group.get(g, []))
         chosen += rng.sample(qids, min(len(qids), max(0, quota.get(g, 0))))
     return sorted(chosen)
+
+
+def select_c_queries(queries: list[Query], quota: dict[str, int], seed: int, exclude: set[str]) -> list[str]:
+    """판정자 C 질의 (v4.4 §9) — B 와 겹치지 않게, 같은 층화, 다른 seed(seed + 1)"""
+    return select_b_queries([q for q in queries if q.qid not in exclude], quota, seed + 1)
 
 
 def _write_csv(path: Path, rows: list[dict]) -> None:
@@ -130,6 +140,7 @@ def build_pool(
     runs = {name: read_run(cfg.run_path(name, split)) for name in cfg.pool_runs}
     translator = Translator(cfg.cache_dir / "translations.jsonl") if translate else None
     b_qids = set(select_b_queries(queries, cfg.b_queries, cfg.seed))
+    c_qids = set(select_c_queries(queries, cfg.c_queries, cfg.seed, b_qids)) if cfg.c_queries else set()
 
     rows_a: list[dict] = []
     provenance: list[dict] = []
@@ -165,14 +176,18 @@ def build_pool(
     if translator:
         translator.save()
     rows_b = [r for r in rows_a if r["qid"] in b_qids]
+    rows_c = [r for r in rows_a if r["qid"] in c_qids]
     _write_csv(cfg.judgments_dir / "pool_A.csv", rows_a)
     _write_csv(cfg.judgments_dir / "pool_B.csv", rows_b)
+    if c_qids:
+        _write_csv(cfg.judgments_dir / "pool_C.csv", rows_c)
     write_jsonl(cfg.runs_dir / "pool_provenance.jsonl", provenance)
     write_criteria(cfg)
     n_tr = translator.n_new if translator else 0
     tr_rows = [r for r in rows_a if r["translation_ko"]]
     stats: dict[str, Any] = {
         "rows_A": len(rows_a), "rows_B": len(rows_b), "queries_B": len(b_qids), "qids_B": sorted(b_qids),
+        "rows_C": len(rows_c), "queries_C": len(c_qids), "qids_C": sorted(c_qids),
         "translated": n_tr,
         "n_runs": len(runs), "pool_depth": cfg.pool_depth, "n_queries": len(queries),
         "per_query_mean": sum(per_query) / len(per_query) if per_query else 0.0,
@@ -188,4 +203,6 @@ def build_pool(
         f"질의당 {stats['per_query_mean']:.1f}건 ({stats['per_query_min']}~{stats['per_query_max']}) "
         f"→ {cfg.judgments_dir}")
     log(f"[pool] B 판정 질의: {', '.join(sorted(b_qids))}")
+    if c_qids:
+        log(f"[pool] C 판정 질의: {', '.join(sorted(c_qids))} (C {len(rows_c)}행)")
     return stats

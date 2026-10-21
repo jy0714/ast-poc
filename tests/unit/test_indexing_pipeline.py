@@ -585,6 +585,26 @@ class TestV4Pipeline:
         assert progress.phase == IndexingPhase.CANCELLED
         case_index._cache.clear()
         assert case_index.load(meta.case_id).n_parts == n_before
+        # 완성된 색인이 있으므로 상태는 READY 로 돌아간다 (CREATED 로 떨어뜨리지 않는다)
+        assert case_store.get(meta.case_id).status == CaseStatus.READY
+
+    def test_cancel_without_index_returns_to_created(self, pipeline, case_store, tmpdir):
+        """색인이 한 번도 없던 케이스를 취소하면 CREATED"""
+        doc_dir = _create_test_files(tmpdir, {"a.txt": "문서 " * 10})
+        meta = case_store.create("첫 취소", doc_paths=[str(doc_dir)])
+        flag = threading.Event()
+        flag.set()
+        pipeline.run(meta.case_id, cancel_flag=flag)
+        assert case_store.get(meta.case_id).status == CaseStatus.CREATED
+
+    def test_timing_recorded_in_manifest(self, pipeline, case_store, tmpdir):
+        """단계별 시간이 manifest build_stats.timing 에 남는다 (E1 색인 시간 분해)"""
+        doc_dir = _create_test_files(tmpdir, {"a.txt": "문서 " * 10})
+        meta = case_store.create("시간", doc_paths=[str(doc_dir)])
+        pipeline.run(meta.case_id)
+        case_index._cache.clear()
+        timing = case_index.load(meta.case_id).manifest["build_stats"]["timing"]
+        assert {"parse_wall_seconds", "embed_active_seconds", "store_seconds", "total_seconds"} <= set(timing)
 
     def test_cancel_with_full_queue_does_not_hang(self, case_store, tmpdir):
         """임베딩 중 취소하면 파싱 쪽이 가득 찬 큐에서 멈추지 않고 끝난다"""

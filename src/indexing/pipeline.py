@@ -200,6 +200,19 @@ def _file_fingerprint(path: Path, rel: str) -> dict[str, Any]:
         return {"path": rel, "size": -1, "mtime": 0}
 
 
+def _record_timing(case_id: str, timing: dict[str, Any]) -> None:
+    """색인 manifest 의 build_stats.timing 에 단계별 시간을 쓴다 (실패해도 색인에는 영향 없음)"""
+    try:
+        path = case_index.case_dir(case_id) / "manifest.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest.setdefault("build_stats", {})["timing"] = timing
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception as e:
+        logger.warning(f"색인 시간 기록 실패 (무시): {e}")
+
+
 def _save_failed_parts(
     case_id: str, parts: list[UnitPart], diagnostics: list[dict[str, Any]] | None = None
 ) -> None:
@@ -624,7 +637,9 @@ class IndexingPipeline:
             if cancel_flag and cancel_flag.is_set():
                 progress.set_phase(IndexingPhase.CANCELLED)
                 progress.completed_at = datetime.now()
-                self.case_store.update_status(case_id, CaseStatus.CREATED)
+                # 취소해도 이전에 완성한 색인은 그대로 남아 있으므로 READY 로 되돌린다 (없으면 CREATED)
+                restored = CaseStatus.READY if case_index.exists(case_id) else CaseStatus.CREATED
+                self.case_store.update_status(case_id, restored)
                 _save_indexing_log(progress, "cancelled")
                 logger.info(f"인덱싱 취소됨: {case_id}")
                 return progress
@@ -1038,6 +1053,16 @@ class IndexingPipeline:
         )
         progress.store_wall_seconds = time.monotonic() - t0
         ckpt.clear()  # 색인에 다 들어갔으므로 다음 실행은 색인에서 재사용한다
+        # 단계별 시간 (v4.4 §1·§7 E1) — 로그를 열지 않고도 색인 시간 분해를 보고할 수 있게 manifest 에 남긴다.
+        # 저장 시간(BM25 토큰화 포함)은 색인을 쓴 뒤에야 알 수 있어서 manifest 를 한 번 더 고친다.
+        _record_timing(case_id, {
+            "parse_wall_seconds": round(wall_times.get("parse", 0.0), 1),
+            "embed_active_seconds": round(wall_times.get("embed", 0.0), 1),
+            "store_seconds": round(progress.store_wall_seconds, 1),
+            "total_seconds": round(time.monotonic() - parse_start, 1),
+            "n_parts": len(parts),
+            "embedded_new": state["embedded"] - state["reused"],
+        })
 
         _check_failure_rate(
             progress=progress,

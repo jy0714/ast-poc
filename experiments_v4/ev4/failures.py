@@ -1,6 +1,6 @@
 """실패 분석 시트 → results/F1_failures.csv, results/F1_summary.md (지시서 §6.7, v4.2 F1~F3)
 
-- 대상(F1): 주 분석 집합(S17, config `primary_subset`) 질의에서 기준 실행(기본 R8) 상위 10 에 들지 못한
+- 대상(F1): 주 분석 집합(S17, config `primary_subset`) 질의에서 기준 실행(기본 하네스 R8 = 논문 R5) 상위 10 에 들지 못한
   **등급 2 단위 전체** (v4.3 §6). 등급 2 단위 일부만 찾은
   질의의 나머지 단위도 포함한다. 놓친 단위마다 한 행, R2·R4·R6·R7·R8 순위(100위 밖이면 ">100").
 - 분류 힌트(F2) `category_hint`: 순위 기록으로 판단할 수 있는 것만 자동으로 단다(쉼표 구분).
@@ -185,7 +185,9 @@ def build_failures(cfg: ExperimentConfig, log: Callable[[str], None] = print) ->
         w = csv.DictWriter(f, fieldnames=cols, restval="")
         w.writeheader()
         w.writerows(rows)
-    (cfg.results_dir / "F1_summary.md").write_text(summary_markdown(base, rows, len(failed_q)), encoding="utf-8")
+    base_label = f"{cfg.label(base)} (하네스 {base})" if cfg.label(base) != base else base
+    (cfg.results_dir / "F1_summary.md").write_text(summary_markdown(base_label, rows, len(failed_q)),
+                                                   encoding="utf-8")
     cats = Counter(r["category"] for r in rows if r["category"])
     hints = Counter(h for r in rows for h in filter(None, r["category_hint"].split(",")))
     log(f"[failures] 놓친 등급 2 단위 {len(rows)}건 (질의 {len(failed_q)}) · 힌트 {dict(hints)} → {out}")

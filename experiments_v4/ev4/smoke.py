@@ -1,6 +1,6 @@
 """실데이터 동작 점검 → results/smoke.md (v4.3 §2, 개발용 질의 대체)
 
-표준 질문 3개(config `smoke_qids`, 기본 q1.1·q2.6·q7.2)를 점검 실행(config `smoke_runs`, 기본 R2·R4·R6·R8·R9)으로
+표준 질문 3개(config `smoke_qids`, 기본 q1.1·q2.6·q7.2)를 점검 실행(config `smoke_runs`, 기본 R2·R4·R6·R7·R8)으로
 검색해 오류 여부, 응답 시간, GPU 메모리만 기록한다. 순위·점수·실행 파일은 남기지 않는다.
 이 결과를 보고 설정을 바꾸지 않는다(설정은 v4.1 기본값 고정).
 """
@@ -16,7 +16,7 @@ from ev4.latency import VramMonitor
 from src.index import case_index
 from src.rag.retrieval import retrieve
 
-DEFAULT_SMOKE_RUNS = ["R2", "R4", "R6", "R8", "R9"]
+DEFAULT_SMOKE_RUNS = ["R2", "R4", "R6", "R7", "R8"]
 
 
 def smoke(cfg: ExperimentConfig, queries: list[Query], log: Callable[[str], None] = print) -> dict[str, Any]:

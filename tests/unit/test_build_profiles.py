@@ -1,5 +1,7 @@
 """scripts/build_profiles.py — 실험 프로필 추가 (가짜 모델)"""
 
+import json
+
 import numpy as np
 import pytest
 
@@ -56,6 +58,27 @@ def test_failure_does_not_write_profile():
     with pytest.raises(ProfileBuildError):
         build_profile("c1", "nohdr-qwen3", batch=10, embedder=Failing(model="qwen3-embedding:4b-q8_0"))
     assert case_index.load("c1").profiles() == ["hdr-qwen3"]
+
+
+def test_failure_keeps_checkpoint_and_retry_reuses_it(tmp_path):
+    """실패해도 성공한 벡터는 체크포인트에 남고, 재실행은 실패 파트만 임베딩한 뒤 체크포인트를 지운다"""
+    from src.index.embed_cache import cache_dir
+
+    class Failing(EmbeddingService):
+        def embed_texts(self, texts, cancel_event=None):
+            out = super().embed_texts(texts, cancel_event=cancel_event)
+            self._last_failed_indices = [0]
+            return out
+
+    with pytest.raises(ProfileBuildError):
+        build_profile("c1", "nohdr-qwen3", batch=10, embedder=Failing(model="qwen3-embedding:4b-q8_0"))
+    assert list(cache_dir("c1", "nohdr-qwen3").glob("shard_*.npz"))
+
+    progress = tmp_path / "p.json"
+    info = build_profile("c1", "nohdr-qwen3", batch=10, progress_path=progress)
+    assert info["embedded"] == 1 and info["reused"] == 4
+    assert not cache_dir("c1", "nohdr-qwen3").exists()
+    assert json.loads(progress.read_text(encoding="utf-8"))["done"] == 1
 
 
 def test_empty_body_gets_zero_vector():

@@ -382,7 +382,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         f"가짜 인용 감지 (stream): [출처 {invalid_citations}] > 실제 "
                         f"{len(sources)}개 (case={request.case_id})"
                     )
-                if uncited_response:
+                if uncited_response and request.security_mode:  # 외부 조회는 출처가 없다 (v4.4 §6)
                     logger.warning(
                         f"LLM이 출처 인용 없이 답변 (stream) — 할루시네이션 위험 "
                         f"(case={request.case_id})"
@@ -396,7 +396,9 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                             "sources": sources_data,
                             "citation_count": citation_count,
                             "invalid_citations": invalid_citations,
-                            "uncited_response": uncited_response,
+                            "uncited_response": uncited_response and request.security_mode,
+                            # 보안 모드 OFF = 케이스 자료를 쓰지 않는 외부 조회 (v4.4 §6, UI 표시용)
+                            "external_lookup": not request.security_mode,
                         },
                         ensure_ascii=False,
                     )

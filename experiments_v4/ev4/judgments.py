@@ -2,10 +2,11 @@
 
 - `import`: pool_A.csv·pool_B.csv(·adjudication.csv) → data/judgments/judgments.jsonl
   annotator 칸이 비면 파일 이름(pool_A → "A")을 쓴다. `adjudicated_grade` 가 채워진 행은 중재 기록이다.
-- `agreement`: 두 판정자가 모두 판정한 단위의 일치도(정확 일치·관련성(≥1) 일치·2차 가중 카파)
+- `agreement`: 두 판정자가 모두 판정한 단위의 일치도(정확 일치·관련성(≥1) 일치·2차 가중 카파),
+  A–B 와 A–C(판정자 C 가 있으면, v4.4 §9)를 따로 낸다.
   → results/agreement.json, 불일치 단위 → data/judgments/adjudication.csv
 - `finalize`: 최종 등급 = 중재 등급 > 판정자 일치 등급 > (불일치 미중재면 오류) → data/qrels.txt
-  B 만 판정한 단위는 없다(B 는 A 질의의 부분집합). A 한 명만 판정한 단위는 A 등급.
+  B·C 만 판정한 단위는 없다(B·C 는 A 질의의 부분집합). A 한 명만 판정한 단위는 A 등급.
 """
 
 from __future__ import annotations
@@ -103,12 +104,41 @@ def _by_unit(cfg: ExperimentConfig) -> dict[tuple[str, str], dict[str, int]]:
     return by_unit
 
 
+def _pair_stats(by_unit: dict[tuple[str, str], dict[str, int]], a1: str, a2: str,
+                qgroups: dict[str, str]) -> dict[str, Any] | None:
+    """두 판정자의 일치도 (함께 판정한 단위가 없으면 None)"""
+    shared = {k: d for k, d in by_unit.items() if a1 in d and a2 in d}
+    pairs = [(d[a1], d[a2]) for d in shared.values()]
+    if not pairs:
+        return None
+    q_a = {q for (q, _u), d in by_unit.items() if a1 in d}
+    q_o = {q for (q, _u), d in by_unit.items() if a2 in d}
+    return {
+        "pair": [a1, a2],
+        "n": len(pairs),
+        "n_queries": len({q for q, _u in shared}),
+        "exact_agreement": sum(x == y for x, y in pairs) / len(pairs),
+        "relevant_agreement": sum((x >= 1) == (y >= 1) for x, y in pairs) / len(pairs),
+        "quadratic_weighted_kappa": quadratic_weighted_kappa([x for x, _ in pairs], [y for _, y in pairs], 3),
+        "confusion": {f"{x}{y}": sum(1 for p in pairs if p == (x, y)) for x in GRADES for y in GRADES},
+        "n_disagree": sum(1 for x, y in pairs if x != y),
+        "disagree": sorted(k for k, d in shared.items() if d[a1] != d[a2]),
+        # 두 번째 판정자 질의 비율·집합별 분포 (v4.2 J3, v4.3 §5)
+        "n_queries_A": len(q_a),
+        "n_queries_B": len(q_o),
+        "b_query_ratio": len(q_o) / len(q_a) if q_a else float("nan"),
+        "a_queries_by_group": {g: sum(1 for q in q_a if qgroups.get(q) == g) for g in SUPPORT_GROUPS},
+        "b_queries_by_group": {g: sum(1 for q in q_o if qgroups.get(q) == g) for g in SUPPORT_GROUPS},
+        "qids_B": sorted(q_o),
+    }
+
+
 def agreement(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> dict[str, Any]:
-    """판정자 간 일치도와 중재 시트
+    """판정자 간 일치도와 중재 시트 — A–B, A–C(있으면) 를 따로 낸다 (v4.4 §9)
 
     Returns:
-        {annotators, pair, n, exact_agreement, relevant_agreement, quadratic_weighted_kappa,
-         n_disagree, a_queries_by_group, b_queries_by_group}
+        {annotators, units_total, pairs: {"A-B": {...}, "A-C": {...}}, n_disagree,
+         + 첫 쌍(A–B)의 값: pair, n, exact_agreement, relevant_agreement, quadratic_weighted_kappa, ...}
     """
     by_unit = _by_unit(cfg)
     annotators = sorted({a for d in by_unit.values() for a in d if a != ADJUDICATOR})
@@ -117,54 +147,43 @@ def agreement(cfg: ExperimentConfig, log: Callable[[str], None] = print) -> dict
         log("[agreement] 판정자가 2명 미만입니다")
         return res
     a1 = PRIMARY if PRIMARY in annotators else annotators[0]
-    a2 = next(a for a in annotators if a != a1)
-    shared = {k: d for k, d in by_unit.items() if a1 in d and a2 in d}
-    pairs = [(d[a1], d[a2]) for d in shared.values()]
+    qgroups = _query_groups(cfg)
+    pairs: dict[str, dict[str, Any]] = {}
+    for a2 in (a for a in annotators if a != a1):
+        st = _pair_stats(by_unit, a1, a2, qgroups)
+        if st is not None:
+            pairs[f"{a1}-{a2}"] = st
     if not pairs:
         log("[agreement] 두 판정자가 함께 판정한 단위가 없습니다")
         return res
-    res.update({
-        "pair": [a1, a2],
-        "n": len(pairs),
-        "n_queries": len({q for q, _u in shared}),
-        "exact_agreement": sum(x == y for x, y in pairs) / len(pairs),
-        "relevant_agreement": sum((x >= 1) == (y >= 1) for x, y in pairs) / len(pairs),
-        "quadratic_weighted_kappa": quadratic_weighted_kappa([x for x, _ in pairs], [y for _, y in pairs], 3),
-        "confusion": {f"{x}{y}": sum(1 for p in pairs if p == (x, y)) for x in GRADES for y in GRADES},
-    })
-    dis = sorted(k for k, d in shared.items() if d[a1] != d[a2])
+    first = next(iter(pairs.values()))
+    res.update({k: v for k, v in first.items() if k != "disagree"})
+    res["pairs"] = {k: {kk: vv for kk, vv in v.items() if kk != "disagree"} for k, v in pairs.items()}
+    dis = sorted({k for st in pairs.values() for k in st["disagree"]})
     res["n_disagree"] = len(dis)
-    # B 판정 질의 비율·집합별 분포 (v4.2 J3, v4.3 §5)
-    qgroups = _query_groups(cfg)
-    q_a = {q for (q, _u), d in by_unit.items() if a1 in d}
-    q_b = {q for (q, _u), d in by_unit.items() if a2 in d}
-    res["n_queries_A"] = len(q_a)
-    res["n_queries_B"] = len(q_b)
-    res["b_query_ratio"] = len(q_b) / len(q_a) if q_a else float("nan")
-    res["b_queries_by_group"] = {g: sum(1 for q in q_b if qgroups.get(q) == g) for g in SUPPORT_GROUPS}
-    res["a_queries_by_group"] = {g: sum(1 for q in q_a if qgroups.get(q) == g) for g in SUPPORT_GROUPS}
-    res["qids_B"] = sorted(q_b)
 
-    # 중재 시트 — 이미 중재한 등급은 보존
+    # 중재 시트 — 이미 중재한 등급은 보존. 판정자마다 등급 열 하나
     adj_path = adjudication_path(cfg)
     prev = _read_adjudication(adj_path)
     queries = _query_texts(cfg)
     adj_path.parent.mkdir(parents=True, exist_ok=True)
     with open(adj_path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["qid", "query_text", "unit_id", f"grade_{a1}", f"grade_{a2}", "adjudicated_grade", "note"])
+        w.writerow(["qid", "query_text", "unit_id", *[f"grade_{a}" for a in annotators], "adjudicated_grade", "note"])
         for qid, uid in dis:
-            d = shared[(qid, uid)]
+            d = by_unit[(qid, uid)]
             pg, pn = prev.get((qid, uid), ("", ""))
-            if not pg and ADJUDICATOR in by_unit[(qid, uid)]:
-                pg = str(by_unit[(qid, uid)][ADJUDICATOR])
-            w.writerow([qid, queries.get(qid, ""), uid, d[a1], d[a2], pg, pn])
+            if not pg and ADJUDICATOR in d:
+                pg = str(d[ADJUDICATOR])
+            w.writerow([qid, queries.get(qid, ""), uid, *[d.get(a, "") for a in annotators], pg, pn])
     cfg.results_dir.mkdir(parents=True, exist_ok=True)
     (cfg.results_dir / "agreement.json").write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
     (cfg.results_dir / "J3_agreement.md").write_text(_agreement_markdown(res), encoding="utf-8")
-    log(f"[agreement] {a1} vs {a2}: n={res['n']} (질의 {res['n_queries']}) 정확 일치 {res['exact_agreement']:.3f} · "
-        f"관련성(≥1) 일치 {res['relevant_agreement']:.3f} · QWK {res['quadratic_weighted_kappa']:.3f} · "
-        f"불일치 {len(dis)}건 → {adj_path}")
+    for name, st in res["pairs"].items():
+        log(f"[agreement] {name}: n={st['n']} (질의 {st['n_queries']}) 정확 일치 {st['exact_agreement']:.3f} · "
+            f"관련성(≥1) 일치 {st['relevant_agreement']:.3f} · QWK {st['quadratic_weighted_kappa']:.3f} · "
+            f"불일치 {st['n_disagree']}건")
+    log(f"[agreement] 중재 대상 {len(dis)}건 → {adj_path}")
     return res
 
 
@@ -205,26 +224,29 @@ def _query_groups(cfg: ExperimentConfig) -> dict[str, str]:
 
 
 def _agreement_markdown(res: dict[str, Any]) -> str:
-    """J3 일치도 표 (건수·비율만)"""
-    a1, a2 = res["pair"]
-    lines = [
-        "# J3 판정자 간 일치도", "",
-        f"- 판정자 {a1} vs {a2} · 함께 판정한 단위 {res['n']}건 (질의 {res['n_queries']}건)",
-        "- 2차 가중 카파: 등급 3단계(0/1/2, n_levels=3) · 관련 여부 일치: 등급 1 이상 기준", "",
-        "| 항목 | 값 |", "|---|---:|",
-        f"| 등급 완전 일치율 | {res['exact_agreement']:.3f} |",
-        f"| 관련 여부(≥1) 일치율 | {res['relevant_agreement']:.3f} |",
-        f"| 2차 가중 카파 | {res['quadratic_weighted_kappa']:.3f} |",
-        f"| 불일치 단위 수 | {res['n_disagree']} |",
-        f"| B 판정 질의 비율 | {res['n_queries_B']}/{res['n_queries_A']} = {res['b_query_ratio']:.3f} |",
-        "", f"| 집합 | {a1} 판정 질의 | {a2} 판정 질의 |", "|---|---:|---:|",
-    ]
-    for g in SUPPORT_GROUPS:
-        lines.append(f"| {g} | {res['a_queries_by_group'][g]} | {res['b_queries_by_group'][g]} |")
-    lines += ["", f"{a2} 판정 질의 (qid): " + (", ".join(res.get("qids_B", [])) or "없음")]
-    lines += ["", "| A\\B | 0 | 1 | 2 |", "|---|---:|---:|---:|"]
-    for x in GRADES:
-        lines.append(f"| {x} | " + " | ".join(str(res["confusion"][f"{x}{y}"]) for y in GRADES) + " |")
+    """J3 일치도 표 (건수·비율만) — 판정자 쌍마다 한 절"""
+    lines = ["# J3 판정자 간 일치도", "",
+             "- 2차 가중 카파: 등급 3단계(0/1/2, n_levels=3) · 관련 여부 일치: 등급 1 이상 기준",
+             f"- 중재 대상 단위(어느 쌍이든 불일치) {res['n_disagree']}건", ""]
+    for name, st in res["pairs"].items():
+        a1, a2 = st["pair"]
+        lines += [
+            f"## {name} — 함께 판정한 단위 {st['n']}건 (질의 {st['n_queries']}건)", "",
+            "| 항목 | 값 |", "|---|---:|",
+            f"| 등급 완전 일치율 | {st['exact_agreement']:.3f} |",
+            f"| 관련 여부(≥1) 일치율 | {st['relevant_agreement']:.3f} |",
+            f"| 2차 가중 카파 | {st['quadratic_weighted_kappa']:.3f} |",
+            f"| 불일치 단위 수 | {st['n_disagree']} |",
+            f"| {a2} 판정 질의 비율 | {st['n_queries_B']}/{st['n_queries_A']} = {st['b_query_ratio']:.3f} |",
+            "", f"| 집합 | {a1} 판정 질의 | {a2} 판정 질의 |", "|---|---:|---:|",
+        ]
+        for g in SUPPORT_GROUPS:
+            lines.append(f"| {g} | {st['a_queries_by_group'][g]} | {st['b_queries_by_group'][g]} |")
+        lines += ["", f"{a2} 판정 질의 (qid): " + (", ".join(st.get("qids_B", [])) or "없음")]
+        lines += ["", f"| {a1}\\{a2} | 0 | 1 | 2 |", "|---|---:|---:|---:|"]
+        for x in GRADES:
+            lines.append(f"| {x} | " + " | ".join(str(st["confusion"][f"{x}{y}"]) for y in GRADES) + " |")
+        lines.append("")
     return "\n".join(lines) + "\n"
 
 
@@ -258,7 +280,7 @@ def _qrels_markdown(st: dict[str, Any], n_adj: int) -> str:
         f"| 등급 2 단위가 없는 질의 수 | {len(st['queries_without_grade2'])} |",
         f"| 중재로 정한 단위 수 | {n_adj} |",
         "",
-        "등급 2 단위가 없는 질의는 Recall@10(등급 2)와 증거 언어 분해(T5·T6)에서 뺀다.",
+        "등급 2 단위가 없는 질의는 Recall@10(등급 2)와 언어별 보조 값에서 뺀다.",
         "해당 qid: " + (", ".join(st["queries_without_grade2"]) or "없음"),
     ]
     return "\n".join(lines) + "\n"

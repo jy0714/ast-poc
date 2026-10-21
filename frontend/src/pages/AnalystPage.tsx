@@ -7,6 +7,7 @@ interface Message {
   sources?: ChatSource[];
   loading?: boolean;
   uncited?: boolean;  // LLM이 출처 인용 없이 답변 (할루시네이션 위험)
+  external?: boolean;  // 보안 OFF = 케이스 자료를 쓰지 않는 외부 조회 (v4.4 §6)
   tokenUsage?: TokenUsage;  // 토큰 사용량 (비용 산정용)
 }
 
@@ -61,6 +62,7 @@ export default function AnalystPage() {
     let fullContent = '';
     let sources: ChatSource[] = [];
     let uncited = false;
+    const external = !secureMode;  // 보내는 시점의 모드 (응답 도중 토글을 바꿔도 이 질의는 그대로)
     let tokenUsage: TokenUsage | undefined;
 
     try {
@@ -69,7 +71,7 @@ export default function AnalystPage() {
           fullContent += event.content;
           setMessages(prev => {
             const updated = [...prev];
-            updated[assistantIdx] = { role: 'assistant', content: fullContent, loading: true };
+            updated[assistantIdx] = { role: 'assistant', content: fullContent, loading: true, external };
             return updated;
           });
         } else if (event.type === 'sources') {
@@ -97,6 +99,7 @@ export default function AnalystPage() {
           loading: false,
           uncited,
           tokenUsage,
+          external,
         };
         return updated;
       });
@@ -115,6 +118,7 @@ export default function AnalystPage() {
             content: stoppedContent,
             sources,
             loading: false,
+            external,
           };
           return updated;
         });
@@ -135,6 +139,7 @@ export default function AnalystPage() {
               loading: false,
               uncited: result.uncited_response === true,
               tokenUsage: result.token_usage,
+              external,
             };
             return updated;
           });
@@ -208,8 +213,8 @@ export default function AnalystPage() {
               className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${secureMode ? 'translate-x-5' : 'translate-x-0.5'}`}
             />
           </div>
-          <span className={secureMode ? 'text-green-700 font-medium' : 'text-gray-500'}>
-            {secureMode ? '보안 ON' : '보안 OFF'}
+          <span className={secureMode ? 'text-green-700 font-medium' : 'text-amber-700 font-medium'}>
+            {secureMode ? '보안 ON' : '보안 OFF · 외부 조회'}
           </span>
         </label>
 
@@ -220,12 +225,23 @@ export default function AnalystPage() {
         )}
       </div>
 
+      {/* 보안 OFF 안내: 케이스 자료를 쓰지 않는 외부 조회 (v4.4 §6) */}
+      {!secureMode && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-xs text-amber-800">
+          보안 OFF — <strong>케이스 자료를 쓰지 않는 외부 조회</strong>입니다. 케이스의 이메일·문서·채팅과 검색 결과는
+          외부 AI로 보내지 않고, 질문만 보냅니다(인터넷 공개 정보·일반 지식 조사용). 질문에 실명·업체명 등 케이스
+          정보를 넣지 마세요. 케이스 자료로 답을 받으려면 보안 ON으로 질의하세요.
+        </div>
+      )}
+
       {/* 메시지 영역 */}
       <div className="flex-1 overflow-y-auto px-4 py-6 space-y-4">
         {messages.length === 0 && selectedCase && (
           <div className="text-center text-gray-400 mt-20">
             <p className="text-lg">질문을 입력하세요</p>
-            <p className="text-sm mt-1">이 케이스의 문서에서 답변을 찾아드립니다</p>
+            <p className="text-sm mt-1">
+              {secureMode ? '이 케이스의 문서에서 답변을 찾아드립니다' : '외부 조회: 케이스 자료 없이 일반 정보로 답합니다'}
+            </p>
           </div>
         )}
 
@@ -249,8 +265,15 @@ export default function AnalystPage() {
                 {msg.loading && <span className="inline-block w-1.5 h-4 bg-gray-400 animate-pulse ml-0.5 align-middle" />}
               </div>
 
+              {/* 외부 조회 표시 (보안 OFF) */}
+              {msg.role === 'assistant' && msg.external && (
+                <div className="mt-2 inline-block text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-0.5">
+                  케이스 자료를 쓰지 않는 외부 조회
+                </div>
+              )}
+
               {/* 출처 인용 없음 경고 (할루시네이션 위험) */}
-              {!msg.loading && msg.uncited && (
+              {!msg.loading && msg.uncited && !msg.external && (
                 <div className="mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
                   ⚠ 이 응답에는 출처 인용이 포함되어 있지 않습니다. 내용을 직접 검증해 주세요.
                 </div>

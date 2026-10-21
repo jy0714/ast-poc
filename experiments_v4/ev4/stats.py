@@ -57,6 +57,20 @@ def quadratic_weighted_kappa(a: list[int], b: list[int], n_levels: int = 3) -> f
     return float(1 - (w * obs).sum() / denom) if denom > 0 else math.nan
 
 
+def cohen_kappa(a: list[int], b: list[int]) -> float:
+    """두 판정자의 Cohen's kappa (명목형, G1 인용 지지 여부 같은 이진 판정용)
+
+    기대 일치가 1(두 판정자가 모두 한 값만 씀)이면 NaN.
+    """
+    if not a:
+        return math.nan
+    n = len(a)
+    labels = sorted(set(a) | set(b))
+    po = sum(x == y for x, y in zip(a, b, strict=True)) / n
+    pe = sum((a.count(k) / n) * (b.count(k) / n) for k in labels)
+    return float((po - pe) / (1 - pe)) if pe < 1 else math.nan
+
+
 def percentile(values: Iterable[float], q: float) -> float:
     """백분위 (q: 0~100). 값이 없으면 NaN"""
     v = _clean(values)

@@ -37,7 +37,8 @@ FORMAT_ROWS: list[tuple[str, frozenset[str]]] = [
 ROW_ORDER = ["이메일", "채팅", *(r for r, _ in FORMAT_ROWS), "기타"]
 
 # [표 7] 행
-LANG_ROWS = [("한국어", "ko"), ("영어", "en"), ("중국어", "zh")]
+LANG_ROWS = [("한국어", "ko"), ("영어", "en")]
+LOCAL_LABEL = "현지 언어(합산)"  # v4.4 §8: 한국어·영어 외 언어는 합산, 세부는 집계 메모에만
 
 # S4 제외 형식 묶음
 EXCLUDED_GROUPS: list[tuple[str, frozenset[str]]] = [
@@ -236,7 +237,7 @@ def stats_from_parts(
         "by_kind": dict(code_kinds),
     }
 
-    # ── S5 [표 7] 언어 (U2: und 별도 행) ──
+    # ── S5 [표 7] 언어 (v4.4 §8: 한국어·영어·현지 언어(합산)·계, und 는 집계 메모) ──
     lang_units: Counter = Counter(r["lang"] for r in rows.values())
     lang_mixed: Counter = Counter(r["lang"] for r in rows.values() if r["mixed"])
     named = {code for _, code in LANG_ROWS}
@@ -244,8 +245,8 @@ def stats_from_parts(
     for label, code in LANG_ROWS:
         table7[label] = {"units": lang_units.get(code, 0), "mixed": lang_mixed.get(code, 0)}
     other = {k: v for k, v in lang_units.items() if k not in named and k != "und"}
-    table7["기타"] = {"units": sum(other.values()),
-                     "mixed": sum(lang_mixed.get(k, 0) for k in other)}
+    table7[LOCAL_LABEL] = {"units": sum(other.values()),
+                           "mixed": sum(lang_mixed.get(k, 0) for k in other)}
     table7["und"] = {"units": lang_units.get("und", 0), "mixed": lang_mixed.get("und", 0)}
     table7["계"] = {"units": len(rows), "mixed": sum(lang_mixed.values())}
     lang_by_type: dict[str, Counter] = defaultdict(Counter)
@@ -286,6 +287,8 @@ def stats_from_parts(
         "excluded_grouped": dict(excluded_grouped),
         "excluded_types": excluded,
         "errors": dict(bs.get("errors", {}) or {}),
+        "ads_removed": int(counts.get("ads_removed", 0)),
+        "ads_removed_attachments": int(counts.get("ads_removed_attachments", 0)),
         "embedding": bs.get("embedding", {}),
     }
 
@@ -381,13 +384,14 @@ def render_t1(s: dict[str, Any]) -> str:
         "| 언어 | 단위 | 비율 | 그중 혼용 |",
         "|---|---:|---:|---:|",
     ]
-    for label in [*(lb for lb, _ in LANG_ROWS), "기타", "und", "계"]:
+    for label in [*(lb for lb, _ in LANG_ROWS), LOCAL_LABEL, "계"]:
         r = t7[label]
-        name = "판정 불가(und)" if label == "und" else label
         bold = "**" if label == "계" else ""
-        lines.append(f"| {bold}{name}{bold} | {r['units']:,} | {_pct(r['units'], total)} | {r['mixed']:,} |")
-    if s["lang_other_detail"]:
-        lines += ["", "기타 언어 세부: " + ", ".join(f"{k} {v:,}" for k, v in s["lang_other_detail"].items())]
+        lines.append(f"| {bold}{label}{bold} | {r['units']:,} | {_pct(r['units'], total)} | {r['mixed']:,} |")
+    und = t7["und"]["units"]
+    lines += ["", "집계 메모 (표에 넣지 않음):",
+              "- 현지 언어 세부: " + (", ".join(f"{k} {v:,}" for k, v in s["lang_other_detail"].items()) or "없음"),
+              f"- 판정 불가(und) {und:,}건 ({_pct(und, total)}) — 계에 포함, 언어 행에는 없음"]
 
     s2 = s["s2"]
     ri = s2["rerank_input"]
@@ -416,6 +420,8 @@ def render_t1(s: dict[str, Any]) -> str:
         "## 4.1.1절 수치 (S4)",
         "",
         f"- 중복 제거로 지운 단위: {', '.join(f'{k} {v:,}' for k, v in s['duplicates_removed'].items()) or '0'}",
+        f"- 광고 메일 제외(`ads_removed`, 제목이 (광고)·[광고]로 시작): {s.get('ads_removed', 0):,}통 "
+        f"(딸린 첨부 {s.get('ads_removed_attachments', 0):,}개 함께 제외, v4.4 §8)",
     ]
     fw = s["forwarded"]
     lines += [

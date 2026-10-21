@@ -7,6 +7,9 @@
     → 상위 RERANK_TOP_N 단위를 출처로 변환 (헤더 + 대표 파트 본문)
     → 컨텍스트 조합 → LLM 응답 생성 → 출처 포함 결과 반환
 
+보안 모드 OFF(외부 API)는 케이스 자료를 쓰지 않는 외부 조회다: 검색하지 않고, 컨텍스트 없이 질의만
+외부 LLM 에 보내며, 출처를 붙이지 않는다 (v4.4 §6, 라우터도 컨텍스트를 한 번 더 차단).
+
 서비스 후처리(min_source_length, rerank_min_score)는 평가 대상이 아니다. 실험은
 retrieve() 결과를 그대로 평가한다.
 """
@@ -106,9 +109,18 @@ def validate_citations(answer: str, num_sources: int) -> tuple[int, list[int], b
     citation_count = len(matches)
     nums = [int(m) for m in matches]
     invalid = sorted({n for n in nums if n < 1 or n > num_sources})
-    is_refusal = any(p in (answer or "") for p in _REFUSAL_PATTERNS)
-    uncited = citation_count == 0 and not is_refusal
+    uncited = citation_count == 0 and not is_refusal(answer)
     return citation_count, invalid, uncited
+
+
+def extract_citations(answer: str) -> list[int]:
+    """응답의 [출처 N] 번호 목록 (나온 순서, 중복 포함) — validate_citations 와 같은 정규식"""
+    return [int(m) for m in _CITATION_RE.findall(answer or "")]
+
+
+def is_refusal(answer: str) -> bool:
+    """'찾을 수 없습니다'류 거절 답변인지 (validate_citations 와 같은 패턴)"""
+    return any(p in (answer or "") for p in _REFUSAL_PATTERNS)
 
 
 class RAGEngine:
@@ -280,6 +292,10 @@ class RAGEngine:
         """
         is_secure = secure_mode if secure_mode is not None else settings.is_secure_mode
 
+        # 보안 모드 OFF: 케이스 자료를 쓰지 않는 외부 조회 — 검색하지 않고 출처도 붙이지 않는다 (v4.4 §6)
+        if not is_secure:
+            return await self._external_query(question)
+
         # 0. 질의 파싱 (필터 추출 + 쿼리 정제)
         parsed = parse_query(question)
         search_query = parsed.cleaned
@@ -397,6 +413,13 @@ class RAGEngine:
             logger.info(f"query_stream 중단 (검색 전): case={self.case_id}")
             return _empty_stream(), []
 
+        # 보안 모드 OFF: 케이스 자료를 쓰지 않는 외부 조회 — 검색하지 않고 출처도 붙이지 않는다 (v4.4 §6)
+        if not is_secure:
+            logger.info(f"외부 조회 (보안 모드 OFF, 케이스 자료 미사용): case={self.case_id}")
+            return self.llm_router.generate_stream(
+                question=question, context=[], secure_mode=False, case_id=self.case_id, on_complete=on_complete,
+            ), []
+
         # 0. 질의 파싱
         parsed = parse_query(question)
         search_query = parsed.cleaned
@@ -431,6 +454,24 @@ class RAGEngine:
         )
 
         return token_stream, sources
+
+    async def _external_query(self, question: str) -> QueryResult:
+        """보안 모드 OFF 질의 — 케이스 검색 없이 외부 LLM 에 질의만 보낸다 (출처 없음, v4.4 §6)"""
+        token_usage: dict[str, Any] = {}
+
+        def _capture_usage(rec: dict[str, Any]) -> None:
+            token_usage.update(_usage_subset(rec))
+
+        logger.info(f"외부 조회 (보안 모드 OFF, 케이스 자료 미사용): case={self.case_id}")
+        try:
+            answer = await self.llm_router.generate(
+                question=question, context=[], secure_mode=False, case_id=self.case_id, on_complete=_capture_usage,
+            )
+        except Exception as e:
+            logger.error(f"외부 LLM 응답 생성 실패: {e}")
+            answer = f"외부 LLM 응답 생성에 실패했습니다: {e}"
+        return QueryResult(answer=answer, sources=[], case_id=self.case_id, secure_mode=False,
+                           token_usage=token_usage)
 
     def _log_sources(
         self,
@@ -534,6 +575,14 @@ def _to_source(part: Any, score: float, method: str) -> SourceReference:
         page=meta.get("page"),
         lang=str(meta.get("lang") or ""),
     )
+
+
+def format_part_context(part: Any, score: float = 0.0, method: str = "") -> str:
+    """증거 단위 대표 파트 → 서비스가 LLM 에 넣는 컨텍스트 문자열 (RAGEngine.query 와 같은 경로)
+
+    실험 하네스(응답 생성 평가)가 서비스와 같은 컨텍스트를 쓰도록 공개한다 (v4.4 §4.1).
+    """
+    return RAGEngine._format_source_context(_to_source(part, score, method))
 
 
 def _usage_subset(rec: dict[str, Any]) -> dict[str, Any]:

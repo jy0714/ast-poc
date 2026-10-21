@@ -6,7 +6,7 @@
 내부 이메일(PST·EML), Teams 채팅(PST), 문서(PDF/DOCX/PPTX/XLSX/XLS/HTML/EML/MSG)를 통합 검색하는 로컬 RAG 시스템.
 1TB PoC 규모 · GPU: NVIDIA GeForce RTX 3090 24GB (2026-10-16부터 개발·실험 PC) · 케이스 기반 운영
 
-v4 구현 지시서: `docs/CLAUDE_CODE_v4_구현지시서.md` (v4.1) + 추가 지시 `docs/v4/CLAUDE_CODE_v4.2_논문반영_추가지시.md` (v4.2, 충돌 시 v4.2 우선) + `docs/v4/CLAUDE_CODE_v4.3_표준질문45_추가지시.md` (v4.3: 평가는 감사인 표준 질문 45개만, 충돌 시 v4.3 우선). 참조 코드: `docs/v4/ref/`.
+v4 구현 지시서: `docs/CLAUDE_CODE_v4_구현지시서.md` (v4.1) + 추가 지시 `docs/v4/CLAUDE_CODE_v4.2_논문반영_추가지시.md` (v4.2, 충돌 시 v4.2 우선) + `docs/v4/CLAUDE_CODE_v4.3_표준질문45_추가지시.md` (v4.3: 평가는 감사인 표준 질문 45개만, 충돌 시 v4.3 우선) + `docs/v4/CLAUDE_CODE_v4.4_추가지시.md` (v4.4: 프로필 2개·실행 5개·비교 4개·G1 생성 평가·외부 API 격리, 충돌 시 v4.4 우선). 참조 코드: `docs/v4/ref/`.
 
 ## 아키텍처 v4 요약
 
@@ -22,7 +22,7 @@ v4 구현 지시서: `docs/CLAUDE_CODE_v4_구현지시서.md` (v4.1) + 추가 �
 
 ### GPU 자원 (RTX 3090 24GB)
 - 서비스 조건: 임베딩(qwen3-embedding 4B q8) + 재순위(Qwen3-Reranker-4B bf16) + LLM(gemma4:12b) 동시 적재
-- 검색 실험(R1~R9)은 LLM을 내린 상태에서 실행 (`ollama stop gemma4:12b`, 지시서 V11)
+- 검색 실험(논문 R1~R5)은 LLM을 내린 상태에서 실행 (`ollama stop gemma4:12b`, 지시서 V11)
 
 ### 데이터 파이프라인 (Phase A)
 ```
@@ -42,14 +42,14 @@ PST/EML 파일 / 내부 문서
 ### RAG 질의 (Phase B) — `src/rag/retrieval.py` `retrieve()` (서비스·실험 공용)
 ```
 질의 → BM25 상위 50 단위 + Dense 상위 50 단위 → RRF(k=60) → 재순위 상위 30 (Qwen3-Reranker) → 상위 100
-     → 엔진: 상위 단위 컨텍스트 → LLM 응답 (보안 ON: Ollama gemma4:12b / OFF: 외부 API) → 스트리밍 + 출처
+     → 엔진: 상위 단위 컨텍스트 → LLM 응답 (보안 ON: Ollama gemma4:12b) → 스트리밍 + 출처   ※ 보안 OFF: 검색 없이 질의만 외부 API (출처 없음)
 ```
-- 색인 프로필: `hdr-qwen3`(서비스 기본), `nohdr-qwen3`, `hdr-bgem3`(R9 비교 전용). 실험 프로필은 `scripts/build_profiles.py`로 추가
+- 색인 프로필: `hdr-qwen3`(서비스 기본), `nohdr-qwen3`(R4). v4.4부터 `hdr-bgem3`는 만들지 않는다(코드 지원만 남음). 실험 프로필은 `scripts/build_profiles.py`로 추가(체크포인트·`--progress` 건수 JSON)
 - 질의 파서(규칙 기반)의 필터는 `CaseIndex.filter_mask()`로 적용
 
 ### 보안 모드
 - **ON**: 임베딩 + 색인 + 재순위 + LLM 전체 로컬. 데이터 외부 전송 차단
-- **OFF**: 임베딩/색인/재순위는 로컬 유지. LLM만 외부 API로 라우팅. 검색된 단위만 외부 전송
+- **OFF**: **케이스 자료를 쓰지 않는 외부 조회** (v4.4 §6). 검색하지 않고 질의만 외부 API로 보낸다 — 케이스 색인·벡터·검색 결과는 외부로 나가지 않는다(엔진이 검색을 건너뛰고, `LLMRouter`가 컨텍스트를 한 번 더 버림, 외부용 시스템 프롬프트, 출처 없음). UI에 외부 조회 표시. 질문 문장 자체는 막을 수 없어 UI 경고로 대응
 
 ## 영구 저장소 구조
 
@@ -76,9 +76,10 @@ PST/EML 파일 / 내부 문서
 
 ## 실험 하네스 (`experiments_v4/`)
 
-- `cd experiments_v4 && python -m ev4 <명령>`: corpus(T1) · queries(T0) · smoke(동작 점검) · run · pool · judgments(import/agreement/finalize → T0b) · evaluate(T2~T6·T8) · latency(T7) · failures(F1) · env(E1)
-- `config.yaml`: R1~R9 실행 목록·비교 쌍. k값은 RetrievalConfig 기본값 고정. `primary_subset: search`(S17, 검정·Holm·T2~T6·F1 기준)는 실행 전 고정 — 첫 run 이 `runs/primary_subset.json` 에 기록
-- 질의: 표준 질문 45개 `docs/v4/data/queries_45.jsonl` → `experiments_v4/data/queries.jsonl` (dev 없음, search 17·meta 3·nonsearch 25)
+- `cd experiments_v4 && python -m ev4 <명령>`: corpus(T1) · queries(T0) · smoke(동작 점검) · run · pool · judgments(import/agreement/finalize → T0b) · evaluate(T2·비교 4개·T8·언어별 보조 값) · latency(응답 시간 R5 + 답변 생성 → runs/gen/answers.jsonl) · judge gen/g1(답변 판정 시트·G1 [표 14]) · failures(F1) · env(E1)
+- `config.yaml`: 실행 5개(하네스 R2·R4·R6·R7·R8 = `labels` 논문 R1~R5), 사전 비교 4개(R1→R3, R2→R3, R3→R5, R4→R5), 풀 5개. 표·보고서는 논문 번호. k값은 RetrievalConfig 기본값 고정. `primary_subset: search`(S17, 검정·Holm·T2·F1 기준)는 실행 전 고정 — 첫 run 이 `runs/primary_subset.json` 에 기록
+- 질의: 표준 질문 45개 `docs/v4/data/queries_45.jsonl` → `experiments_v4/data/queries.jsonl` (dev 없음, search 17·meta 3·nonsearch 25, 분류 코드 A1·A2·C·D·B·E — v4.4 §3)
+- 판정자: A 45개, B 층화 11개, C(선택, `c_queries`) B 와 겹치지 않는 11개. 일치도는 A–B, A–C 따로. 답변 판정(G1)은 A·B(·C) 모두 S17 전체
 - 실데이터·결과(`data/ runs/ results/ cache/`)는 gitignore
 - `AST_FAKE_MODELS=1 python -m ev4 selftest` — GPU·실데이터 없이 전체 흐름 점검
 
@@ -146,7 +147,7 @@ ruff check src/ tests/ experiments_v4/ --fix          # 린트
 pytest tests/ -q                                      # 테스트
 pytest experiments_v4/tests -q                        # 하네스 테스트
 python -m scripts.run_indexing <case_id>              # 인덱싱 CLI
-python -m scripts.build_profiles <case_id> --profiles nohdr-qwen3 hdr-bgem3
+python -m scripts.build_profiles <case_id> --profiles nohdr-qwen3 --progress data/progress/build.json
 python -m scripts.unit_stats <case_id>                # 단위 통계 (임베딩 없음, T1 초안)
 python -m scripts.repro_kiwi --out experiments_v4/results/S6_kiwi_repro.md   # kiwipiepy 현상 재현 (합성 문자열)
 python -m scripts.bench_embed --grid 16x2 16x8 --num-batch 0 2048   # 임베딩 처리량 (합성 문장, 숫자만 출력)

@@ -129,6 +129,8 @@ export interface ChatResponse {
   citation_count?: number;
   invalid_citations?: number[];
   uncited_response?: boolean;
+  // 보안 OFF = 케이스 자료를 쓰지 않는 외부 조회 (출처 없음, v4.4 §6)
+  external_lookup?: boolean;
   // 토큰 사용량 (외부 API 비용 산정용)
   token_usage?: TokenUsage;
 }
